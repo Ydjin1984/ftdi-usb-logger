@@ -155,6 +155,7 @@ pub struct ToolProcess { pub pid: u32, pub name: String, pub exe: String,
 ```
 
 Правила:
+* `raw.log` начинается баннером старого логера (`# capture start: label=…`, `# tool:`, `# exe: size/sha256`, `# wall(start)`, `# host`), шаги пишутся как `# MARK … START/END N: имя`, сводка — блоком `# PHASE …` и последней строкой `# PHASE-JSON {…}`, в конце сессии — `# totals: …`. Поэтому `raw.log` импортируется обратно и читается старым `parse_family.py`;
 * `events.jsonl` пишется одной задачей-писателем (mpsc), батчами, `flush` не реже 50 мс;
 * размер события ограничен 64 КиБ (длинные дампы режем, `meta.truncated=true`);
 * при аварийном завершении сессия остаётся валидной: недостающие `step_end` восстанавливаются
