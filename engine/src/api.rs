@@ -184,8 +184,32 @@ pub fn router(state: AppState) -> Router {
     }
 
     app.layer(cors)
+        .layer(axum::middleware::from_fn(static_cache_headers))
         .layer(axum::middleware::from_fn(api_json_errors))
         .with_state(state)
+}
+
+/// Кэширование статики UI.
+///
+/// `index.html` обязан ревалидироваться (`no-cache`): иначе после обновления
+/// приложение открывает старые хэшированные ассеты, которых уже нет на диске, и
+/// пользователь видит прошлую версию интерфейса. Файлы `/assets/*` содержат хэш
+/// в имени, поэтому их можно кэшировать навсегда.
+async fn static_cache_headers(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path().to_owned();
+    let mut res = next.run(req).await;
+    let value = if path == "/" || path.ends_with(".html") {
+        Some("no-cache")
+    } else if path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else {
+        None
+    };
+    if let Some(value) = value {
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    }
+    res
 }
 
 /// Все ошибки под `/api/` отдаём JSON-ом `{"error": …}` — в том числе отказы
@@ -297,8 +321,45 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         "python": st.cfg.python.to_string_lossy(),
         "universal": true,
         "capabilities": capabilities,
+        // Права администратора нужны Frida-хукам: UI показывает зелёный/красный индикатор.
+        "admin": is_elevated(),
     }))
 }
+
+/// Запущен ли движок с повышенными правами.
+///
+/// Проверка намеренно без WinAPI: два независимых «админских» признака.
+/// 1) `net session` отвечает успехом только администратору (нужен запущенный
+///    Server-сервис — он есть по умолчанию на Windows 10/11);
+/// 2) прямое чтение `\\.\PHYSICALDRIVE0` разрешено только администратору —
+///    страхует, если Server-сервис выключен.
+///
+/// Ответ кэшируется: в пределах процесса повышение прав не меняется, а health
+/// опрашивается каждые несколько секунд.
+fn is_elevated() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            let net_ok = std::process::Command::new("net")
+                .arg("session")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if net_ok {
+                return true;
+            }
+            std::fs::File::open(r"\\.\PHYSICALDRIVE0").is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    })
+}
+
 
 /// `EnvCapabilities`: что реально доступно на машине (docs/02 §11.2).
 fn env_capabilities() -> EnvCapabilities {

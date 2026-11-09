@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 param(
     [string]$Results = (Join-Path $PSScriptRoot "out\results.json"),
     [string]$OutFile = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path "docs\05-edge-cases.md")

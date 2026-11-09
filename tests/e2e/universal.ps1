@@ -1,4 +1,4 @@
-# Универсальный захват: живой e2e на MS4x Flasher (VCP/overlapped) через UIA.
+﻿# Универсальный захват: живой e2e на MS4x Flasher (VCP/overlapped) через UIA.
 #
 #   pwsh -File tests\e2e\universal.ps1
 #   pwsh -File tests\e2e\universal.ps1 -Port 7834 -StartApp

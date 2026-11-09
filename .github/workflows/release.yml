@@ -1,0 +1,89 @@
+name: release
+
+# Сборка независимого exe/установщика и публикация в GitHub Releases.
+#
+#   * push тега v*        -> собрать и прикрепить Setup.exe + portable ZIP к релизу;
+#   * ручной запуск       -> собрать и положить файлы в артефакты workflow.
+#
+# Артефакты: FTDI_USB_Logger_Setup.exe (установщик) и FTDI_USB_Logger_portable.zip.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      # Embeddable Python для portable-сборки — 3.12.x, поэтому и frida ставим из 3.12.
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install frida
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install frida
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build product (engine + UI + launcher)
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Build portable + installer
+        shell: pwsh
+        run: ./scripts/build-installer.ps1
+
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $errors = @()
+          $launcher = "dist/FTDI_USB_Logger/FTDI_USB_Logger.exe"
+          $setup = "dist/FTDI_USB_Logger_Setup.exe"
+          $zip = "build/FTDI_USB_Logger_portable.zip"
+          foreach ($f in @($launcher, $setup, $zip)) {
+            if (-not (Test-Path -LiteralPath $f)) { $errors += "нет файла: $f" }
+          }
+          if (Test-Path -LiteralPath $launcher) {
+            $bytes = [System.IO.File]::ReadAllBytes($launcher)
+            if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains("requireAdministrator")) {
+              $errors += "в лаунчере нет UAC-манифеста"
+            }
+          }
+          Get-ChildItem dist/FTDI_USB_Logger_Setup.exe, build/FTDI_USB_Logger_portable.zip -ErrorAction SilentlyContinue |
+            ForEach-Object { "{0}: {1:N1} МБ" -f $_.Name, ($_.Length / 1MB) }
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FTDI_USB_Logger-windows
+          path: |
+            dist/FTDI_USB_Logger_Setup.exe
+            build/FTDI_USB_Logger_portable.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/FTDI_USB_Logger_Setup.exe
+            build/FTDI_USB_Logger_portable.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

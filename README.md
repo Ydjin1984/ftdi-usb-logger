@@ -207,18 +207,28 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 ## Установка на другую машину (независимая сборка)
 
 Приложение не требует установленных Python/Frida/Rust: в установщик и portable-версию
-встроен Python 3.12 с Frida.
+встроен Python 3.12 с Frida. Готовые сборки публикуются в **GitHub Releases**
+(workflow `.github/workflows/release.yml`, тег `v*`) — оттуда `FTDI_USB_Logger_Setup.exe`
+и portable ZIP можно скачать и установить без сборки из исходников.
 
 | Что | Где | Размер | Как ставится |
 |---|---|---|---|
-| **Установщик** | `dist\FTDI_USB_Logger_Setup.exe` | ≈43 МБ | per-user, без администратора: `%LOCALAPPDATA%\FTDI_USB_Logger`, ярлыки на рабочем столе и в меню Пуск, запись в «Установка и удаление программ», uninstall |
-| **Portable ZIP** | `build\FTDI_USB_Logger_portable.zip` | ≈64 МБ | распаковать куда угодно и запустить `logger.cmd`; ничего не устанавливается |
+| **Установщик** | `FTDI_USB_Logger_Setup.exe` (GitHub Releases, `dist\`) | ≈43 МБ | запустить, разрешить UAC; per-user установка в `%LOCALAPPDATA%\FTDI_USB_Logger`, ярлыки на рабочем столе и в меню Пуск, запись в «Установка и удаление программ», uninstall |
+| **Portable ZIP** | `FTDI_USB_Logger_portable.zip` (GitHub Releases, `build\`) | ≈64 МБ | распаковать куда угодно и запустить `FTDI_USB_Logger.exe`; ничего не устанавливается |
 | Обычный dist | `dist\FTDI_USB_Logger\` | ≈7 МБ | для машины, где Python+Frida уже есть |
 
-- **Splash при старте**: логотип из `assets/splash.png` показывается, пока движок поднимается,
-  и закрывается сам, когда `/api/health` ответил. Скрипт — `scripts/splash.ps1`.
-- **Иконка приложения**: `assets/app.ico` — на ярлыках и в панели задач (UI-окно получает
-  favicon из `ui/public/favicon.png`).
+- **Независимый лаунчер** `FTDI_USB_Logger.exe` (`launcher/Launcher.cs`, сборка —
+  `scripts/build-launcher.ps1`): показывает логотип **2 секунды**, затем поднимает движок и
+  открывает окно журнала. Иконка — `assets/app.ico`, логотип `assets/splash.png` встроен
+  в exe ресурсом; манифест требует права администратора.
+- **Права администратора**: и `FTDI_USB_Logger.exe`, и `logger.cmd` всегда запрашивают UAC —
+  движку нужны права для Frida-хуков и чтения чужих процессов. Само окно UI открывается
+  уже без администратора (через Explorer).
+- **Splash при старте**: логотип горит ровно 2 секунды (даже если движок поднялся раньше);
+  если движок не ответил за 60 с — лаунчер покажет ошибку и подсказку про `logger.err.log`.
+  Старый резервный путь без лаунчера: `scripts/splash.ps1`.
+- **Иконка приложения**: `assets/app.ico` — в exe, на ярлыках и в панели задач
+  (UI-окно получает favicon из `ui/public/favicon.png`).
 - Установщик не подписан: при первом запуске Windows SmartScreen может показать
   «Неизвестный издатель» → «Подробнее» → «Выполнить всё равно». Для распространения нужен
   код-сертификат (не входит в репозиторий).
@@ -227,15 +237,19 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 ### Сборка установщика
 
 ```powershell
-# 1) portable: dist + встроенный Python + frida  → build\FTDI_USB_Logger_portable.zip
-powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
+# 0) движок + UI + независимый лаунчер -> dist\FTDI_USB_Logger\ (включая FTDI_USB_Logger.exe)
+pwsh -File scripts\build.ps1
 
-# 2) setup.exe (7-Zip SFX, per-user установка)   → dist\FTDI_USB_Logger_Setup.exe
-powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
+# 1) portable: dist + встроенный Python + frida  -> build\FTDI_USB_Logger_portable.zip
+pwsh -File scripts\build-portable.ps1
+
+# 2) setup.exe (7-Zip SFX, per-user установка)   -> dist\FTDI_USB_Logger_Setup.exe
+pwsh -File scripts\build-installer.ps1
 ```
 
-Для сборки нужны 7-Zip и интернет (первый раз скачивается embeddable Python, кешируется
-в `build\cache`). Установка/удаление: `scripts\installer\install.cmd|ps1`, `uninstall.cmd|ps1`.
+Для сборки нужны .NET Framework 4.x (csc для лаунчера), 7-Zip и интернет (первый раз
+скачивается embeddable Python, кешируется в `build\cache`). Установка/удаление:
+`scripts\installer\install.cmd|ps1`, `uninstall.cmd|ps1`.
 
 ## Как логировать
 

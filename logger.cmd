@@ -1,24 +1,46 @@
 @echo off
 rem ============================================================================
 rem  FTDI/USB Logger — запуск продукта (двойной клик / ярлык на рабочем столе).
+rem
+rem  Всегда запускается от имени администратора: движку нужны права для
+rem  Frida-хуков и чтения чужих процессов. Если прав нет — перезапускает сам
+rem  себя через UAC (Start-Process -Verb RunAs).
+rem
+rem  Если рядом (в dist) есть FTDI_USB_Logger.exe — передаёт запуск ему:
+rem  независимый лаунчер сам показывает логотип 2 секунды, поднимает движок и
+rem  открывает интерфейс. Старый сценарий (splash.ps1 + движок) остаётся
+rem  запасным на случай сборки без лаунчера.
+rem
 rem  Один и тот же файл работает в двух раскладках:
 rem    * dist\FTDI_USB_Logger\logger.cmd  — рядом лежит ftdi-logger.exe,
 rem      ROOT для движка = этот же каталог (там ui\dist, sidecar, sessions);
 rem    * <репозиторий>\logger.cmd        — exe в dist\FTDI_USB_Logger\.
 rem
 rem  Поведение:
-rem    1) если http://127.0.0.1:PORT/api/health уже отвечает — открывает окно
-rem       работающего экземпляра и выходит 0 («уже запущено»);
-rem    2) запускает exe скрыто, stdout/stderr — в logger.out.log / logger.err.log;
-rem    3) ждёт health до ~8 с; если не поднялся — показывает хвост лога, кто занял
-rem       порт (netstat), подсказку про смену порта и держит окно 15 с.
+rem    1) запрашивает права администратора (UAC), если их нет;
+rem    2) если есть лаунчер — запускает его (логотип 2 с -> приложение);
+rem    3) иначе: health уже отвечает -> открывает окно работающего экземпляра;
+rem    4) иначе: запускает exe скрыто, stdout/stderr — в logger.out.log /
+rem       logger.err.log, ждёт health до ~8 с, при неудаче показывает хвост лога.
 rem
 rem  Для отладки/автотестов (необязательно):
-rem    FTDI_LOGGER_PORT=7812   — другой порт
-rem    FTDI_LOGGER_NO_OPEN=1   — не открывать окно UI
+rem    FTDI_LOGGER_PORT=7812      — другой порт
+rem    FTDI_LOGGER_NO_OPEN=1      — не открывать окно UI
+rem    FTDI_LOGGER_NO_ELEVATE=1   — не запрашивать UAC (движку не хватит прав)
+rem    FTDI_LOGGER_DRY_RUN=1      — показать, что будет запущено, и выйти
 rem ============================================================================
 chcp 65001 >nul 2>&1
 setlocal EnableExtensions
+
+rem --- 0. Права администратора ------------------------------------------------
+if not defined FTDI_LOGGER_NO_ELEVATE (
+    net session >nul 2>&1
+    if errorlevel 1 (
+        echo [logger] Запрашиваю права администратора...
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs -WorkingDirectory '%~dp0'" 2>nul
+        exit /b 0
+    )
+)
 
 set "PORT=7811"
 if defined FTDI_LOGGER_PORT set "PORT=%FTDI_LOGGER_PORT%"
@@ -34,11 +56,28 @@ if exist "%~dp0ftdi-logger.exe" (
     set "DIST=%ROOT%\dist\FTDI_USB_Logger"
 )
 set "EXE=%DIST%\ftdi-logger.exe"
+set "LAUNCHER=%DIST%\FTDI_USB_Logger.exe"
 set "OUTLOG=%DIST%\logger.out.log"
 set "ERRLOG=%DIST%\logger.err.log"
 set "HEALTH=http://127.0.0.1:%PORT%/api/health"
 
 if not exist "%EXE%" goto :not_built
+
+rem --- 0b. Dry-run для автотестов: что и откуда будет запущено ----------------
+if defined FTDI_LOGGER_DRY_RUN (
+    echo [dry-run] root:     "%ROOT%"
+    echo [dry-run] launcher: "%LAUNCHER%"
+    echo [dry-run] engine:   "%EXE%"
+    echo [dry-run] port:     %PORT%
+    exit /b 0
+)
+
+rem --- 1. Независимый лаунчер: логотип 2 с, старт движка, окно UI -------------
+if exist "%LAUNCHER%" (
+    set "FTDI_LOGGER_PORT=%PORT%"
+    start "" "%LAUNCHER%"
+    exit /b 0
+)
 
 rem --- 1. Уже запущено? health отвечает -> показать существующее окно ----------
 rem HttpClient без прокси: неудачный запрос не должен ждать системный прокси.

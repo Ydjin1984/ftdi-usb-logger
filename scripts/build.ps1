@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Сборка продукта FTDI/USB Logger.
 
@@ -211,6 +211,20 @@ if (Test-Path -LiteralPath $splashScript) {
 # поэтому копируется в dist как есть, без подстановки путей.
 Copy-Item -LiteralPath (Join-Path $Root 'logger.cmd') -Destination (Join-Path $DistDir 'logger.cmd') -Force
 Write-Host '  + logger.cmd'
+
+# ── 4b. Независимый лаунчер (FTDI_USB_Logger.exe) ───────────────────────────
+# Отдельный exe с иконкой, встроенным логотипом (2 c) и UAC-манифестом
+# администратора. Именно его запускают ярлыки и установщик.
+Step 'Собираю лаунчер'
+$launcherScript = Join-Path $Root 'scripts\build-launcher.ps1'
+if (Test-Path -LiteralPath $launcherScript) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $launcherScript -DistDir $DistDir
+    if ($LASTEXITCODE -ne 0) { Fail ('build-launcher.ps1 завершился с кодом ' + $LASTEXITCODE) }
+    Write-Host '  + FTDI_USB_Logger.exe'
+}
+else {
+    Warn 'нет scripts\build-launcher.ps1 — независимый лаунчер не собран'
+}
 
 # ── 5. Итог ─────────────────────────────────────────────────────────────────
 Step 'Готово'

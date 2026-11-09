@@ -4,7 +4,7 @@ Add-Type -AssemblyName System.Windows.Forms
 $dst = $PSScriptRoot
 $silent = [bool]$env:FTDI_LOGGER_SILENT
 
-Get-Process ftdi-logger -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process ftdi-logger,FTDI_USB_Logger -ErrorAction SilentlyContinue | Stop-Process -Force
 
 $ws = New-Object -ComObject WScript.Shell
 Remove-Item -Force (Join-Path ([Environment]::GetFolderPath("Desktop")) "FTDI USB Logger.lnk")

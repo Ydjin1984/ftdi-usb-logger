@@ -14,16 +14,20 @@ if (-not $dst) { $dst = Join-Path $env:LOCALAPPDATA "FTDI_USB_Logger" }
 $silent = [bool]$env:FTDI_LOGGER_SILENT
 
 Write-Host "[setup] установка в $dst"
-Get-Process ftdi-logger -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process ftdi-logger,FTDI_USB_Logger -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 & robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "ошибка копирования (robocopy $LASTEXITCODE)" }
 Copy-Item (Join-Path $dst "app.ico") (Join-Path $dst "ftdi-logger.ico") -Force -ErrorAction SilentlyContinue
 
+# Ярлыки ведут на независимый лаунчер (иконка + логотип 2 c + UAC); если его
+# нет (старая сборка) — откатываемся на logger.cmd.
+$target = Join-Path $dst "FTDI_USB_Logger.exe"
+if (-not (Test-Path -LiteralPath $target)) { $target = Join-Path $dst "logger.cmd" }
+
 if (-not $silent) {
     $ws = New-Object -ComObject WScript.Shell
     $icon = Join-Path $dst "ftdi-logger.ico"
-    $target = Join-Path $dst "logger.cmd"
     $desktop = [Environment]::GetFolderPath("Desktop")
     $lnk = $ws.CreateShortcut((Join-Path $desktop "FTDI USB Logger.lnk"))
     $lnk.TargetPath = $target
@@ -68,7 +72,7 @@ if (-not $silent) {
     [System.Windows.Forms.MessageBox]::Show(
         "FTDI/USB Logger установлен." + [Environment]::NewLine + "Ярлык на рабочем столе и в меню Пуск.",
         "FTDI/USB Logger") | Out-Null
-    Start-Process -FilePath (Join-Path $dst "logger.cmd") -WorkingDirectory $dst
+    Start-Process -FilePath (Join-Path $dst "FTDI_USB_Logger.exe") -WorkingDirectory $dst
 }
 exit 0
 

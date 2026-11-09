@@ -1,4 +1,4 @@
-# Сборка portable-версии: dist + встроенный Python с frida (на чужой машине ничего ставить не нужно).
+﻿# Сборка portable-версии: dist + встроенный Python с frida (на чужой машине ничего ставить не нужно).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1 -SkipBuild

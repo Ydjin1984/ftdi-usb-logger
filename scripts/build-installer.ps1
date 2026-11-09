@@ -1,4 +1,4 @@
-# Сборка установщика FTDI/USB Logger (per-user, без администратора).
+﻿# Сборка установщика FTDI/USB Logger (per-user, без администратора).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 #
@@ -6,7 +6,8 @@
 # embeddable Python (кешируется в build\cache).
 # Результат: dist\FTDI_USB_Logger_Setup.exe
 param(
-    [switch]$SkipPortable
+    [switch]$SkipPortable,
+    [string]$PythonVersion = ""
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -24,9 +25,15 @@ if (-not (Test-Path $sfxModule)) { throw "не найден 7z.sfx рядом с
 
 if (-not $SkipPortable) {
     Write-Host "==> portable-сборка" -ForegroundColor Cyan
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\build-portable.ps1")
+    $portableArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "scripts\build-portable.ps1"))
+    if ($PythonVersion) { $portableArgs += @("-PythonVersion", $PythonVersion) }
+    & powershell @portableArgs
+    if ($LASTEXITCODE -ne 0) { throw "build-portable.ps1 завершился с кодом $LASTEXITCODE" }
 }
 if (-not (Test-Path (Join-Path $PortableApp "ftdi-logger.exe"))) { throw "нет portable-сборки: $PortableApp" }
+if (-not (Test-Path (Join-Path $PortableApp "FTDI_USB_Logger.exe"))) {
+    throw "в portable-сборке нет лаунчера FTDI_USB_Logger.exe — пересоберите scripts\build.ps1 (нужен csc из .NET Framework 4.x)"
+}
 
 Write-Host "==> готовлю payload" -ForegroundColor Cyan
 if (Test-Path $InstallerDir) { Remove-Item $InstallerDir -Recurse -Force }
@@ -41,12 +48,15 @@ Copy-Item (Join-Path $Root "scripts\installer\uninstall.ps1") (Join-Path $Payloa
 $readme = @"
 FTDI/USB Logger — установка
 
-1. Запустите FTDI_USB_Logger_Setup.exe.
-2. Программа установится в %LOCALAPPDATA%\FTDI_USB_Logger (без прав администратора),
+1. Запустите FTDI_USB_Logger_Setup.exe и разрешите запрос UAC: программа всегда
+   работает от имени администратора (это нужно Frida-хукам и чужим процессам).
+2. Программа установится в %LOCALAPPDATA%\FTDI_USB_Logger,
    создаст ярлыки на рабочем столе и в меню Пуск и запустится.
-3. Удаление — ярлык «Удалить FTDI/USB Logger» в меню Пуск (сессии можно сохранить).
+3. Запуск: ярлык «FTDI USB Logger» -> 2 секунды логотип -> окно журнала.
+4. Удаление — ярлык «Удалить FTDI/USB Logger» в меню Пуск (сессии можно сохранить).
 
-Портативная версия: распакуйте FTDI_USB_Logger_portable.zip и запустите logger.cmd.
+Портативная версия: распакуйте FTDI_USB_Logger_portable.zip и запустите
+FTDI_USB_Logger.exe (тоже с правами администратора).
 "@
 Set-Content -Path (Join-Path $Payload "README.txt") -Value $readme -Encoding UTF8
 

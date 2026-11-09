@@ -1,4 +1,4 @@
-# BMW Scanner 1.4.0 (P.A.Soft): живой e2e — приложение ходит в адаптер через FTDI D2XX.
+﻿# BMW Scanner 1.4.0 (P.A.Soft): живой e2e — приложение ходит в адаптер через FTDI D2XX.
 #
 #   pwsh -File tests\e2e\bmw-scanner.ps1
 #   pwsh -File tests\e2e\bmw-scanner.ps1 -StartApp -Port 7848

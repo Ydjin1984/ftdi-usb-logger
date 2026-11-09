@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
   Жёсткие e2e-проверки крайних случаев FTDI/USB Logger (API, импорт, захват, файлы, UI).
