@@ -1,0 +1,43 @@
+{
+  "schema": "old-parse-family-golden/v1",
+  "log": {
+    "file": "winkfp-e2e-logger.out",
+    "path": "D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-logger.out",
+    "bytes": 194351,
+    "lines": 847,
+    "sha256": "702cd8bcd498b778b495237b0650c43e6a3f2beb6cc1628cb00b1f1783868508"
+  },
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe E:\\Replica\\work\\orig-capture\\parse_family.py --log D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-logger.out --gap 2.0",
+    "gap_seconds": 2.0
+  },
+  "preamble_lines": 842,
+  "sessions": [],
+  "totals": {
+    "sessions": 0,
+    "telegrams": 0,
+    "tx_bytes": 0,
+    "rx_bytes": 0,
+    "reads": 0,
+    "filehash": 0,
+    "marks": 0,
+    "files": 0,
+    "errors": 0
+  },
+  "side_artifacts": [],
+  "cli": {
+    "exit_code": 0,
+    "stdout_file": "winkfp-e2e-logger.out.parse.out.txt",
+    "stderr_file": "winkfp-e2e-logger.out.parse.err.txt"
+  },
+  "stdout_crosscheck": {
+    "method": "regex over CLI stdout: СЕССИЯ/ИТОГО/ПОТОКИ ЧТЕНИЯ",
+    "stdout_sessions": [],
+    "stdout_itogo": [],
+    "stdout_read_streams": 0,
+    "match": true,
+    "mismatches": []
+  }
+}

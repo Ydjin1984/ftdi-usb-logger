@@ -1,0 +1,22 @@
+Лог: D:\FTDI_USB_Logger\reference\logs\winkfp-e2e-logger.out
+Преамбула (842 строк, первые 20):
+  ==============================================================================
+   ЛОГЕР — блок: WinKFP
+     приложение : C:\EC-APPS\NFS\BIN\winkfpt.exe
+     сессия     : E:\Replica\work\orig-capture\_winkfp_e2e\proj
+     лог        : E:\Replica\work\orig-capture\_winkfp_e2e\proj\capture.log
+     EDIABAS    : Interface=STD:OBD; obd.ini [OBD] Port=Com1 Hardware=USB; трассы=C:\EDIABAS\TRACE
+     трассы     : E:\Replica\work\orig-capture\_winkfp_e2e\proj\trace (api.trc + IFH.trc → job-уровень в сводках шагов)
+  ==============================================================================
+    # EDIABAS.INI: Interface=STD:OBD TracePath=C:\EDIABAS\TRACE ApiTrace=1 IfhTrace=1
+    # EDIABAS OBD.INI [OBD]: Port=Com1; Hardware=USB; RETRY=ON
+    # WinKFP ini: API_TRACE=1 IFH_TRACE=1 SCHNELLE_BAUDRATE=OFF TEST_CHECKSUMME=ON
+    # EDIABAS trace C:\EDIABAS\TRACE\IFH.trc size=311654 mtime=2026-10-15 20:21:19
+    # EDIABAS trace C:\EDIABAS\TRACE\api.trc size=46714 mtime=2026-10-15 20:21:19
+  Как пользоваться: напиши, что делаешь (например «нажал идентификаторы») и Enter —
+  откроется шаг; сделай действие в приложении и нажми Enter — шаг закроется сводкой.
+  Команды: s — скриншот, f — файлы и хеши, p — разбор на сейчас, h — помощь, q — выход.
+  Запись под логером не идёт? x — снять хуки (A/B: повторить операцию), r — вернуть хуки.
+  [шаг 1] что делаешь?   захват не наш (--reuse/--no-capture) — команда некому адресоваться
+    хуки сняты — повтори операцию в приложении; 'r' вернёт хуки.
+  [шаг 1] что делаешь?   ШАГ 1 ОТКРЫТ: читаю идентификаторы — делай действие в приложении.

@@ -1,0 +1,146 @@
+{
+  "schema": "old-parse-family-golden/v1",
+  "log": {
+    "file": "winkfp-e2e-capture.log",
+    "path": "D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-capture.log",
+    "bytes": 312250,
+    "lines": 4033,
+    "sha256": "29fce2e38d9d311fad60b406a39adf9b008b214d1115cd462c4b345c8495fe01"
+  },
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe E:\\Replica\\work\\orig-capture\\parse_family.py --log D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-capture.log --gap 2.0",
+    "gap_seconds": 2.0
+  },
+  "preamble_lines": 1,
+  "sessions": [
+    {
+      "index": 0,
+      "label": "WinKFP",
+      "stamp": "=2026-10-12 02:04:20",
+      "telegrams": 248,
+      "exchanges": 248,
+      "tx_bytes": 22026,
+      "rx_bytes": 25523,
+      "rx_chunks": 3745,
+      "cmd_hist": {
+        "READ(0x06)": 12,
+        "cmd=0x00": 3,
+        "cmd=0x07": 223,
+        "cmd=0x0D": 7,
+        "cmd=0x90": 3
+      },
+      "resp_hist": {
+        "A0": 247,
+        "unparsed(12 0a)": 1
+      },
+      "reads": [
+        {
+          "start": 261472,
+          "len": 92,
+          "blocks": 2,
+          "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+        },
+        {
+          "start": 261472,
+          "len": 46,
+          "blocks": 1,
+          "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+        },
+        {
+          "start": 261472,
+          "len": 92,
+          "blocks": 2,
+          "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+        },
+        {
+          "start": 261472,
+          "len": 46,
+          "blocks": 1,
+          "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+        },
+        {
+          "start": 16358,
+          "len": 16,
+          "blocks": 1,
+          "sha256": "9f47eb7d5ca8480098c649bd9cba2e72106838b5ba960636df5204947d7dbb3e"
+        },
+        {
+          "start": 261296,
+          "len": 70,
+          "blocks": 1,
+          "sha256": "44f2b5292875a29bfd3a8714f89ef86485aebc5216e325e3dd35e07510381684"
+        },
+        {
+          "start": 261472,
+          "len": 92,
+          "blocks": 2,
+          "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+        },
+        {
+          "start": 261472,
+          "len": 46,
+          "blocks": 1,
+          "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+        },
+        {
+          "start": 83357,
+          "len": 1,
+          "blocks": 1,
+          "sha256": "18ac3e7343f016890c510e93f935261169d9e3f565436429830faf0934f4f8e4"
+        }
+      ],
+      "filehash": [],
+      "marks": 0,
+      "files": 0,
+      "errors": 0,
+      "ovl_zero": 0
+    }
+  ],
+  "totals": {
+    "sessions": 1,
+    "telegrams": 248,
+    "tx_bytes": 22026,
+    "rx_bytes": 25523,
+    "reads": 9,
+    "filehash": 0,
+    "marks": 0,
+    "files": 0,
+    "errors": 0
+  },
+  "side_artifacts": [
+    "tx-stream.bin",
+    "rx-stream.bin",
+    "stream-index.tsv",
+    "reads/"
+  ],
+  "cli": {
+    "exit_code": 0,
+    "stdout_file": "winkfp-e2e-capture.log.parse.out.txt",
+    "stderr_file": "winkfp-e2e-capture.log.parse.err.txt"
+  },
+  "stdout_crosscheck": {
+    "method": "regex over CLI stdout: СЕССИЯ/ИТОГО/ПОТОКИ ЧТЕНИЯ",
+    "stdout_sessions": [
+      {
+        "label": "WinKFP",
+        "start": "=2026-10-12 02:04:20",
+        "exchanges": 248,
+        "marks": 0,
+        "files": 0,
+        "errors": 0
+      }
+    ],
+    "stdout_itogo": [
+      {
+        "exchanges": 248,
+        "tx_bytes": 22026,
+        "rx_bytes": 25523
+      }
+    ],
+    "stdout_read_streams": 9,
+    "match": true,
+    "mismatches": []
+  }
+}

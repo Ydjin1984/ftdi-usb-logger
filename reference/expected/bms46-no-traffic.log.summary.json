@@ -1,0 +1,62 @@
+{
+  "schema": "old-parse-family-golden/v1",
+  "log": {
+    "file": "bms46-no-traffic.log",
+    "path": "D:\\FTDI_USB_Logger\\reference\\logs\\bms46-no-traffic.log",
+    "bytes": 364,
+    "lines": 7,
+    "sha256": "9d13ee87e3baa86d957fede54a0af9c9073c2dff77da44b063b87d9350cb40ca"
+  },
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe E:\\Replica\\work\\orig-capture\\parse_family.py --log D:\\FTDI_USB_Logger\\reference\\logs\\bms46-no-traffic.log --gap 2.0",
+    "gap_seconds": 2.0
+  },
+  "preamble_lines": 1,
+  "sessions": [
+    {
+      "index": 0,
+      "label": "bms46-orig-live",
+      "stamp": "2026-10-11 22:58:09",
+      "telegrams": 0,
+      "exchanges": 0,
+      "tx_bytes": 0,
+      "rx_bytes": 0,
+      "rx_chunks": 0,
+      "cmd_hist": {},
+      "resp_hist": {},
+      "reads": [],
+      "filehash": [],
+      "marks": 0,
+      "files": 0,
+      "errors": 0,
+      "ovl_zero": 0
+    }
+  ],
+  "totals": {
+    "sessions": 1,
+    "telegrams": 0,
+    "tx_bytes": 0,
+    "rx_bytes": 0,
+    "reads": 0,
+    "filehash": 0,
+    "marks": 0,
+    "files": 0,
+    "errors": 0
+  },
+  "side_artifacts": [],
+  "cli": {
+    "exit_code": 0,
+    "stdout_file": "bms46-no-traffic.log.parse.out.txt",
+    "stderr_file": "bms46-no-traffic.log.parse.err.txt"
+  },
+  "stdout_crosscheck": {
+    "method": "regex over CLI stdout: СЕССИЯ/ИТОГО/ПОТОКИ ЧТЕНИЯ",
+    "stdout_sessions": [],
+    "stdout_itogo": [],
+    "stdout_read_streams": 0,
+    "match": true,
+    "mismatches": []
+  }
+}

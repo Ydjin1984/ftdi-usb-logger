@@ -1,0 +1,4 @@
+# Sidecar FTDI/USB Logger: Python-мост к Frida.
+# Ставится в тот же python.exe, который движок запускает как --python / Config.python.
+# Проверено: Python 3.12.4 + frida 17.23.3 (Windows x64).
+frida>=17,<18

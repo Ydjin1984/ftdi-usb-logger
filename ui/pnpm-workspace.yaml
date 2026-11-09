@@ -1,0 +1,4 @@
+# pnpm 11 читает настройки жизненного цикла из этого файла.
+# esbuild нужен postinstall, иначе pnpm install завершается с ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  esbuild: true

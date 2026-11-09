@@ -1,0 +1,44 @@
+Лог: D:\FTDI_USB_Logger\reference\logs\ftd2xx-bms46-session.log
+  сырые потоки: tx-stream.bin (1789 B) | rx-stream.bin (2834 B) | stream-index.tsv
+================================================================================================
+СЕССИЯ ?                        start=2026-10-12 00:22:30   обменов=201   mark=0   файлов=0   ошибок=0
+------------------------------------------------------------------------------------------------
+КОНФИГУРАЦИЯ ПОРТА:
+  +    2.673s  FT_GetDeviceInfo(handle=0x24e581720c0) rc=17 serial="" desc="`$(YN"
+  +    2.673s  FT_GetDeviceInfo(handle=0x24e581720c0) rc=0 serial="A63UJ38H" desc="D-CAN"
+  +    2.686s  FT_GetDeviceInfo(handle=0x24e58172000) rc=17 serial="" desc="`$(YN"
+  +    2.686s  FT_GetDeviceInfo(handle=0x24e58172000) rc=0 serial="A63UJ38H" desc="D-CAN"
+  +    2.706s  FT_GetDeviceInfo(handle=0x24e58171f40) rc=17 serial="" desc="`$(YN"
+  +    2.706s  FT_GetDeviceInfo(handle=0x24e58171f40) rc=0 serial="A63UJ38H" desc="D-CAN"
+  +    2.713s  FT_GetDeviceInfoDetail idx=0 rc=0 flags=0 type=5 serial="A63UJ38H" desc="D-CAN"
+  +    2.761s  FT_GetDeviceInfo(handle=0x24e591f9000) rc=17 serial="0" desc="ST"
+  +    2.761s  FT_GetDeviceInfo(handle=0x24e591f9000) rc=0 serial="A63UJ38H" desc="D-CAN"
+  +    2.761s  FT_GetDeviceInfo(handle=0x24e591f9000) rc=0 serial="null" desc="null"
+  +    2.761s  FT_SetDataCharacteristics(handle=0x24e591f9000, wl=8 sb=0 parity=0) rc=0
+  +    2.762s  FT_SetFlowControl(handle=0x24e591f9000, flags=0) rc=0
+  +    2.762s  FT_SetBaudRate(handle=0x24e591f9000, 9600) rc=0
+  +    3.077s  FT_SetBaudRate(handle=0x24e591f9000, 9600) rc=0
+  +    3.079s  FT_SetDataCharacteristics(handle=0x24e591f9000, wl=8 sb=2 parity=2) rc=0
+  +    3.081s  FT_SetFlowControl(handle=0x24e591f9000, flags=0) rc=0
+  +    3.102s  FT_SetTimeouts(handle=0x24e591f9000, rd=3000 wr=3000) rc=0
+  +    3.141s  FT_GetDeviceInfo(handle=0x24e591f9000) rc=0 serial="A63UJ38H" desc="D-CAN"
+------------------------------------------------------------------------------------------------
+ОБМЕН (по TX-посылкам; одинаковые подряд склеены xN):
+  +    94.086s  cmd=0x00 00 16                   echo=y -> A0 payload=42B 31 34 33 30 39 34 … (42 B)
+  +    94.254s  cmd=0x0D 0d 1b                   echo=y -> A0 payload=72B 01 45 9a ff ff ff … (72 B)
+  +    94.384s  READ 0x03FD60 +13                echo=y -> A0 payload=13B 20 2c a2 95 0c 10 … (13 B)
+  +   142.794s  cmd=0x00 00 16                   echo=y -> A0 payload=42B 31 34 33 30 39 34 … (42 B)
+  +   142.952s  cmd=0x0D 0d 1b                   echo=y -> A0 payload=72B 01 45 9a ff ff ff … (72 B)
+  +   143.088s  READ 0x03FD60 +13                echo=y -> A0 payload=13B 20 2c a2 95 0c 10 … (13 B)
+  +   143.383s  cmd=0x07 07 0f 00 00 00 00 13    echo=y -> A2-denied   x194
+  +   198.680s  cmd=0x07 07 0f 00 00 00 00 13    echo=n -> no-answer
+  ИТОГО: посылок=201  TX=1789B  RX=2834B
+------------------------------------------------------------------------------------------------
+ПАУЗЫ >= 2.00s (границы фаз — здесь обычно действия оператора):
+  +   94.384s .. +  142.794s   48.41s
+  +  196.518s .. +  198.680s    2.16s
+------------------------------------------------------------------------------------------------
+ПОТОКИ ЧТЕНИЯ (cmd 0x06; в порядке времени, повторные проходы — отдельно):
+  0x03FD60..0x03FD6D       13 B  блоков=1      sha256=773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750
+  0x03FD60..0x03FD6D       13 B  блоков=1      sha256=773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750
+

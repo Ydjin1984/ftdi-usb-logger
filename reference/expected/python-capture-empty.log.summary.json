@@ -1,0 +1,62 @@
+{
+  "schema": "old-parse-family-golden/v1",
+  "log": {
+    "file": "python-capture-empty.log",
+    "path": "D:\\FTDI_USB_Logger\\reference\\logs\\python-capture-empty.log",
+    "bytes": 3207,
+    "lines": 45,
+    "sha256": "f2e1cfd28bfcb44f67d98bed7030e5edb1e7e53df7a61c0a552de83e203e4b46"
+  },
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe E:\\Replica\\work\\orig-capture\\parse_family.py --log D:\\FTDI_USB_Logger\\reference\\logs\\python-capture-empty.log --gap 2.0",
+    "gap_seconds": 2.0
+  },
+  "preamble_lines": 1,
+  "sessions": [
+    {
+      "index": 0,
+      "label": "python",
+      "stamp": "=2026-11-07 15:00:55",
+      "telegrams": 0,
+      "exchanges": 0,
+      "tx_bytes": 0,
+      "rx_bytes": 0,
+      "rx_chunks": 0,
+      "cmd_hist": {},
+      "resp_hist": {},
+      "reads": [],
+      "filehash": [],
+      "marks": 0,
+      "files": 0,
+      "errors": 0,
+      "ovl_zero": 0
+    }
+  ],
+  "totals": {
+    "sessions": 1,
+    "telegrams": 0,
+    "tx_bytes": 0,
+    "rx_bytes": 0,
+    "reads": 0,
+    "filehash": 0,
+    "marks": 0,
+    "files": 0,
+    "errors": 0
+  },
+  "side_artifacts": [],
+  "cli": {
+    "exit_code": 0,
+    "stdout_file": "python-capture-empty.log.parse.out.txt",
+    "stderr_file": "python-capture-empty.log.parse.err.txt"
+  },
+  "stdout_crosscheck": {
+    "method": "regex over CLI stdout: СЕССИЯ/ИТОГО/ПОТОКИ ЧТЕНИЯ",
+    "stdout_sessions": [],
+    "stdout_itogo": [],
+    "stdout_read_streams": 0,
+    "match": true,
+    "mismatches": []
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "schema": "old-parse-family-golden/v1",
+  "log": {
+    "file": "ftd2xx-bms46-session.log",
+    "path": "D:\\FTDI_USB_Logger\\reference\\logs\\ftd2xx-bms46-session.log",
+    "bytes": 239307,
+    "lines": 4581,
+    "sha256": "9f67dcaa19b4acbf90b9b188ad26252feefea510e032b11939c2489e822da7a0"
+  },
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "command": "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe E:\\Replica\\work\\orig-capture\\parse_family.py --log D:\\FTDI_USB_Logger\\reference\\logs\\ftd2xx-bms46-session.log --gap 2.0",
+    "gap_seconds": 2.0
+  },
+  "preamble_lines": 0,
+  "sessions": [
+    {
+      "index": 0,
+      "label": "?",
+      "stamp": "2026-10-12 00:22:30",
+      "telegrams": 201,
+      "exchanges": 201,
+      "tx_bytes": 1789,
+      "rx_bytes": 2834,
+      "rx_chunks": 402,
+      "cmd_hist": {
+        "READ(0x06)": 2,
+        "cmd=0x00": 2,
+        "cmd=0x07": 195,
+        "cmd=0x0D": 2
+      },
+      "resp_hist": {
+        "A0": 6,
+        "A2-denied": 194,
+        "no-answer": 1
+      },
+      "reads": [
+        {
+          "start": 261472,
+          "len": 13,
+          "blocks": 1,
+          "sha256": "773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750"
+        },
+        {
+          "start": 261472,
+          "len": 13,
+          "blocks": 1,
+          "sha256": "773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750"
+        }
+      ],
+      "filehash": [],
+      "marks": 0,
+      "files": 0,
+      "errors": 0,
+      "ovl_zero": 0
+    }
+  ],
+  "totals": {
+    "sessions": 1,
+    "telegrams": 201,
+    "tx_bytes": 1789,
+    "rx_bytes": 2834,
+    "reads": 2,
+    "filehash": 0,
+    "marks": 0,
+    "files": 0,
+    "errors": 0
+  },
+  "side_artifacts": [
+    "tx-stream.bin",
+    "rx-stream.bin",
+    "stream-index.tsv",
+    "reads/"
+  ],
+  "cli": {
+    "exit_code": 0,
+    "stdout_file": "ftd2xx-bms46-session.log.parse.out.txt",
+    "stderr_file": "ftd2xx-bms46-session.log.parse.err.txt"
+  },
+  "stdout_crosscheck": {
+    "method": "regex over CLI stdout: СЕССИЯ/ИТОГО/ПОТОКИ ЧТЕНИЯ",
+    "stdout_sessions": [
+      {
+        "label": "?",
+        "start": "2026-10-12 00:22:30",
+        "exchanges": 201,
+        "marks": 0,
+        "files": 0,
+        "errors": 0
+      }
+    ],
+    "stdout_itogo": [
+      {
+        "exchanges": 201,
+        "tx_bytes": 1789,
+        "rx_bytes": 2834
+      }
+    ],
+    "stdout_read_streams": 2,
+    "match": true,
+    "mismatches": []
+  }
+}

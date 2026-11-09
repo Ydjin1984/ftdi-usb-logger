@@ -1,0 +1,23 @@
+/engine/target/
+/ui/node_modules/
+/ui/dist/
+/ui/.vite/
+/ui/shots*/
+/ui/shot-*.png
+/sessions/*
+!/sessions/.gitkeep
+# Ссылочные логи большие, в git не кладём; golden-артефакты нужны для тестов.
+/reference/logs/*
+!/reference/logs/.gitkeep
+/dist/
+*.log
+*.exe
+*.pdb
+*.dmp
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+# Машинные артефакты edge-прогона (перегенерируются run-edge.ps1)
+/tests/e2e/edge/out/
+

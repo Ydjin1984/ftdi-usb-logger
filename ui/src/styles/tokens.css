@@ -1,0 +1,202 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   FTDI/USB Logger — токены и база.
+   Тёмная лабораторная тема: приборная панель, а не «дашборд из шаблона».
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg: #0a0d11;
+  --bg-1: #0e1319;
+  --bg-2: #121922;
+  --bg-3: #17202a;
+  --bg-4: #1d2833;
+  --line: #1d2731;
+  --line-2: #2a3744;
+  --line-3: #37485a;
+
+  --text: #d9e2ec;
+  --text-dim: #93a1b0;
+  --text-mute: #5f6c7a;
+
+  --tx: #35d0ff;
+  --rx: #7ee787;
+  --mark: #ffc857;
+  --file: #b48cff;
+  --sys: #93a1b0;
+  --warn: #ffab4a;
+  --err: #ff6b6b;
+  --ok: #58d68d;
+  --acc: #35d0ff;
+
+  --tx-bg: rgba(53, 208, 255, 0.08);
+  --rx-bg: rgba(126, 231, 135, 0.07);
+  --mark-bg: rgba(255, 200, 87, 0.09);
+  --err-bg: rgba(255, 107, 107, 0.1);
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+
+  --r-1: 3px;
+  --r-2: 5px;
+  --r-3: 8px;
+
+  --h-header: 46px;
+  --h-transport: 60px;
+  --h-timeline: 74px;
+  --w-rail: 294px;
+  --w-inspect: 392px;
+
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --fast: 120ms;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+::selection {
+  background: rgba(53, 208, 255, 0.28);
+}
+
+:focus-visible {
+  outline: 1px solid var(--acc);
+  outline-offset: 1px;
+}
+
+/* Скроллбары: тонкие, тёмные, без «рельсов». */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--line-3);
+  background-clip: padding-box;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.dim {
+  color: var(--text-dim);
+}
+.mute {
+  color: var(--text-mute);
+}
+.hidden {
+  display: none !important;
+}
+.nowrap {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── загрузочный экран ─────────────────────────────────────────────────── */
+.boot {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  background: var(--bg);
+  z-index: 50;
+}
+.boot__mark {
+  width: 54px;
+  height: 54px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-3);
+  position: relative;
+  overflow: hidden;
+}
+.boot__mark::after {
+  content: "";
+  position: absolute;
+  inset: 22% 12%;
+  background:
+    linear-gradient(90deg, transparent 0 8%, var(--tx) 8% 14%, transparent 14% 26%, var(--tx) 26% 34%, transparent 34% 46%, var(--tx) 46% 52%, transparent 52% 64%, var(--tx) 64% 72%, transparent 72%);
+  clip-path: polygon(0 58%, 12% 58%, 12% 30%, 26% 30%, 26% 62%, 40% 62%, 40% 8%, 52% 8%, 52% 78%, 64% 78%, 64% 38%, 78% 38%, 78% 58%, 100% 58%, 100% 74%, 0 74%);
+  animation: bootPulse 1.4s var(--ease) infinite;
+}
+.boot__title {
+  font-family: var(--font-mono);
+  letter-spacing: 0.34em;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.boot__text {
+  font-size: 12px;
+  color: var(--text-mute);
+  max-width: 460px;
+  text-align: center;
+}
+.boot--error .boot__mark {
+  border-color: var(--err);
+}
+.boot--error .boot__title {
+  color: var(--err);
+}
+
+@keyframes bootPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

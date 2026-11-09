@@ -1,0 +1,238 @@
+{
+  "schema": "reference-expected-manifest/v1",
+  "purpose": "golden-эталоны старого parse_family.py для сверки нового Rust-разбора",
+  "parser": {
+    "path": "E:\\Replica\\work\\orig-capture\\parse_family.py",
+    "sha256": "fdbc6f2beed0e38197384633c327ebdc3e74e07f3365883cbbcc6f5eafd5965b",
+    "python": "3.12.4",
+    "gap_seconds": 2.0
+  },
+  "logs": [
+    {
+      "file": "winkfp-e2e-capture.log",
+      "path": "D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-capture.log",
+      "bytes": 312250,
+      "sha256": "29fce2e38d9d311fad60b406a39adf9b008b214d1115cd462c4b345c8495fe01"
+    },
+    {
+      "file": "winkfp-e2e-logger.out",
+      "path": "D:\\FTDI_USB_Logger\\reference\\logs\\winkfp-e2e-logger.out",
+      "bytes": 194351,
+      "sha256": "702cd8bcd498b778b495237b0650c43e6a3f2beb6cc1628cb00b1f1783868508"
+    },
+    {
+      "file": "ftd2xx-bms46-session.log",
+      "path": "D:\\FTDI_USB_Logger\\reference\\logs\\ftd2xx-bms46-session.log",
+      "bytes": 239307,
+      "sha256": "9f67dcaa19b4acbf90b9b188ad26252feefea510e032b11939c2489e822da7a0"
+    },
+    {
+      "file": "python-capture-empty.log",
+      "path": "D:\\FTDI_USB_Logger\\reference\\logs\\python-capture-empty.log",
+      "bytes": 3207,
+      "sha256": "f2e1cfd28bfcb44f67d98bed7030e5edb1e7e53df7a61c0a552de83e203e4b46"
+    },
+    {
+      "file": "bms46-no-traffic.log",
+      "path": "D:\\FTDI_USB_Logger\\reference\\logs\\bms46-no-traffic.log",
+      "bytes": 364,
+      "sha256": "9d13ee87e3baa86d957fede54a0af9c9073c2dff77da44b063b87d9350cb40ca"
+    }
+  ],
+  "summary_schema": "old-parse-family-golden/v1",
+  "artifacts_count": 32,
+  "artifacts": [
+    {
+      "path": "bms46-no-traffic.log.parse.err.txt",
+      "role": "cli-stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "bms46-no-traffic.log.parse.out.txt",
+      "role": "cli-stdout",
+      "bytes": 191,
+      "sha256": "4e918ac7f5bd0dfb034a5017dd8d73c81610fd472cd72e961285c249f64c91c8"
+    },
+    {
+      "path": "bms46-no-traffic.log.summary.json",
+      "role": "summary-json",
+      "bytes": 1697,
+      "sha256": "2a5ff14fd1f49f9847fb468777f2d4c1c8a765bdfec8e72bdf66784641d22d2e"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.files/reads/03FD60-03FD6D-s2.bin",
+      "role": "side-reads-bin",
+      "bytes": 13,
+      "sha256": "773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.files/reads/03FD60-03FD6D.bin",
+      "role": "side-reads-bin",
+      "bytes": 13,
+      "sha256": "773cdf4f076c4a3605de1d2065ca62d17eda904cb0a61ab27861c361c22aa750"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.files/rx-stream.bin",
+      "role": "side-rx-stream",
+      "bytes": 2834,
+      "sha256": "84e8e829f9547b6469a53b2bb35701bf175bc038d602e7311ccf23c5a4248be5"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.files/stream-index.tsv",
+      "role": "side-stream-index",
+      "bytes": 13050,
+      "sha256": "bdbfbb342d85caa4063f06d553bc6cf7c778e8cc8f88f3e5835f4b9a4a0e3eb1"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.files/tx-stream.bin",
+      "role": "side-tx-stream",
+      "bytes": 1789,
+      "sha256": "50f19e5a4853bda2e689a31f7d9084164f344f97e0d41ae83e263b18cd3295c9"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.parse.err.txt",
+      "role": "cli-stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.parse.out.txt",
+      "role": "cli-stdout",
+      "bytes": 3810,
+      "sha256": "0afe25b9d0cae935073b86c0b8a65b0c544a232bdbdb5c3576dd66a6dabec70c"
+    },
+    {
+      "path": "ftd2xx-bms46-session.log.summary.json",
+      "role": "summary-json",
+      "bytes": 2617,
+      "sha256": "dfeb39cb8581ade9f529d3ad19a7a09eaf7f9a7888086046ffa2d07bed4551c4"
+    },
+    {
+      "path": "python-capture-empty.log.parse.err.txt",
+      "role": "cli-stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "python-capture-empty.log.parse.out.txt",
+      "role": "cli-stdout",
+      "bytes": 199,
+      "sha256": "3b12a754a759cd3c8f1d63b71190bb4d258c8f86974b66fa96b02af3de449219"
+    },
+    {
+      "path": "python-capture-empty.log.summary.json",
+      "role": "summary-json",
+      "bytes": 1711,
+      "sha256": "a8bbdd3a884ed9c92b0747c9607aecdc0684ece505a899a05225e4cb8d84b0a6"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/003FE6-003FF6.bin",
+      "role": "side-reads-bin",
+      "bytes": 16,
+      "sha256": "9f47eb7d5ca8480098c649bd9cba2e72106838b5ba960636df5204947d7dbb3e"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/01459D-01459E.bin",
+      "role": "side-reads-bin",
+      "bytes": 1,
+      "sha256": "18ac3e7343f016890c510e93f935261169d9e3f565436429830faf0934f4f8e4"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FCB0-03FCF6.bin",
+      "role": "side-reads-bin",
+      "bytes": 70,
+      "sha256": "44f2b5292875a29bfd3a8714f89ef86485aebc5216e325e3dd35e07510381684"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FD8E-s2.bin",
+      "role": "side-reads-bin",
+      "bytes": 46,
+      "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FD8E-s3.bin",
+      "role": "side-reads-bin",
+      "bytes": 46,
+      "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FD8E.bin",
+      "role": "side-reads-bin",
+      "bytes": 46,
+      "sha256": "562c8c418f8d2dcf3ad6ea4eb4bfed7a8cdcdfbb3ed07d6034291b41a0018a0c"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FDBC-s2.bin",
+      "role": "side-reads-bin",
+      "bytes": 92,
+      "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FDBC-s3.bin",
+      "role": "side-reads-bin",
+      "bytes": 92,
+      "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/reads/03FD60-03FDBC.bin",
+      "role": "side-reads-bin",
+      "bytes": 92,
+      "sha256": "3bb12e4c51c04e9c7f117094e423eb7beb1990eeccd0301a8da7bc289ae8b27f"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/rx-stream.bin",
+      "role": "side-rx-stream",
+      "bytes": 25523,
+      "sha256": "9fb9e6524b82922c975586b611a0db5c1d63d6a73447901ec78587aed81dd464"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/stream-index.tsv",
+      "role": "side-stream-index",
+      "bytes": 89119,
+      "sha256": "3b27e90768dc0209f0320c579758a862d6afed0514f0e75ef49201ed18fafe0e"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.files/tx-stream.bin",
+      "role": "side-tx-stream",
+      "bytes": 22026,
+      "sha256": "37e61c6c5409190ff1d55093be7976b3c320127aa590cf10982fda8ae574e76d"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.parse.err.txt",
+      "role": "cli-stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.parse.out.txt",
+      "role": "cli-stdout",
+      "bytes": 32675,
+      "sha256": "cbfecde48c5d22e17ec5d8072002f2b854512e78ac7ca9988b5f26533d5bbad5"
+    },
+    {
+      "path": "winkfp-e2e-capture.log.summary.json",
+      "role": "summary-json",
+      "bytes": 3882,
+      "sha256": "aa84265905c8ff274da7c7dccd0b3999b25bf9ea5bdf24d10294c6bdc920a58e"
+    },
+    {
+      "path": "winkfp-e2e-logger.out.parse.err.txt",
+      "role": "cli-stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "winkfp-e2e-logger.out.parse.out.txt",
+      "role": "cli-stdout",
+      "bytes": 2205,
+      "sha256": "986f87731525aa37778dc817b977bd617aff27fb316c59fb386a5ab0e715fa25"
+    },
+    {
+      "path": "winkfp-e2e-logger.out.summary.json",
+      "role": "summary-json",
+      "bytes": 1335,
+      "sha256": "49f30663fa97a442eed766c3b601a2056c8c5e838958b0bde297ab8edf279c70"
+    }
+  ]
+}
