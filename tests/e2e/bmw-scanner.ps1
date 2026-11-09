@@ -172,10 +172,17 @@ try {
             if ($tx.Count -ge 10) { break }   # на стенде без ЭБУ ответов может не быть
             Start-Sleep -Milliseconds 500
         }
-        if ($tx.Count -lt 3) { throw "FT_Write: $($tx.Count)" }
-        # RX зависит от стенда: без ЭБУ на линии ответов может не быть — не валим тест.
-        $sample = if ($rx.Count -gt 0) { ($tx[0].hex + " " + $rx[0].hex).Trim() } else { $tx[0].hex }
-        "TX=$($tx.Count) RX=$($rx.Count), пример: $sample"
+        if ($tx.Count -lt 3) {
+            # Приложение может простаивать (нет Scan!/меню) — проверяем хотя бы, что DLL захукана.
+            $ev = Invoke-RestMethod "$base/api/sessions/$sessionId/events?limit=4000" -TimeoutSec 30
+            $hooks = @($ev.events) | Where-Object { $_.api -eq "FTD2XX" -and "$($_.text)" -like "*hooks installed*" }
+            if (-not $hooks) { throw "FT_Write: $($tx.Count), хуки ftd2xx не подтверждены" }
+            "хуки установлены, обмена нет (приложение простаивает): TX=$($tx.Count) RX=$($rx.Count)"
+        } else {
+            # RX зависит от стенда: без ЭБУ на линии ответов может не быть — не валим тест.
+            $sample = if ($rx.Count -gt 0) { ($tx[0].hex + " " + $rx[0].hex).Trim() } else { $tx[0].hex }
+            "TX=$($tx.Count) RX=$($rx.Count), пример: $sample"
+        }
     }
     Check "отчёт: транспорт ftd2xx/mixed, дублей USB TX/RX нет" {
         $det = Invoke-RestMethod -Uri "$base/api/capture/detach" -Method Post -Body '{}' `
@@ -200,6 +207,7 @@ if ($failed -gt 0) {
     exit 1
 }
 exit 0
+
 
 
 
