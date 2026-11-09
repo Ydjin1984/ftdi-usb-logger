@@ -84,6 +84,30 @@ fn set_meta(ev: &mut Event, key: &str, value: Value) {
     meta_slot(ev).insert(key.to_string(), value);
 }
 
+/// Разложить `key=value`-пары из хвоста строки в `meta` (числа — числами, остальное строками).
+fn apply_kv_meta(ev: &mut Event, body: &str) {
+    for token in body.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = key.trim_end_matches(',');
+        let value = value.trim_end_matches(',');
+        if key.is_empty() || value.is_empty() || key == "rc" {
+            continue;
+        }
+        if let Ok(n) = value.parse::<i64>() {
+            set_meta(ev, key, json!(n));
+        } else if let Some(hex) = value
+            .strip_prefix("0x")
+            .and_then(|h| i64::from_str_radix(h, 16).ok())
+        {
+            set_meta(ev, key, json!(hex));
+        } else {
+            set_meta(ev, key, json!(value));
+        }
+    }
+}
+
 fn meta_bool(ev: &Event, key: &str) -> bool {
     ev.meta.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
@@ -445,6 +469,9 @@ fn parse_body(rest: &str, t: f64, raw: &str) -> Event {
     if let Some(ev) = parse_vcp_line(rest, t, raw) {
         return ev;
     }
+    if rest.starts_with("COM ") {
+        return parse_com_settings_line(rest, t, raw);
+    }
     if rest.starts_with("FILE ") {
         return parse_file_line(rest, t, raw);
     }
@@ -512,6 +539,32 @@ fn parse_body(rest: &str, t: f64, raw: &str) -> Event {
     let mut ev = make_event(EventKind::Raw, Transport::None, t, raw);
     ev.api = "RAW".into();
     ev.text = Some(rest.to_string());
+    ev
+}
+
+/// `COM SetCommState(COM8) baud=19200 data=8 parity=NONE stop=1 flow=RTS_CTS rc=0`
+///
+/// Скорость и тайминги VCP-порта: приложение может менять baud/timeouts на ходу
+/// (адаптер переключает скорость) — фиксируем каждое изменение отдельным SYS-событием.
+fn parse_com_settings_line(rest: &str, t: f64, raw: &str) -> Event {
+    let after = rest.strip_prefix("COM ").unwrap_or(rest);
+    let api_end = after.find(['(', ' ']).unwrap_or(after.len());
+    let api = after[..api_end].trim().to_string();
+    let mut ev = make_event(EventKind::Sys, Transport::Vcp, t, raw);
+    ev.api = format!("COM {api}");
+    if let Some(port) = paren_arg(after) {
+        set_meta_str(&mut ev, "port", Some(port.to_string()));
+    }
+    if let Some(close) = after.find(')') {
+        let body = after[close + 1..].trim();
+        if !body.is_empty() {
+            ev.text = Some(body.to_string());
+            apply_kv_meta(&mut ev, body);
+        }
+    }
+    if let Some(rc) = tag_i32(rest, "rc") {
+        ev.rc = Some(rc);
+    }
     ev
 }
 
@@ -831,6 +884,25 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
                 ioctl_id.unwrap_or_else(|| "?".into()),
                 channel.unwrap_or_else(|| "?".into())
             ));
+            ev
+        }
+        // SET_CONFIG: параметры канала, включая DATA_RATE (битрейт CAN/ISO15765),
+        // тайминги W1..W5, P1..P4, ISO15765_BS/STMIN — «скорость и тайминги» J2534.
+        "config" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 config".into();
+            set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            if let Some(pos) = body.find("rc=") {
+                let cfg = body[..pos].trim();
+                ev.text = Some(cfg.to_string());
+                apply_kv_meta(&mut ev, cfg);
+            } else {
+                ev.text = Some(body.to_string());
+                apply_kv_meta(&mut ev, body);
+            }
             ev
         }
         "disconnect" => {

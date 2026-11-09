@@ -398,3 +398,15 @@ service id для KWP/UDS. Для USB open/close `meta`: `{path, kind, device}`.
 Эта функция не заменяет хуки: она нужна для устройств, которые приложение открывает
 через собственный драйвер (без WinUSB/HID/FTDI/J2534 API).
 
+
+### Скорости и тайминги в логе
+
+| Транспорт | Что пишется | Формат строки |
+|---|---|---|
+| FTDI D2XX | смена baud, латентности, таймаутов, формата, flow control, bit mode | `FT_SetBaudRate(handle=…, 19200) rc=0`, `FT_SetLatencyTimer(handle=…, 16ms)`, `FT_SetTimeouts(handle=…, rd=800 wr=800)` |
+| COM / VCP | `SetCommState`, `SetCommTimeouts`, `SetupComm`, `SetCommMask`, `EscapeCommFunction`; для порта, открытого до attach — снимок текущих DCB/таймаутов при первом I/O | `COM SetCommState(COM8) baud=19200 data=8 parity=NONE stop=1 flow=RTS_CTS rc=0`; `COM state(COM1) baud=9600 parity=EVEN …`; `COM timeouts(COM1) read_total_const=1000 …` |
+| J2534 PassThru | SET_CONFIG: `DATA_RATE`, W1..W5, P1..P4, ISO15765_BS/STMIN и др. | `J2534 config ch=1 DATA_RATE=500000 W1=0 rc=0` |
+
+У каждого события есть `t` (секунды от якоря) и `wall` (RFC3339) — по ним считаются интервалы
+между посылками и моменты смены скорости. События имеют `kind:"sys"`, `api` = имя вызова,
+`meta` = распарсенные параметры (`baud`, `data`, `parity`, `stop`, `flow`, `read_total_const`, …).

@@ -343,3 +343,58 @@ fn transport_summary_detects_mixed() {
     assert_eq!(transport_summary(&[vcp, j, usb]), "mixed");
     assert_eq!(transport_summary(&[]), "");
 }
+
+#[test]
+fn com_line_settings_logged() {
+    let e = ev("[+2.100s] COM SetCommState(COM8) baud=19200 data=8 parity=NONE stop=1 flow=RTS_CTS rc=0");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::Vcp);
+    assert_eq!(e.api, "COM SetCommState");
+    assert_eq!(e.meta.get("port").and_then(Value::as_str), Some("COM8"));
+    assert_eq!(e.meta.get("baud").and_then(Value::as_i64), Some(19200));
+    assert_eq!(e.meta.get("data").and_then(Value::as_i64), Some(8));
+    assert_eq!(e.meta.get("parity").and_then(Value::as_str), Some("NONE"));
+    assert_eq!(e.rc, Some(0));
+    assert!(e.text.as_deref().unwrap().contains("baud=19200"));
+
+    let e = ev("[+2.101s] COM SetCommTimeouts(COM8) read_interval=0 read_total_mul=0 read_total_const=800 write_total_mul=0 write_total_const=800 rc=0");
+    assert_eq!(e.api, "COM SetCommTimeouts");
+    assert_eq!(
+        e.meta.get("read_total_const").and_then(Value::as_i64),
+        Some(800)
+    );
+    assert_eq!(
+        e.meta.get("write_total_const").and_then(Value::as_i64),
+        Some(800)
+    );
+}
+
+#[test]
+fn j2534_set_config_logged() {
+    let e = ev("[+5.000s] J2534 config ch=1 DATA_RATE=500000 W1=0 ISO15765_BS=8 rc=0");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::J2534);
+    assert_eq!(e.api, "J2534 config");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("DATA_RATE").and_then(Value::as_i64), Some(500000));
+    assert_eq!(e.meta.get("W1").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("ISO15765_BS").and_then(Value::as_i64), Some(8));
+    assert_eq!(e.rc, Some(0));
+    assert!(e.text.as_deref().unwrap().contains("DATA_RATE=500000"));
+}
+
+#[test]
+fn com_initial_state_and_timeouts_logged() {
+    let e = ev("[+2.257s] COM state(COM1) baud=9600 data=8 parity=EVEN stop=1 flow=NONE (текущие на момент attach)");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::Vcp);
+    assert_eq!(e.api, "COM state");
+    assert_eq!(e.meta.get("port").and_then(Value::as_str), Some("COM1"));
+    assert_eq!(e.meta.get("baud").and_then(Value::as_i64), Some(9600));
+    assert_eq!(e.meta.get("parity").and_then(Value::as_str), Some("EVEN"));
+
+    let e = ev("[+2.258s] COM timeouts(COM1) read_interval=4294967295 read_total_mul=4294967295 read_total_const=1000 write_total_mul=0 write_total_const=1000 (текущие на момент attach)");
+    assert_eq!(e.api, "COM timeouts");
+    assert_eq!(e.meta.get("read_total_const").and_then(Value::as_i64), Some(1000));
+    assert_eq!(e.meta.get("write_total_const").and_then(Value::as_i64), Some(1000));
+}

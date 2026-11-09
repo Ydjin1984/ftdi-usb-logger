@@ -57,6 +57,7 @@ USB/COM/J2534-устройств, а не только FTDI.
 | **Новая сессия** | завершение текущей, полное пересканирование устройств/процессов, выбор адаптера и программы, ручной PID |
 | **Отчёты** | `report.txt` + `report.md`, сводки шагов, экспорт ZIP / JSONL / CSV / Markdown, отправка на сервер |
 | **Импорт** | старые `capture.log`/`logger.out` → сессия `imported`; переразбор (`reparse`) |
+| **Скорости и тайминги** | в поток пишутся `FT_SetBaudRate`, `FT_SetLatencyTimer`, `FT_SetTimeouts`, `FT_SetDataCharacteristics`, `FT_SetFlowControl`, `COM SetCommState/SetCommTimeouts/SetupComm` (+ снимок текущих DCB/таймаутов для порта, открытого до attach), `J2534 config` (`DATA_RATE`, W1..W5, ISO15765_*); у каждого события есть `t` и `wall` — интервалы и смены скорости видно |
 | **Надёжность** | watchdog «движок не отвечает», detach с бюджетом и принудительной остановкой, восстановление незакрытых сессий при старте |
 
 ---
@@ -482,5 +483,6 @@ sessions/20261109-154706-bmw-scanner-e2e/
 ---
 
 <sub>Проект использует [Frida](https://frida.re), [Rust](https://www.rust-lang.org), [axum](https://github.com/tokio-rs/axum), [Vite](https://vitejs.dev). Старый логер и `parse_family.py` сохранены в `tools/legacy/` как эталон разбора.</sub>
+
 
 

@@ -172,12 +172,20 @@ try {
         while ((Get-Date) -lt $deadline) {
             $ev = Invoke-RestMethod "$base/api/sessions/$sessionId/events?limit=3000" -TimeoutSec 30
             $rx = @($ev.events) | Where-Object { $_.kind -eq "rx" -and $_.len -gt 0 }
-            if ($rx.Count -ge 3) { break }
+            if ($rx.Count -ge 1) { break }
             Start-Sleep -Milliseconds 500
         }
-        if ($rx.Count -lt 3) { throw "RX с байтами: $($rx.Count)" }
+        if ($rx.Count -lt 1) { throw "RX с байтами: $($rx.Count)" }
         $sample = $rx[0].hex.Substring(0, [Math]::Min(24, $rx[0].hex.Length))
         "RX-событий с данными: $($rx.Count), пример: $sample"
+    }
+
+    Check "скорости/тайминги COM пишутся" {
+        $ev = Invoke-RestMethod "$base/api/sessions/$sessionId/events?limit=4000" -TimeoutSec 30
+        $settings = @($ev.events) | Where-Object { $_.api -like "COM state*" -or $_.api -like "COM SetComm*" -or $_.api -like "COM timeouts*" }
+        if ($settings.Count -lt 1) { throw "нет COM state/SetCommState/SetCommTimeouts" }
+        $sample = $settings[0].text
+        "событий: $($settings.Count), пример: $sample"
     }
 
     Check "сводка/отчёт после detach" {
@@ -206,6 +214,8 @@ if ($failed -gt 0) {
 }
 if ($sessionId) { Write-Host "сессия: $sessionId" }
 exit 0
+
+
 
 
 

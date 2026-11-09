@@ -312,7 +312,7 @@ function installVcpHooks() {
         this.plen = args[3];
         try { ovlRemember(args, false); } catch (e) {}
         try { this.ovlKey = this.ovl ? ovlKeyOf(this.hkey, args[4]) : null; } catch (e) { this.ovlKey = null; }
-        if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pw = args[3]; }
+        if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pw = args[3]; commStateOnce(this.hkey); }
         else if (fileHandles[this.hkey]) { this.fent = fileHandles[this.hkey]; this.len = args[2].toInt32(); this.pw = args[3]; }
         else { try { if (typeof usbHandles !== 'undefined' && usbHandles[this.hkey]) { this.usbEnt = usbHandles[this.hkey]; this.buf = args[1]; this.len = args[2].toInt32(); this.pw = args[3]; } } catch (e) {} }
       },
@@ -354,7 +354,7 @@ function installVcpHooks() {
         this.plen = args[3];
         try { ovlRemember(args, true); } catch (e) {}
         try { this.ovlKey = this.ovl ? ovlKeyOf(this.hkey, args[4]) : null; } catch (e) { this.ovlKey = null; }
-        if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; }
+        if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; commStateOnce(this.hkey); }
         else { try { if (typeof usbHandles !== 'undefined' && usbHandles[this.hkey]) { this.usbEnt = usbHandles[this.hkey]; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; } } catch (e) {} }
       },
       onLeave(ret) {
@@ -394,8 +394,153 @@ function installVcpHooks() {
       }
     });
   }
+  installCommSettingsHooks();
 }
 installVcpHooks();
+
+// ── Скорость и тайминги последовательного порта (SetCommState/SetCommTimeouts/…) ──
+// .NET SerialPort и Delphi-клиенты меняют baud/таймауты через kernel32 и IOCTL-ы.
+// Без этих хуков в лог попадали только байты, но не факт смены скорости/таймингов.
+var commHooked = false;
+const COMM_PARITY = { 0: 'NONE', 1: 'ODD', 2: 'EVEN', 3: 'MARK', 4: 'SPACE' };
+const COMM_STOP = { 0: '1', 1: '1.5', 2: '2' };
+const COMM_ESC = { 1: 'SETXOFF', 2: 'SETXON', 3: 'SETRTS', 4: 'CLRRTS', 5: 'SETDTR', 6: 'CLRDTR',
+  7: 'RESETDEV', 8: 'SETBREAK', 9: 'CLRBREAK' };
+
+const commStateSeen = {};
+// Для порта, открытого ДО attach, SetCommState уже не сработает — спрашиваем
+// текущие DCB/таймауты через GetCommState/GetCommTimeouts при первом I/O.
+function commStateOnce(hkey) {
+  if (commStateSeen[hkey]) return;
+  commStateSeen[hkey] = true;
+  try {
+    const port = comHandles[hkey] || 'COM?';
+    const gsAddr = globalExport('GetCommState');
+    const gtAddr = globalExport('GetCommTimeouts');
+    if (!gsAddr || !gtAddr) return;
+    const hp = ptr(hkey);
+    const dcb = Memory.alloc(64);
+    const tmo = Memory.alloc(20);
+    const gs = new NativeFunction(gsAddr, 'int', ['pointer', 'pointer']);
+    const gt = new NativeFunction(gtAddr, 'int', ['pointer', 'pointer']);
+    if (gs(hp, dcb) !== 0) {
+      const flags = dcb.add(8).readU32();
+      log('COM state(' + port + ') baud=' + dcb.add(4).readU32() +
+        ' data=' + dcb.add(18).readU8() +
+        ' parity=' + (COMM_PARITY[dcb.add(19).readU8()] || dcb.add(19).readU8()) +
+        ' stop=' + (COMM_STOP[dcb.add(20).readU8()] || dcb.add(20).readU8()) +
+        ' flow=' + commFlowName(flags) + ' (текущие на момент attach)');
+    }
+    if (gt(hp, tmo) !== 0) {
+      log('COM timeouts(' + port + ') read_interval=' + tmo.add(0).readU32() +
+        ' read_total_mul=' + tmo.add(4).readU32() + ' read_total_const=' + tmo.add(8).readU32() +
+        ' write_total_mul=' + tmo.add(12).readU32() + ' write_total_const=' + tmo.add(16).readU32() +
+        ' (текущие на момент attach)');
+    }
+  } catch (e) { try { log('commState error: ' + e); } catch (e2) {} }
+}
+
+function commPortOf(hkey) {
+  try {
+    if (comHandles[hkey]) return comHandles[hkey];
+    if (classifyExistingHandle(hkey) === 'com') return comHandles[hkey] || 'COM?';
+  } catch (e) {}
+  return null;
+}
+
+function commFlowName(flags) {
+  const parts = [];
+  if (flags & 0x0004) parts.push('CTS');
+  if (flags & 0x0008) parts.push('DSR');
+  const dtr = (flags >> 4) & 0x3;
+  const rts = (flags >> 12) & 0x3;
+  if (dtr === 1) parts.push('DTR');
+  else if (dtr === 2) parts.push('DTR_HS');
+  if (rts === 1) parts.push('RTS');
+  else if (rts === 2) parts.push('RTS_HS');
+  else if (rts === 3) parts.push('RTS_TOGGLE');
+  if (flags & 0x0100) parts.push('XON');
+  if (flags & 0x0200) parts.push('XOFF');
+  return parts.length ? parts.join('+') : 'NONE';
+}
+
+function installCommSettingsHooks() {
+  if (commHooked) return;
+  commHooked = true;
+  const pSetState = globalExport('SetCommState');
+  const pSetTimeouts = globalExport('SetCommTimeouts');
+  const pSetup = globalExport('SetupComm');
+  const pMask = globalExport('SetCommMask');
+  const pEscape = globalExport('EscapeCommFunction');
+
+  if (pSetState) attachHook(pSetState, {
+    onEnter(args) { this.hkey = args[0].toString(); this.dcb = args[1]; },
+    onLeave(ret) {
+      try {
+        const port = commPortOf(this.hkey);
+        if (!port || !this.dcb || this.dcb.isNull()) return;
+        const baud = this.dcb.add(4).readU32();
+        const flags = this.dcb.add(8).readU32();
+        const data = this.dcb.add(18).readU8();
+        const parity = this.dcb.add(19).readU8();
+        const stop = this.dcb.add(20).readU8();
+        log('COM SetCommState(' + port + ') baud=' + baud + ' data=' + data +
+          ' parity=' + (COMM_PARITY[parity] || parity) + ' stop=' + (COMM_STOP[stop] || stop) +
+          ' flow=' + commFlowName(flags) + ' rc=' + ret.toInt32());
+      } catch (e) {}
+    }
+  });
+
+  if (pSetTimeouts) attachHook(pSetTimeouts, {
+    onEnter(args) { this.hkey = args[0].toString(); this.t = args[1]; },
+    onLeave(ret) {
+      try {
+        const port = commPortOf(this.hkey);
+        if (!port || !this.t || this.t.isNull()) return;
+        const p = this.t;
+        log('COM SetCommTimeouts(' + port + ') read_interval=' + p.add(0).readU32() +
+          ' read_total_mul=' + p.add(4).readU32() + ' read_total_const=' + p.add(8).readU32() +
+          ' write_total_mul=' + p.add(12).readU32() + ' write_total_const=' + p.add(16).readU32() +
+          ' rc=' + ret.toInt32());
+      } catch (e) {}
+    }
+  });
+
+  if (pSetup) attachHook(pSetup, {
+    onEnter(args) { this.hkey = args[0].toString(); this.inb = args[1].toInt32(); this.outb = args[2].toInt32(); },
+    onLeave(ret) {
+      try {
+        const port = commPortOf(this.hkey);
+        if (!port) return;
+        log('COM SetupComm(' + port + ') in=' + this.inb + ' out=' + this.outb + ' rc=' + ret.toInt32());
+      } catch (e) {}
+    }
+  });
+
+  if (pMask) attachHook(pMask, {
+    onEnter(args) { this.hkey = args[0].toString(); this.mask = args[1].toInt32(); },
+    onLeave(ret) {
+      try {
+        const port = commPortOf(this.hkey);
+        if (!port) return;
+        log('COM SetCommMask(' + port + ') mask=' + hex4(this.mask) + ' rc=' + ret.toInt32());
+      } catch (e) {}
+    }
+  });
+
+  if (pEscape) attachHook(pEscape, {
+    onEnter(args) { this.hkey = args[0].toString(); this.func = args[1].toInt32(); },
+    onLeave(ret) {
+      try {
+        const port = commPortOf(this.hkey);
+        if (!port) return;
+        log('COM EscapeCommFunction(' + port + ') func=' + (COMM_ESC[this.func] || this.func) +
+          ' rc=' + ret.toInt32());
+      } catch (e) {}
+    }
+  });
+}
+
 
 // ==================== ЛЕНИВАЯ КЛАССИФИКАЦИЯ УЖЕ ОТКРЫТЫХ ХЕНДЛОВ ============
 // .NET-приложения (MS4x, SerialPort) открывают COM/HID/USB ДО attach: хука CreateFileW
@@ -997,6 +1142,35 @@ const J2534_EXPORTS = ['PassThruOpen', 'PassThruConnect', 'PassThruDisconnect', 
 
 function ptProtoName(id) { return PT_PROTO[id] || ('0x' + id.toString(16)); }
 
+const PT_CFG_NAMES = {
+  0x01: 'DATA_RATE', 0x03: 'LOOPBACK', 0x04: 'NODE_ADDRESS', 0x05: 'NETWORK_LINE',
+  0x06: 'P1_MIN', 0x07: 'P1_MAX', 0x08: 'P2_MIN', 0x09: 'P2_MAX', 0x0A: 'P3_MIN', 0x0B: 'P3_MAX',
+  0x0C: 'P4_MIN', 0x0D: 'P4_MAX', 0x0E: 'W1', 0x0F: 'W2', 0x10: 'W3', 0x11: 'W4', 0x12: 'W5',
+  0x13: 'TIDLE', 0x14: 'TINIL', 0x15: 'TWUP', 0x16: 'PARITY', 0x17: 'BIT_SAMPLE_POINT',
+  0x18: 'SYNC_JUMP_WIDTH', 0x19: 'W0', 0x1A: 'T1_MAX', 0x1B: 'T2_MAX', 0x1C: 'T4_MAX',
+  0x1D: 'T5_MAX', 0x1E: 'ISO15765_BS', 0x1F: 'ISO15765_STMIN', 0x20: 'DATA_BITS',
+  0x21: 'FIVE_BAUD_MOD', 0x22: 'BS_TX', 0x23: 'STMIN_TX', 0x24: 'ISO15765_WFT_MAX'
+};
+
+// SCONFIG_LIST { ulNumOfParams; SCONFIG* ConfigPtr } → "DATA_RATE=500000 W1=0 …"
+function ptConfigList(p) {
+  try {
+    const n = p.readU32();
+    if (!n || n > 64) return null;
+    const off = Process.pointerSize === 8 ? 8 : 4;
+    const arr = p.add(off).readPointer();
+    if (arr.isNull()) return null;
+    const parts = [];
+    for (let i = 0; i < n; i++) {
+      const ent = arr.add(i * 8);
+      const par = ent.readU32();
+      const val = ent.add(4).readU32();
+      parts.push((PT_CFG_NAMES[par] || ('0x' + par.toString(16))) + '=' + val);
+    }
+    return parts.join(' ');
+  } catch (e) { return null; }
+}
+
 function j2534Vendor(modName) {
   const n = (modName || '').toLowerCase();
   if (n.indexOf('smj2534') >= 0 || n.indexOf('scanmatik') >= 0) return 'Scanmatik';
@@ -1104,9 +1278,19 @@ function installJ2534Hook(name, addr, mod) {
     });
   } else if (name === 'PassThruIoctl') {
     attachHook(addr, {
-      onEnter: enterSafe(function (args) { this.ch = args[0].toInt32(); this.id = args[1].toInt32(); }),
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.id = args[1].toInt32();
+        this.input = args[2];
+      }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 ioctl ch=' + this.ch + ' id=' + hex4(this.id) + ' rc=' + ret.toInt32());
+        const rc = ret.toInt32();
+        log('J2534 ioctl ch=' + this.ch + ' id=' + hex4(this.id) + ' rc=' + rc);
+        // SET_CONFIG (0x02): список параметров, включая DATA_RATE (битрейт CAN/ISO).
+        if (this.id === 2 && this.input && !this.input.isNull()) {
+          const cfg = ptConfigList(this.input);
+          if (cfg) log('J2534 config ch=' + this.ch + ' ' + cfg + ' rc=' + rc);
+        }
       })
     });
   } else if (name === 'PassThruClose') {
@@ -1431,6 +1615,11 @@ rpc.exports = {
 };
 
 log('capture script loaded: pid=' + Process.id + ' arch=' + Process.arch + ' modules=' + Process.enumerateModules().length + ' wall=' + new Date().toISOString());
+
+
+
+
+
 
 
 
