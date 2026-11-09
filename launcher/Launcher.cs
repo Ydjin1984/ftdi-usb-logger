@@ -20,6 +20,7 @@ using System.Net;
 using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace FtdiLoggerLauncher
 {
@@ -60,6 +61,7 @@ namespace FtdiLoggerLauncher
             DateTime started = DateTime.UtcNow;
             try
             {
+                EnsureDesktopShortcut();
                 bool already = HealthOk(700);
                 if (!already)
                 {
@@ -150,6 +152,66 @@ namespace FtdiLoggerLauncher
             {
                 splash.ShowError("Не удалось запустить движок: " + ex.Message);
                 return false;
+            }
+        }
+
+        /// <summary>Путь к рабочему столу: реестр оболочки (переживает OneDrive-редирект).</summary>
+        private static string DesktopDir()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"))
+                {
+                    string value = key == null ? null : key.GetValue("Desktop") as string;
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        value = Environment.ExpandEnvironmentVariables(value);
+                        if (Directory.Exists(value)) return value;
+                    }
+                }
+            }
+            catch
+            {
+                // ниже — стандартный путь
+            }
+            return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        }
+
+        /// <summary>
+        /// Ярлык на рабочем столе при первом запуске. Установщик создаёт его сам,
+        /// но на OneDrive-профилях shell-константа {autodesktop} не раскрывается,
+        /// поэтому лаунчер достраивает ярлык (иконка — assets/app.ico).
+        /// </summary>
+        private static void EnsureDesktopShortcut()
+        {
+            try
+            {
+                string desktop = DesktopDir();
+                if (string.IsNullOrEmpty(desktop)) return;
+                string link = Path.Combine(desktop, "FTDI USB Logger.lnk");
+                if (File.Exists(link)) return;
+
+                string exe = Path.Combine(RootDir, "FTDI_USB_Logger.exe");
+                string icon = Path.Combine(RootDir, "app.ico");
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) return;
+                object shell = Activator.CreateInstance(shellType);
+                object shortcut = shellType.InvokeMember(
+                    "CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { link });
+                Type shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { exe });
+                shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { RootDir });
+                if (File.Exists(icon))
+                {
+                    shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { icon });
+                }
+                shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "FTDI/USB Logger" });
+                shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            catch
+            {
+                // Ярлык — не критичная часть запуска: без него приложение работает.
             }
         }
 

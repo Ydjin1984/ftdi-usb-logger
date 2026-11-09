@@ -239,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
   код-сертификат (не входит в репозиторий).
 - Сессии и логи хранятся в каталоге установки (`sessions\`), при удалении можно сохранить их.
 
-### Сборка установщика
+### Сборка установщика (Inno Setup)
 
 ```powershell
 # 0) движок + UI + независимый лаунчер -> dist\FTDI_USB_Logger\ (включая FTDI_USB_Logger.exe)
@@ -248,13 +248,22 @@ pwsh -File scripts\build.ps1
 # 1) portable: dist + встроенный Python + frida  -> build\FTDI_USB_Logger_portable.zip
 pwsh -File scripts\build-portable.ps1
 
-# 2) setup.exe (7-Zip SFX, per-user установка)   -> dist\FTDI_USB_Logger_Setup.exe
+# 2) Setup.exe (Inno Setup 6, per-user установка) -> dist\FTDI_USB_Logger_Setup.exe
 pwsh -File scripts\build-installer.ps1
+
+# запасной путь без Inno Setup — 7-Zip SFX (хуже: нет мастера и иконки)
+pwsh -File scripts\build-installer.ps1 -ForceSfx
 ```
 
-Для сборки нужны .NET Framework 4.x (csc для лаунчера), 7-Zip и интернет (первый раз
-скачивается embeddable Python, кешируется в `build\cache`). Установка/удаление:
-`scripts\installer\install.cmd|ps1`, `uninstall.cmd|ps1`.
+Установщик — **Inno Setup 6** (`installer\ftdi-logger.iss`): мастер установки, иконка
+приложения у Setup.exe, запись в «Установка и удаление программ», ярлыки на рабочем столе
+и в меню «Пуск», штатный uninstall, закрытие запущенных процессов перед установкой.
+Компилятор ищется в `%INNO_SETUP_DIR%`, `C:\Program Files (x86)\Inno Setup 6` и PATH;
+если его нет — скрипт откатывается на 7-Zip SFX.
+
+Для сборки нужны .NET Framework 4.x (csc для лаунчера), Inno Setup 6 и интернет
+(первый раз скачивается embeddable Python, кешируется в `build\cache`);
+7-Zip нужен только для запасного пути и portable-архива.
 
 ## Как логировать
 

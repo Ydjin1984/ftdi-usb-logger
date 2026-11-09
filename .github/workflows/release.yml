@@ -41,6 +41,16 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Inno Setup 6
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "Inno Setup не установился" }
+          "ISCC: $iscc"
+
       - name: Build product (engine + UI + launcher)
         shell: pwsh
         run: ./scripts/build.ps1
