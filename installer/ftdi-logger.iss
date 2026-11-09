@@ -45,6 +45,11 @@ VersionInfoProductName=FTDI/USB Logger
 VersionInfoProductVersion={#AppVersion}
 VersionInfoCopyright=DaVinci Cyber Engineering
 
+[Languages]
+; Русский — язык по умолчанию; английский оставляем вторым.
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
 [Tasks]
 Name: "desktopicon"; Description: "Ярлык на рабочем столе"; GroupDescription: "Дополнительно:"; Flags: checkedonce
 Name: "startmenuicon"; Description: "Ярлык в меню «Пуск»"; GroupDescription: "Дополнительно:"; Flags: checkedonce
