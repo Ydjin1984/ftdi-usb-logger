@@ -211,6 +211,11 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 (workflow `.github/workflows/release.yml`, тег `v*`) — оттуда `FTDI_USB_Logger_Setup.exe`
 и portable ZIP можно скачать и установить без сборки из исходников.
 
+**Скачать (без авторизации):**
+[Установщик FTDI_USB_Logger_Setup.exe](https://github.com/Ydjin1984/ftdi-usb-logger/releases/latest/download/FTDI_USB_Logger_Setup.exe) ·
+[Portable ZIP](https://github.com/Ydjin1984/ftdi-usb-logger/releases/latest/download/FTDI_USB_Logger_portable.zip) ·
+[все релизы](https://github.com/Ydjin1984/ftdi-usb-logger/releases)
+
 | Что | Где | Размер | Как ставится |
 |---|---|---|---|
 | **Установщик** | `FTDI_USB_Logger_Setup.exe` (GitHub Releases, `dist\`) | ≈43 МБ | запустить, разрешить UAC; per-user установка в `%LOCALAPPDATA%\FTDI_USB_Logger`, ярлыки на рабочем столе и в меню Пуск, запись в «Установка и удаление программ», uninstall |
