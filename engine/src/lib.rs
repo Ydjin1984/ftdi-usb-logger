@@ -28,6 +28,7 @@ pub async fn run(cli: config::Cli) -> anyhow::Result<()> {
     let (bus, _) = broadcast::channel::<models::ServerMsg>(4096);
     let capture = Arc::new(capture::CaptureManager::new(cfg.clone(), store.clone(), bus.clone()));
     capture.spawn_workers().await?;
+    capture.spawn_target_watchdog();
 
     let state = api::AppState {
         cfg: cfg.clone(),
@@ -58,4 +59,5 @@ pub async fn run(cli: config::Cli) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
 

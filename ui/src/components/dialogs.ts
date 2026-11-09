@@ -516,7 +516,9 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
   const tools = res.tools ?? [];
 
   let chosenAdapter: string | null = devices.length ? devices[0].serial || devices[0].description : null;
-  let chosenPid: number | null = tools.length ? tools[0].pid : null;
+  // Программу НЕ выбираем заранее: иначе «начать сессию» цепляется к первому
+  // в списке (часто explorer) и кажется, что логер «держит» не то устройство.
+  let chosenPid: number | null = null;
   let manualPid: number | null = null;
 
   const body = el("div");
@@ -579,6 +581,7 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
       manualPid = null;
       for (const n of Array.from(programs.children)) n.classList.remove("is-active");
       row.classList.add("is-active");
+      updateStart();
     });
     programs.append(row);
   }
@@ -586,6 +589,7 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
 
   const manual = el("div", "rail-pid");
   manual.style.marginTop = "8px";
+  manual.style.gridTemplateColumns = "1fr auto";
   const manualInput = textInput("PID вручную, если программы нет в списке", "");
   const manualBtn = primary("выбрать PID", () => {
     const pid = Number(manualInput.value);
@@ -594,6 +598,7 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
     chosenPid = pid;
     for (const n of Array.from(programs.children)) n.classList.remove("is-active");
     manualHint.textContent = `выбран PID ${pid}`;
+    updateStart();
   });
   manual.append(manualInput, manualBtn);
   const manualHint = el("div", "field__hint", "");
@@ -612,6 +617,14 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
     void store.attach(pid, label, chosenAdapter ?? undefined);
   });
   const cancel = ghost("отмена", () => m.close());
+  start.disabled = true;
+  start.title = "сначала выберите программу (или введите PID)";
+  const updateStart = (): void => {
+    const pid = manualPid ?? chosenPid;
+    start.disabled = !pid;
+    start.title = pid ? "" : "сначала выберите программу (или введите PID)";
+  };
+  updateStart();
   m = modal({
     title: "Новая сессия: выбор цели",
     body,
@@ -624,6 +637,9 @@ function div(cls: string, text: string): HTMLElement {
   const d = el("div", cls, text);
   return d;
 }
+
+
+
 
 
 

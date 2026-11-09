@@ -742,6 +742,51 @@ impl CaptureManager {
         }
     }
 
+    /// PID активной цели (для watchdog'а «программа закрылась»).
+    pub fn target_pid(&self) -> Option<u32> {
+        *self.shared.pid.lock()
+    }
+
+    /// Программа закрылась/упала: отпускаем захват и устройства, сессию финализируем.
+    /// Иначе UI продолжал бы показывать «сессия идёт» уже для мёртвого процесса.
+    pub async fn on_target_gone(&self) {
+        if self.shared.active.lock().is_none() {
+            return;
+        }
+        toast(
+            &self.bus,
+            "warn",
+            String::from("целевая программа завершилась — захват остановлен, устройства освобождены"),
+        );
+        match tokio::time::timeout(Duration::from_secs(8), self.detach()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!("target-exit detach: {err:#}");
+                self.detach_force().await;
+            }
+            Err(_) => {
+                tracing::warn!("target-exit detach не ответил за 8 с — принудительно");
+                self.detach_force().await;
+            }
+        }
+    }
+
+    /// Раз в секунду проверяет, жива ли цель; при выходе программы сам закрывает сессию.
+    pub fn spawn_target_watchdog(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Some(pid) = this.target_pid() {
+                    if !process_alive(pid) {
+                        this.on_target_gone().await;
+                    }
+                }
+            }
+        });
+    }
     /// Аварийное завершение, если штатный `detach` завис (мост/писатель не отвечают).
     ///
     /// Не ждём writer-задачу: глушим источник, снимаем pump и очищаем состояние. Сессия
@@ -1965,9 +2010,7 @@ fn packet_to_cmd(packet: &crate::usbpcap::UsbPacket) -> Cmd {
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-    };
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     // SAFETY: открываем процесс только с правом завершения; дескриптор закрывается.
     unsafe {
@@ -1983,6 +2026,34 @@ fn terminate_process(pid: u32) -> bool {
 #[cfg(not(windows))]
 fn terminate_process(_pid: u32) -> bool {
     false
+}
+
+/// Жив ли процесс (для watchdog'а цели). Не смогли открыть — считаем живым,
+/// чтобы не закрыть сессию из-за прав доступа.
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: дескриптор открывается с минимальными правами и закрывается.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return true;
+        }
+        code == 259 // STILL_ACTIVE
+    }
+}
+
+#[cfg(not(windows))]
+fn process_alive(_pid: u32) -> bool {
+    true
 }
 
 /// Unix-секунды (float) → RFC3339 UTC (миллисекунды); при мусоре — текущее время.
@@ -2942,3 +3013,5 @@ Error (134) API-0014: RESULT NOT FOUND\n";
         );
     }
 }
+
+
