@@ -36,7 +36,9 @@ flowchart LR
 
 ![Главный экран: поток, шаги, таймлайн](assets/ui-main.png)
 
-![Инспектор события: HEX, ASCII, KWP-декод](assets/ui-inspector.png)
+'![Инспектор события: HEX, ASCII, KWP-декод](assets/ui-inspector.png)
+
+![Универсальный захват: USB-устройства, J2534-драйверы, бейджи программ](assets/ui-universal.png)'
 
 ![Сводка шага: команды, ответы, чтения с sha256, скриншот](assets/ui-steps.png)
 
@@ -104,9 +106,11 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 
 ## Как логировать
 
-1. Запустить целевой инструмент (Quickflash / WinKFP / EDIABAS) и подключить шнурок.
-2. В UI выбрать процесс-цель (у него загружен `ftd2xx.dll`) и нажать «Подключиться» — мост
-   прицепится, загрузит Frida-агент и начнёт писать поток.
+1. Запустить целевую программу (Quickflash, WinKFP, MS4x Flasher, J2534-клиент — любую) и подключить адаптер.
+2. В UI открыть «ПРОГРАММЫ»: список показывает процессы с окном, USB/FTDI/J2534-модулями
+   и известные инструменты, с бейджами `FTDI`, `J2534`, `USB`, `окно`. Выбрать свою программу и
+   нажать «подключить». Если программа не видна — переключить фильтр на «окна»/«все» или ввести
+   её PID вручную (поле `PID` → `→`). Мост прицепится, загрузит Frida-агент и начнёт писать поток.
 3. `F2` — открыть шаг (название подставляется автоматически), повторный `F2` — закрыть шаг:
    появится сводка, скриншот и строки `# PHASE` в `raw.log`.
 4. Работать с блоком как обычно: весь обмен FTDI/VCP/файлы пишется в сессию.
@@ -165,6 +169,33 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 > Старые логи **не копируются** в репозиторий (большие): их место — `reference/logs/` или импорт
 > в `sessions/`. Сравнение разбора — через `tools/legacy/parse_family.py`.
 
+
+## Универсальный захват: USB, COM, J2534
+
+Логер не привязан к Quickflash. Он цепляется к произвольному процессу и пишет обмен с любым
+устройством, которое тот использует:
+
+| Что за устройство / API | Как ловится | Статус |
+|---|---|---|
+| FTDI D2XX (`ftd2xx.dll`, Quickflash, ms41-studio) | хуки `FT_*` (36 функций) | ✅ полностью |
+| Виртуальный COM / VCP (WinKFP, EDIABAS, `System.IO.Ports`) | хуки `CreateFileW/A`, `ReadFile`, `WriteFile`, `GetOverlappedResult(Ex)`, `DeviceIoControl` | ✅, включая overlapped-I/O и порт, открытый до attach |
+| WinUSB (`winusb.dll`) | `WinUsb_ReadPipe/WritePipe/ControlTransfer` | ✅ |
+| HID (`hid.dll`, `\\?\hid#…`) | `HidD_*`, ReadFile/WriteFile/DeviceIoControl по HID-путям | ✅ |
+| libusb-1.0 | `libusb_bulk/interrupt/control_transfer` | ✅ |
+| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + `PassThruOpen/Connect/ReadMsgs/WriteMsgs/Ioctl/…` | ✅ на уровне сообщений (протокол, CAN ID, payload) |
+| Любой USB без перечисленных API (проприетарный драйвер) | — | ⚠️ только через USBPcap (см. ниже) |
+
+В панели «USB-УСТРОЙСТВА» видны все USB-устройства (VID/PID, серийник, драйвер, COM, present),
+на вкладке «J2534» — зарегистрированные драйверы PassThru 04.04 из 32/64-битных ветвей реестра
+со статусом DLL. В шапке — индикатор `шина: USB/J2534 · N`.
+
+### Сырой захват USB-шины (USBPcap)
+
+Если установлен [USBPcap](https://desowin.org/usbpcap/) (драйвер + `USBPcapCMD.exe`, нужны права
+администратора и перезагрузка), в панели USB появляется кнопка «записать USB-шину (USBPcap)»:
+движок запускает `USBPcapCMD` на выбранном корневом хабе, разбирает pcap-поток и пишет события
+`USBRAW bus=… dev=… ep=… transfer=… len=… : hex` — это работает для **любого** USB-устройства,
+даже с проприетарным драйвером. Без драйвера режим недоступен (UI подскажет).
 ## Ограничения (осознанные)
 
 | Ограничение | Почему / что делать |
@@ -176,6 +207,10 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 | Глобальных горячих клавиш нет | F2/F5/F6/F8 работают, когда окно логера в фокусе — чтобы не перехватывать клавиши у Quickflash/WinKFP. |
 | Слушает только `127.0.0.1`, CORS — только точный localhost-origin | удалённый доступ и сторонние origin закрыты осознанно. |
 | EDIABAS-режим включается эвристикой: имя процесса (`winkfp/inpa/tool32/nfs/ediabas`) или свежие трассы (mtime ≤ 10 мин) | принудительно: переменная `FTDI_LOGGER_EDIABAS=1`; пути INI/трасс переопределяются `FTDI_LOGGER_EDIABAS_INI`, `_OBD_INI`, `_WINKFP_INI`, `_TRACE_DIR`. |
+| Сырой USB через USBPcap требует установленного драйвера и прав администратора | без него доступны только API-хуки (FTDI/COM/WinUSB/HID/libusb/J2534); установка USBPcap требует перезагрузки |
+| J2534 ловится на уровне сообщений PassThru (протокол/ID/payload), без разбора внутренних URB драйвера | если адаптер не открывается через `PassThru*`, нужен USBPcap |
+| ISOTP: классифицируется PCI (SF/FF/CF/FC) и service id одиночного кадра | многокадровая сборка сообщений (reassembly) не выполняется — полный текст собирайте по кадрам в экспорте |
+| J2534/TX-RX не сопоставляются в пары запрос-ответ автоматически | в сводке шага `cmd_hist`/`resp_hist` по CAN ID, полный обмен — в потоке |
 
 ## Проверки
 
@@ -212,4 +247,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 
 Полный порядок установки, проверки моста, прав администратора и разбор ошибок —
 **[docs/03-runbook.md](docs/03-runbook.md)**.
+
+
+
 

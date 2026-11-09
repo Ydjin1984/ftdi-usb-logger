@@ -32,6 +32,8 @@ pub enum EventKind {
     Module,
     /// Открытие COM-порта / VCP-событие.
     Vcp,
+    /// USB-событие: открытие HID/WinUSB-устройства, смена конфигурации.
+    Usb,
     /// Заметка оператора.
     Note,
     /// Скриншот.
@@ -49,6 +51,10 @@ pub enum EventKind {
 pub enum Transport {
     Ftd2xx,
     Vcp,
+    /// WinUSB / HID / libusb — обмен через USB-стек.
+    Usb,
+    /// J2534 PassThru (Scanmatik, CHIPSOFT, Tactrix, OpenPort, VXDIAG …).
+    J2534,
     File,
     App,
     None,
@@ -540,12 +546,97 @@ pub struct ToolProcess {
     pub exe: String,
     #[serde(default)]
     pub has_ftd2xx: bool,
+    /// Загружены модули J2534/PassThru (smj2534, op20pt32, j2534_interface, …).
+    #[serde(default)]
+    pub has_j2534: bool,
+    /// Загружены winusb.dll / hid.dll / libusb / SetupAPI-обмен.
+    #[serde(default)]
+    pub has_usb: bool,
     #[serde(default)]
     pub known_tool: Option<String>,
     #[serde(default)]
     pub started_at: Option<String>,
     #[serde(default)]
     pub window_title: Option<String>,
+    #[serde(default)]
+    pub cmdline: Option<String>,
+    /// Метки для UI: `ftd2xx`, `j2534`, `usb`, `window`.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Перечисление модулей недоступно (процесс с более высокими правами).
+    #[serde(default)]
+    pub modules_denied: bool,
+    /// `x64` | `x86` | `?`
+    #[serde(default)]
+    pub arch: String,
+}
+
+/// Одно USB-устройство из PnP (SetupAPI/реестр).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsbDevice {
+    /// Стабильный идентификатор: `USB\VID_0403&PID_6001\serial` или путь.
+    pub id: String,
+    #[serde(default)]
+    pub vid: Option<u16>,
+    #[serde(default)]
+    pub pid: Option<u16>,
+    #[serde(default)]
+    pub serial: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub manufacturer: String,
+    #[serde(default)]
+    pub friendly_name: String,
+    /// Драйвер/сервис: ftdibus, usbser, winusb, hidusb, usbccgp …
+    #[serde(default)]
+    pub service: String,
+    /// Класс устройства: `HIDClass`, `Ports`, `USB`, `WinUSB`, …
+    #[serde(default)]
+    pub class_name: String,
+    #[serde(default)]
+    pub com_port: Option<u32>,
+    #[serde(default)]
+    pub present: bool,
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// `usb` | `ftdi` | `serial` | `hid` | `composite`
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// Драйвер J2534, зарегистрированный в системе (PassThruSupport 04.04).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct J2534Driver {
+    #[serde(default)]
+    pub registry_key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub dll: String,
+    #[serde(default)]
+    pub dll_present: bool,
+    #[serde(default)]
+    pub version: String,
+}
+
+/// Возможности окружения (что реально доступно на этой машине).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnvCapabilities {
+    #[serde(default)]
+    pub process_scan: bool,
+    #[serde(default)]
+    pub usb_enum: bool,
+    #[serde(default)]
+    pub ftd2xx: bool,
+    #[serde(default)]
+    pub j2534: usize,
+    #[serde(default)]
+    pub usbpcap: bool,
+    #[serde(default)]
+    pub usbpcap_devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

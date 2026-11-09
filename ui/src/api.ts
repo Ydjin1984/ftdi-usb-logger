@@ -7,6 +7,8 @@ import type {
   Health,
   PayloadDecode,
   ProcessDetail,
+  UsbDevice,
+  J2534Driver,
   ServerMsg,
   SessionCounts,
   SessionDetail,
@@ -97,7 +99,12 @@ export const api = {
     req<PayloadDecode>(`/api/sessions/${encodeURIComponent(id)}/events/${seq}/decode`),
 
   devices: () => req<FtdiDevice[]>("/api/devices"),
-  tools: () => req<ToolProcess[]>("/api/tools"),
+  tools: (mode: "auto" | "usb" | "window" | "all" = "auto") =>
+    req<ToolProcess[]>(`/api/tools?mode=${mode}`),
+  usbDevices: () => req<UsbDevice[]>("/api/usb/devices"),
+  usbpcapDevices: () => req<string[]>("/api/usbpcap/devices"),
+  startUsbpcap: (device: string) => req<SessionMeta>("/api/usbpcap/start", json({ device })),
+  j2534Drivers: () => req<J2534Driver[]>("/api/j2534/drivers"),
   toolDetail: (pid: number) => req<ProcessDetail>(`/api/tools/${pid}/detail`),
 
   attach: (pid: number, label?: string, adapter?: string) =>
@@ -265,5 +272,7 @@ export function sessionFileUrl(id: string, rel: string): string {
 }
 
 export type { SessionCounts, StepSummary, StepEvent };
+
+
 
 

@@ -50,7 +50,8 @@ export class Topbar {
     const target = s.status?.target ?? null;
     const ws = s.wsState;
 
-    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode].join("|");
+    const capsKey = s.health?.capabilities ? `${s.health.capabilities.j2534}:${s.health.capabilities.usbpcap}` : "";
+    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey].join("|");
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -82,6 +83,19 @@ export class Topbar {
     }
 
     if (s.mode === "demo") this.pills.append(pill("warn", "режим", "демо"));
+    const caps = s.health?.capabilities;
+    if (caps && s.mode !== "demo") {
+      const value = `USB/J2534 · ${caps.j2534}${caps.usbpcap ? " · raw" : ""}`;
+      const tone = caps.j2534 > 0 || caps.usbpcap ? "ok" : "";
+      const p = pill(tone, "шина", value);
+      p.title = [
+        `J2534-драйверов: ${caps.j2534}`,
+        `FTDI: ${caps.ftd2xx ? "да" : "нет"}`,
+        `USB-перечисление: ${caps.usb_enum ? "да" : "нет"}`,
+        `USBPcap: ${caps.usbpcap ? caps.usbpcap_devices.join(", ") : "не установлен"}`,
+      ].join("\n");
+      this.pills.append(p);
+    }
   }
 }
 
@@ -93,4 +107,6 @@ function pill(kind: "ok" | "warn" | "err" | "", label: string, value: string): H
   p.append(el("span", "pill__label", label), b);
   return p;
 }
+
+
 

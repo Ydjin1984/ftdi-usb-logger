@@ -1,7 +1,7 @@
 /** Демо-режим: реалистичная сессия без устройства и движка (`?demo=1`).
  *  Нужен для проверки интерфейса, обучения и скриншотов. */
 
-import type { Event, SessionCounts, SessionMeta, StepSummary } from "./types";
+import type { Event, J2534Driver, SessionCounts, SessionMeta, StepSummary, UsbDevice } from "./types";
 
 const ID = "demo-20261109-120013-BMS46";
 
@@ -295,4 +295,90 @@ export function demoShotDataUrl(step: number, title: string): string {
   <text x="28" y="590" font-family="Consolas,monospace" font-size="11" fill="#5f6c7a">F2: step  F6: hooks  Esc: stop   |   FTDI/USB Logger</text>
 </svg>`;
   return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg)));
+}
+export function demoUsbDevices(): UsbDevice[] {
+  return [
+    {
+      id: "USB\\VID_0403&PID_6001\\A63UJ38H",
+      vid: 0x0403,
+      pid: 0x6001,
+      serial: "A63UJ38H",
+      description: "USB Serial Converter",
+      friendly_name: "D-CAN",
+      manufacturer: "FTDI",
+      service: "ftdibus",
+      class_name: "USB",
+      com_port: 6,
+      present: true,
+      interfaces: ["USB\\VID_0403&PID_6001&MI_00\\A63UJ38H"],
+      kind: "ftdi",
+    },
+    {
+      id: "USB\\VID_0403&PID_B470\\SNDEVICE",
+      vid: 0x0403,
+      pid: 0xb470,
+      serial: "SNDEVICE",
+      description: "USB Device",
+      friendly_name: "USB Device",
+      manufacturer: "FTDI",
+      service: "usbser",
+      class_name: "Ports",
+      com_port: 8,
+      present: true,
+      interfaces: [],
+      kind: "ftdi",
+    },
+    {
+      id: "USB\\VID_1EA7&PID_0066\\5&115A75A8&0&1",
+      vid: 0x1ea7,
+      pid: 0x0066,
+      serial: "5&115A75A8&0&1",
+      description: "Составное USB устройство",
+      friendly_name: "",
+      manufacturer: "(Standard USB Host Controller)",
+      service: "usbccgp",
+      class_name: "USB",
+      com_port: null,
+      present: false,
+      interfaces: [],
+      kind: "composite",
+    },
+  ];
+}
+
+export function demoJ2534Drivers(): J2534Driver[] {
+  return [
+    {
+      registry_key: "Scanmatik - SM2 USB",
+      name: "SM2 USB",
+      vendor: "Scanmatik",
+      dll: "C:\\Program Files (x86)\\Scanmatik\\smj2534.dll",
+      dll_present: true,
+      version: "04.04",
+    },
+    {
+      registry_key: "Scanmatik - SM3 USB",
+      name: "SM3 USB",
+      vendor: "Scanmatik",
+      dll: "C:\\Program Files (x86)\\Scanmatik\\smj2534_0404_usb_sm3.dll",
+      dll_present: true,
+      version: "04.04",
+    },
+    {
+      registry_key: "CHIPSOFT - J2534 ISO/CAN",
+      name: "CHIPSOFT J2534 ISO/CAN",
+      vendor: "CHIPSOFT",
+      dll: "C:\\Program Files (x86)\\CHIPSOFT_J2534_Lite_Driver\\j2534_interface.dll",
+      dll_present: true,
+      version: "04.04",
+    },
+    {
+      registry_key: "Tactrix Inc. - OpenPort 2.0",
+      name: "OpenPort 2.0 J2534 ISO/CAN/VPW/PWM",
+      vendor: "Tactrix Inc.",
+      dll: "C:\\Windows\\SysWOW64\\op20pt32.dll",
+      dll_present: true,
+      version: "04.04",
+    },
+  ];
 }

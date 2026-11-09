@@ -70,6 +70,16 @@ pub struct CaptureManager {
     /// Канал сообщений моста (сюда пишет `BridgeManager`, отсюда читает `bridge_pump`).
     bridge_tx: broadcast::Sender<BridgeMsg>,
     shared: Arc<Shared>,
+    /// Активный сырой USB-захват (USBPcapCMD): pid процесса и reader-задача.
+    raw_usb: Mutex<Option<RawUsbSession>>,
+}
+
+/// Состояние сырого USB-захвата: USBPcapCMD крутится отдельным процессом.
+struct RawUsbSession {
+    /// PID USBPcapCMD (для принудительного завершения при detach).
+    child_pid: u32,
+    /// Задача, читающая pcap-поток (внутри spawn_blocking).
+    reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Состояние, которое нужно одновременно фасаду (status) и писателю (counts/step).
@@ -83,10 +93,12 @@ struct Shared {
     pid: Mutex<Option<u32>>,
     cmd_tx: Mutex<Option<mpsc::Sender<Cmd>>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Идёт штатная остановка (detach/провал attach): смерть моста в этот момент не авария.
+    /// Идёт штатная остановка (detach/провал attach): смерть источника в этот момент не авария.
     stopping: AtomicBool,
-    /// Пришёл `BridgeMsg::Ready` — только после этого сессия считается живой записью.
+    /// Источник готов (Frida `Ready` или запущенный USBPcapCMD) — только тогда это «запись».
     bridge_ready: AtomicBool,
+    /// Активен сырой USB-режим (USBPcapCMD), а не Frida-мост.
+    raw_usb: AtomicBool,
 }
 
 /// Пути EDIABAS/WinKFP. Каждый путь можно подменить переменной окружения, чтобы
@@ -269,6 +281,22 @@ enum Cmd {
     BridgeError { msg: String },
     /// Служебное sys-событие (факты EDIABAS и т.п.).
     Sys { text: String },
+    /// Пакет сырого USB-захвата (USBPcapCMD). Времена/kind вычисляет writer.
+    UsbRaw {
+        /// Секунды с эпохи из pcap-заголовка.
+        ts: f64,
+        /// `true` — хост→устройство (Tx), `false` — устройство→хост (Rx).
+        tx: bool,
+        /// control-транзакция без данных (setup): пишем как Sys, но байты не теряем.
+        control_setup: bool,
+        /// Полные байты пакета (для control — вместе с 8-байтовым setup).
+        hex: String,
+        len: u32,
+        meta: serde_json::Value,
+        /// Каноническая строка `UsbPacket::to_line()` — для raw.log/экспорта.
+        raw: String,
+        text: String,
+    },
     StartStep {
         title: String,
         reply: oneshot::Sender<anyhow::Result<StepEvent>>,
@@ -299,8 +327,12 @@ enum Cmd {
         reason: String,
         reply: oneshot::Sender<anyhow::Result<Option<SessionMeta>>>,
     },
-    /// Мост умер после ready без явного detach — сессия сама становится `aborted`.
-    Abandon { reason: String },
+    /// Мост/источник умер после ready без явного detach — сессия сама становится `aborted`.
+    Abandon {
+        reason: String,
+        /// Готовая строка факта (`# bridge-lost: …` / `# usbpcap-lost: …`).
+        fact: String,
+    },
 }
 
 impl CaptureManager {
@@ -326,7 +358,9 @@ impl CaptureManager {
                 pump: Mutex::new(None),
                 stopping: AtomicBool::new(false),
                 bridge_ready: AtomicBool::new(false),
+                raw_usb: AtomicBool::new(false),
             }),
+            raw_usb: Mutex::new(None),
         }
     }
 
@@ -438,6 +472,7 @@ impl CaptureManager {
                 meta.clone(),
                 pid,
                 ediabas_state,
+                false, // raw USB выключен: обычный Frida-захват
             );
             tokio::spawn(task.run(rx));
         }
@@ -524,16 +559,170 @@ impl CaptureManager {
         anyhow!("{reason}")
     }
 
-    /// Завершить захват: остановить мост, закрыть незакрытый шаг, сформировать отчёты.
+    // ───────────────────────── сырой USB (USBPcap) ───────────────────────
+
+    /// Начать сырой захват USB-шины через `USBPcapCMD` на устройстве `device`
+    /// (`\\.\USBPcap1` из `usbdevices::usbpcap_devices()`).
+    ///
+    /// Сессия живёт тем же writer-task'ом, что и Frida-захват; `detach()` останавливает
+    /// USBPcapCMD и закрывает сессию. Требует установленного USBPcap и прав администратора.
+    pub async fn start_raw_usb(&self, device: &str) -> anyhow::Result<SessionMeta> {
+        if self.shared.active.lock().is_some() {
+            bail!("сессия уже идёт — сначала завершите текущий захват");
+        }
+        // Прошлые аварийно не закрытые сессии чиним до старта новой.
+        self.recover_stale();
+        let Some(cmd_path) = crate::usbpcap::command_path() else {
+            bail!("USBPcapCMD.exe не найден — установите USBPcap (desowin.org/usbpcap)");
+        };
+        let mut child = crate::usbpcap::spawn(device).context("запустить USBPcapCMD")?;
+        let child_pid = child.id();
+
+        let label = format!("USB raw: {device}");
+        let mut meta = SessionMeta::new(session_id_for(&label), label.clone());
+        meta.transport = "usb".into();
+        meta.process = Some("USBPcapCMD".into());
+        meta.tool_path = Some(cmd_path.to_string_lossy().to_string());
+        meta.pid = Some(child_pid);
+        meta.facts.push(format!("# usbpcap: device={device}"));
+        meta.facts.push(format!("# usbpcap: cmd={}", cmd_path.display()));
+        meta.facts
+            .push(format!("# process: pid={child_pid} usbpcap_raw=true"));
+
+        let mut writer = match self.store.create(meta.clone()) {
+            Ok(writer) => writer,
+            Err(err) => {
+                let _ = child.kill();
+                return Err(err).context("создать каталог сессии");
+            }
+        };
+        let meta = writer.meta.clone();
+        // Баннер в raw.log — legacy-парсер (parse_family.py) ждёт `# capture start:`.
+        for line in raw_banner_for_tool(&meta.label, &cmd_path.to_string_lossy()) {
+            if let Err(err) = writer.write_raw_line(&line) {
+                tracing::warn!("raw.log: баннер не записан: {err}");
+            }
+        }
+
+        *self.shared.active.lock() = Some(meta.clone());
+        *self.shared.counts.lock() = writer.meta.counts.clone();
+        *self.shared.current_step.lock() = None;
+        *self.shared.target.lock() = None;
+        *self.shared.started_at.lock() = Some(meta.started_at.clone());
+        *self.shared.pid.lock() = Some(child_pid);
+        *self.shared.hooks.lock() = "off".into();
+        self.shared.stopping.store(false, Ordering::SeqCst);
+        // Источник готов сразу: USBPcapCMD уже запущен и пишет pcap в stdout.
+        self.shared.bridge_ready.store(true, Ordering::SeqCst);
+        self.shared.raw_usb.store(true, Ordering::SeqCst);
+
+        let (tx, rx) = mpsc::channel::<Cmd>(CMD_QUEUE);
+        *self.shared.cmd_tx.lock() = Some(tx.clone());
+        {
+            let task = SessionWriterTask::new(
+                self.cfg.clone(),
+                self.bus.clone(),
+                self.shared.clone(),
+                self.store.clone(),
+                writer,
+                meta.clone(),
+                child_pid,
+                None,
+                true,
+            );
+            tokio::spawn(task.run(rx));
+        }
+
+        let reader = self.spawn_usbpcap_reader(child, tx);
+        *self.raw_usb.lock() = Some(RawUsbSession {
+            child_pid,
+            reader: Some(reader),
+        });
+
+        toast(
+            &self.bus,
+            "info",
+            format!("сырой USB-захват начат: {device}, сессия {}", meta.id),
+        );
+        Ok(meta)
+    }
+
+    /// Reader-задача USBPcapCMD: в блокирующем потоке читает pcap и шлёт пакеты писателю.
+    ///
+    /// Смерть процесса без явного detach → авто-аборт сессии (как CAP-05).
+    fn spawn_usbpcap_reader(
+        &self,
+        mut child: std::process::Child,
+        tx: mpsc::Sender<Cmd>,
+    ) -> tokio::task::JoinHandle<()> {
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            let packet_tx = tx.clone();
+            let joined = tokio::task::spawn_blocking(move || {
+                crate::usbpcap::read_packets(&mut child, move |packet| {
+                    // try_send: блокирующий поток не должен стоять на переполненной очереди.
+                    if let Err(err) = packet_tx.try_send(packet_to_cmd(&packet)) {
+                        tracing::debug!("raw USB: пакет пропущен ({err})");
+                    }
+                })
+            })
+            .await;
+            let reason = match joined {
+                Ok(Ok(())) => "USBPcapCMD завершился (EOF)".to_string(),
+                Ok(Err(err)) => format!("чтение USBPcapCMD: {err}"),
+                Err(err) => format!("reader USBPcapCMD: {err}"),
+            };
+            if !shared.stopping.load(Ordering::SeqCst) {
+                tracing::warn!("raw USB: {reason}");
+                maybe_abandon_session(
+                    &shared,
+                    format!("сырой USB-захват прерван: {reason}"),
+                    "# usbpcap-lost",
+                )
+                .await;
+            }
+        })
+    }
+
+    /// Остановить USBPcapCMD и дождаться reader-задачи (для detach/cleanup).
+    async fn stop_raw_usb(&self) {
+        let session = self.raw_usb.lock().take();
+        let Some(session) = session else {
+            self.shared.raw_usb.store(false, Ordering::SeqCst);
+            return;
+        };
+        if !terminate_process(session.child_pid) {
+            tracing::warn!(
+                "raw USB: не удалось завершить USBPcapCMD pid={}",
+                session.child_pid
+            );
+        }
+        if let Some(reader) = session.reader {
+            if tokio::time::timeout(Duration::from_secs(5), reader)
+                .await
+                .is_err()
+            {
+                tracing::warn!("raw USB: reader не завершился за 5 с");
+            }
+        }
+        self.shared.raw_usb.store(false, Ordering::SeqCst);
+    }
+
+    /// Завершить захват: остановить источник (Frida-мост и/или USBPcapCMD), закрыть
+    /// незакрытый шаг, сформировать отчёты.
     pub async fn detach(&self) -> anyhow::Result<Option<SessionMeta>> {
         if self.shared.active.lock().is_none() {
-            // Мост мог остаться запущенным после сбоя — глушим.
+            // Источник мог остаться запущенным после сбоя — глушим.
+            self.stop_raw_usb().await;
             let _ = self.bridge.stop().await;
             return Ok(None);
         }
-        // Штатная остановка: смерть моста в этот момент не должна трактоваться как авария.
+        // Штатная остановка: смерть источника в этот момент не должна трактоваться как авария.
         self.shared.stopping.store(true, Ordering::SeqCst);
         *self.shared.hooks.lock() = "off".into();
+        if self.shared.raw_usb.load(Ordering::SeqCst) {
+            self.stop_raw_usb().await;
+        }
         if let Err(err) = self.bridge.stop().await {
             tracing::warn!("остановка моста: {err}");
             toast(&self.bus, "warn", format!("остановка моста: {err}"));
@@ -630,14 +819,16 @@ impl CaptureManager {
 
     // ─────────────────────────────── статус ─────────────────────────────
 
-    /// Статус для API/UI. `recording=true` только если мост реально жив и прислал `ready`:
-    /// после смерти моста (до авто-аборта) UI уже не должен показывать запись.
+    /// Статус для API/UI. `recording=true` только если источник реально жив: Frida-мост
+    /// прислал `ready`, либо запущен USBPcapCMD (сырой USB). После смерти источника
+    /// (до авто-аборта) UI уже не должен показывать запись.
     pub fn status(&self) -> CaptureStatus {
         let active = self.shared.active.lock().clone();
         let bridge_running = self.bridge.is_running();
         let bridge_ready = self.shared.bridge_ready.load(Ordering::SeqCst);
+        let raw_usb = self.shared.raw_usb.load(Ordering::SeqCst);
         CaptureStatus {
-            recording: active.is_some() && bridge_ready && bridge_running,
+            recording: active.is_some() && bridge_ready && (bridge_running || raw_usb),
             session: active.as_ref().map(|m| m.id.clone()),
             hooks: if bridge_running {
                 self.shared.hooks.lock().clone()
@@ -652,11 +843,14 @@ impl CaptureManager {
         }
     }
 
-    /// Активная сессия для API привязки (`require_active`). Если мост умер, а writer ещё
-    /// не успел закрыть сессию, отдаём статус `aborted`, а не «recording».
+    /// Активная сессия для API привязки (`require_active`). Если Frida-мост умер, а writer
+    /// ещё не успел закрыть сессию, отдаём статус `aborted`, а не «recording».
+    /// В сыром USB-режиме моста нет — статус не трогаем (транспорт `usb`).
     pub fn active(&self) -> Option<SessionMeta> {
         let mut meta = self.shared.active.lock().clone()?;
+        let raw_usb = self.shared.raw_usb.load(Ordering::SeqCst);
         if meta.status == "recording"
+            && !raw_usb
             && self.shared.bridge_ready.load(Ordering::SeqCst)
             && !self.bridge.is_running()
         {
@@ -742,6 +936,14 @@ impl CaptureManager {
     }
 
     fn clear_shared(&self) {
+        // Если raw-процесс ещё жив (провал/аварийный путь) — гасим, чтобы не остался висеть.
+        if let Some(session) = self.raw_usb.lock().take() {
+            let _ = terminate_process(session.child_pid);
+            if let Some(reader) = session.reader {
+                reader.abort();
+            }
+        }
+        self.shared.raw_usb.store(false, Ordering::SeqCst);
         *self.shared.active.lock() = None;
         *self.shared.counts.lock() = SessionCounts::default();
         *self.shared.current_step.lock() = None;
@@ -783,6 +985,14 @@ struct SessionWriterTask {
     next_idx: u32,
     /// EDIABAS/WinKFP-режим (None у обычного Quickflash — никаких лишних чтений/фактов).
     ediabas: Option<EdiabasState>,
+    /// Сырой USB-режим (USBPcapCMD): времена берутся из pcap, а не из `+t.s` строк.
+    raw_usb: bool,
+    raw_packets: u64,
+    raw_bytes: u64,
+    /// Секунды с эпохи на момент старта writer-task (для `t = packet.ts - t0`).
+    raw_t0_epoch: f64,
+    /// Резервное относительное время, если pcap отдал подозрительно маленький ts.
+    raw_fallback_t: f64,
 }
 
 impl SessionWriterTask {
@@ -795,7 +1005,12 @@ impl SessionWriterTask {
         meta: SessionMeta,
         pid: u32,
         ediabas: Option<EdiabasState>,
+        raw_usb: bool,
     ) -> Self {
+        let raw_t0_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or(0.0);
         Self {
             bus,
             shared,
@@ -810,6 +1025,11 @@ impl SessionWriterTask {
             steps: Vec::new(),
             next_idx: 1,
             ediabas,
+            raw_usb,
+            raw_packets: 0,
+            raw_bytes: 0,
+            raw_t0_epoch,
+            raw_fallback_t: 0.0,
         }
     }
 
@@ -887,6 +1107,39 @@ impl SessionWriterTask {
                 }
                 false
             }
+            Cmd::UsbRaw {
+                ts,
+                tx,
+                control_setup,
+                hex,
+                len,
+                meta,
+                raw,
+                text,
+            } => {
+                let (t, wall) = self.raw_times(ts);
+                let (kind, direction) = if control_setup {
+                    (EventKind::Sys, None)
+                } else if tx {
+                    (EventKind::Tx, Some(crate::models::Direction::Tx))
+                } else {
+                    (EventKind::Rx, Some(crate::models::Direction::Rx))
+                };
+                let mut ev = Event::new(kind, Transport::Usb, t, wall);
+                ev.api = if control_setup { "USBRAW-SETUP" } else { "USBRAW" }.into();
+                ev.direction = direction;
+                ev.hex = hex;
+                ev.len = len;
+                ev.text = Some(text);
+                ev.meta = meta;
+                ev.raw = raw;
+                self.raw_packets = self.raw_packets.saturating_add(1);
+                self.raw_bytes = self.raw_bytes.saturating_add(len as u64);
+                if let Err(err) = self.append_event(ev).await {
+                    tracing::warn!("пакет raw USB не записан: {err}");
+                }
+                false
+            }
             Cmd::StartStep { title, reply } => {
                 let result = self.start_step(title).await;
                 let _ = reply.send(result);
@@ -933,10 +1186,10 @@ impl SessionWriterTask {
                 let _ = reply.send(Ok(meta));
                 true
             }
-            Cmd::Abandon { reason } => {
-                // Мост умер после ready без detach: закрываем сессию как aborted и снимаем
-                // «запись» из shared, чтобы /api/capture/status не показывал recording=true.
-                self.meta.facts.push(format!("# bridge-lost: {reason}"));
+            Cmd::Abandon { reason, fact } => {
+                // Источник (мост или USBPcapCMD) умер без detach: сессия становится aborted,
+                // shared очищается, чтобы /api/capture/status не показывал recording=true.
+                self.meta.facts.push(fact);
                 let _ = self.finalize("aborted").await;
                 let _ = self.bus.send(ServerMsg::Toast {
                     level: "error".into(),
@@ -958,6 +1211,7 @@ impl SessionWriterTask {
                 *self.shared.cmd_tx.lock() = None;
                 *self.shared.hooks.lock() = "off".into();
                 self.shared.bridge_ready.store(false, Ordering::SeqCst);
+                self.shared.raw_usb.store(false, Ordering::SeqCst);
                 self.shared.stopping.store(false, Ordering::SeqCst);
                 true
             }
@@ -971,6 +1225,17 @@ impl SessionWriterTask {
     /// Секунды от старта сессии (якорь t0 этого писателя).
     fn t(&self) -> f64 {
         self.t0.elapsed().as_secs_f64()
+    }
+
+    /// Время пакета сырого USB: из pcap `ts` относительно t0; при мусорном/маленьком `ts`
+    /// (некоторые версии USBPcap пишут относительное время) — монотонный счётчик.
+    fn raw_times(&mut self, ts: f64) -> (f64, String) {
+        if self.raw_usb && ts.is_finite() && ts >= 1.0e9 {
+            let t = (ts - self.raw_t0_epoch).max(0.0);
+            return (t, rfc3339_from_epoch(ts));
+        }
+        self.raw_fallback_t += 0.001;
+        (self.raw_fallback_t, now_rfc3339())
     }
 
     /// Записать событие в сессию: seq/counts/raw.log делает `SessionWriter::append`,
@@ -1352,6 +1617,13 @@ impl SessionWriterTask {
                 state.jobs_total, state.jobs_errors
             ));
         }
+        // Сырой USB: итог по пакетам/байтам в шапку сессии.
+        if self.raw_usb {
+            self.meta.facts.push(format!(
+                "# usbpcap: packets={} bytes={}",
+                self.raw_packets, self.raw_bytes
+            ));
+        }
         // Шаги пишутся в steps/*.json в процессе; если в памяти пусто — дочитаем из сессии.
         let steps = if self.steps.is_empty() {
             self.store
@@ -1515,7 +1787,12 @@ async fn handle_bridge_msg(
             };
             let _ = tx.send(Cmd::BridgeError { msg: msg.clone() }).await;
             if fatal {
-                maybe_abandon_session(shared, format!("мост умер: {msg}")).await;
+                maybe_abandon_session(
+                    shared,
+                    format!("мост умер: {msg}"),
+                    "# bridge-lost",
+                )
+                .await;
             }
         }
         BridgeMsg::Bye { code, events } => {
@@ -1530,6 +1807,7 @@ async fn handle_bridge_msg(
             maybe_abandon_session(
                 shared,
                 format!("мост завершил работу без detach (bye, код {code})"),
+                "# bridge-lost",
             )
             .await;
         }
@@ -1539,23 +1817,7 @@ async fn handle_bridge_msg(
 
 /// Мост умер/завершился после `ready`, а явного detach не было → закрываем сессию как
 /// `aborted`. Если сессия ещё не была готова или уже останавливается, ничего не делаем.
-async fn maybe_abandon_session(shared: &Arc<Shared>, reason: String) {
-    if shared.stopping.load(Ordering::SeqCst) {
-        return;
-    }
-    if !shared.bridge_ready.load(Ordering::SeqCst) {
-        return;
-    }
-    if shared.active.lock().is_none() {
-        return;
-    }
-    tracing::warn!("сессия будет закрыта: {reason}");
-    *shared.hooks.lock() = "off".into();
-    let sender = shared.cmd_tx.lock().clone();
-    if let Some(tx) = sender {
-        let _ = tx.send(Cmd::Abandon { reason }).await;
-    }
-}
+// (реализация — `maybe_abandon_session` выше, с префиксом факта; здесь оставлен маркер места)
 
 // ─────────────────────────────── хелперы ─────────────────────────────────
 
@@ -1604,6 +1866,135 @@ fn local_time_from_rfc3339(text: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// Баннер raw.log для сессии «внешнего инструмента» (USBPcapCMD): без exe-меты.
+fn raw_banner_for_tool(label: &str, tool: &str) -> Vec<String> {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "?".into());
+    let computer = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "?".into());
+    vec![
+        format!("# capture start: label={label}"),
+        format!("# tool: {tool}"),
+        format!(
+            "# wall(start)={}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
+        format!("# host: user={user} computer={computer}"),
+    ]
+}
+
+/// Пакет USBPcap → команда писателю (события строятся уже в writer-task).
+fn packet_to_cmd(packet: &crate::usbpcap::UsbPacket) -> Cmd {
+    use crate::models::Direction;
+    use crate::models::util::bytes_to_hex;
+
+    let payload_len = packet.payload().len();
+    let tx = packet.direction() == Direction::Tx;
+    // control без данных (setup) — служебное событие, но байты setup сохраняем в hex.
+    let control_setup = packet.transfer == 2 && payload_len == 0;
+    let text = if control_setup {
+        if packet.data.len() >= 8 {
+            format!(
+                "USBRAW control ep=0x{:02x} bmRequestType=0x{:02x} bRequest=0x{:02x}",
+                packet.endpoint, packet.data[0], packet.data[1]
+            )
+        } else {
+            format!("USBRAW control ep=0x{:02x} setup", packet.endpoint)
+        }
+    } else {
+        format!(
+            "USBRAW {} ep=0x{:02x} len={payload_len}",
+            packet.transfer_name(),
+            packet.endpoint
+        )
+    };
+    let meta = serde_json::json!({
+        "bus": packet.bus,
+        "device": packet.device,
+        "endpoint": packet.endpoint,
+        "transfer": packet.transfer,
+        "function": packet.function,
+        "status": packet.status,
+        "irp_id": packet.irp_id,
+        "payload_len": payload_len,
+        "usbpcap": true,
+    });
+    Cmd::UsbRaw {
+        ts: packet.ts,
+        tx,
+        control_setup,
+        hex: bytes_to_hex(&packet.data),
+        len: packet.data.len() as u32,
+        meta,
+        raw: packet.to_line(),
+        text,
+    }
+}
+
+/// Принудительно завершить процесс по pid (аналог `Child::kill` для чужой задачи).
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+
+    // SAFETY: открываем процесс только с правом завершения; дескриптор закрывается.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) else {
+            return false;
+        };
+        let ok = TerminateProcess(handle, 1).is_ok();
+        let _ = CloseHandle(handle);
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_process(_pid: u32) -> bool {
+    false
+}
+
+/// Unix-секунды (float) → RFC3339 UTC (миллисекунды); при мусоре — текущее время.
+fn rfc3339_from_epoch(ts: f64) -> String {
+    if !ts.is_finite() || ts < 0.0 {
+        return now_rfc3339();
+    }
+    let secs = ts.trunc() as i64;
+    let nanos = ((ts.fract().abs()) * 1_000_000_000.0) as u32;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos.min(999_999_999))
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(now_rfc3339)
+}
+
+/// Разделитель между «источник смерти» и фактом: `# bridge-lost: …` / `# usbpcap-lost: …`.
+async fn maybe_abandon_session(
+    shared: &Arc<Shared>,
+    reason: String,
+    fact_prefix: &str,
+) {
+    if shared.stopping.load(Ordering::SeqCst) {
+        return;
+    }
+    if !shared.bridge_ready.load(Ordering::SeqCst) {
+        return;
+    }
+    if shared.active.lock().is_none() {
+        return;
+    }
+    tracing::warn!("сессия будет закрыта: {reason}");
+    *shared.hooks.lock() = "off".into();
+    let sender = shared.cmd_tx.lock().clone();
+    if let Some(tx) = sender {
+        let _ = tx
+            .send(Cmd::Abandon {
+                fact: format!("{fact_prefix}: {reason}"),
+                reason,
+            })
+            .await;
+    }
 }
 
 /// Подготовить EDIABAS-режим: факты для шапки `session.json`, 2-3 sys-строки для потока
@@ -2292,6 +2683,7 @@ for line in sys.stdin:
             pump: Mutex::new(None),
             stopping: AtomicBool::new(false),
             bridge_ready: AtomicBool::new(false),
+            raw_usb: AtomicBool::new(false),
         });
         let writer = store.create(SessionMeta::new("pipeline-test", "pipeline")).unwrap();
         let meta = writer.meta.clone();
@@ -2306,6 +2698,7 @@ for line in sys.stdin:
             meta.clone(),
             0xFFFF_FFF0, // заведомо несуществующий pid: скриншот просто не снимется
             None,        // EDIABAS-режим в этом тесте не нужен
+            false,       // raw USB не нужен
         );
         let (tx, rx) = mpsc::channel::<Cmd>(64);
         *shared.cmd_tx.lock() = Some(tx.clone());

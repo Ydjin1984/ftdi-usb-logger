@@ -108,6 +108,8 @@ function resumeHooks() {
   installVcpHooks();
   const m = ftMod || Process.findModuleByName('ftd2xx.dll');
   if (m) hookFtModule(m);
+  ovlHooked = false;
+  installOverlappedHooks();
   log('hookctl: возобновление — хуки поставлены заново');
 }
 
@@ -301,10 +303,15 @@ function installVcpHooks() {
       onEnter(args) {
         this.hkey = args[0].toString();
         this.ovl = !args[4].isNull();
+        try { classifyExistingHandle(this.hkey); } catch (e) {}
+        this.plen = args[3];
+        try { ovlRemember(args, false); } catch (e) {}
+        try { this.ovlKey = this.ovl ? ovlKeyOf(this.hkey, args[4]) : null; } catch (e) { this.ovlKey = null; }
         if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pw = args[3]; }
         else if (fileHandles[this.hkey]) { this.fent = fileHandles[this.hkey]; this.len = args[2].toInt32(); this.pw = args[3]; }
       },
       onLeave(ret) {
+        try { ovlOnIoLeave(this, ret); } catch (e) {}
         if (this.fent) {
           let n = 0; try { n = this.pw.readU32(); } catch (e) {}
           this.fent.bytes += n; this.fent.writes += 1;
@@ -312,7 +319,13 @@ function installVcpHooks() {
           return;
         }
         if (!this.com) return;
+        if (this.ovl) return;   // TX overlapped уже записан на входе (полные байты)
         let n = 0; try { n = this.pw.readU32(); } catch (e) {}
+        if (this.ovl && n === 0) {
+          // pending: НЕ пишем строку, чтобы tx не удваивался по событиям;
+          // полную строку с байтами выдаст GetOverlappedResult (или sweep-fallback).
+          return;
+        }
         log('VCP TX WriteFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0) + ' : ' + hexDump(this.buf, Math.min(this.len, MAXDUMP)));
       }
     });
@@ -322,13 +335,25 @@ function installVcpHooks() {
       onEnter(args) {
         this.hkey = args[0].toString();
         this.ovl = !args[4].isNull();
+        try { classifyExistingHandle(this.hkey); } catch (e) {}
+        this.plen = args[3];
+        try { ovlRemember(args, true); } catch (e) {}
+        try { this.ovlKey = this.ovl ? ovlKeyOf(this.hkey, args[4]) : null; } catch (e) { this.ovlKey = null; }
         if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; }
       },
       onLeave(ret) {
+        let lerrEarly = 0;
+        try { lerrEarly = (this.ovl && this.com) ? ovlLastError() : 0; } catch (e) { lerrEarly = 0; }
+        try { ovlOnIoLeave(this, ret); } catch (e) {}
         if (!this.com) return;
         let n = 0; try { n = this.pr.readU32(); } catch (e) {}
-        // overlapped-I/O: байт может быть 0 (операция ещё идёт) — выводим запрошенный размер, помечая ovl
-        const ln = n > 0 ? n : (this.ovl ? this.len : 0);
+        // overlapped-I/O: при pending (n=0) буфер ещё не заполнен — short-строка без hex,
+        // реальные байты выдаст GetOverlappedResult(Ex).
+        if (this.ovl && n === 0) {
+          log('VCP RX ReadFile(' + comHandles[this.hkey] + ') rc=' + lerrEarly + ' n=0 ovl=1');
+          return;
+        }
+        const ln = n > 0 ? n : 0;
         if (ln > 0) log('VCP RX ReadFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0) + ' : ' + hexDump(this.buf, Math.min(ln, MAXDUMP)));
       }
     });
@@ -348,6 +373,539 @@ function installVcpHooks() {
   }
 }
 installVcpHooks();
+
+// ==================== ЛЕНИВАЯ КЛАССИФИКАЦИЯ УЖЕ ОТКРЫТЫХ ХЕНДЛОВ ============
+// .NET-приложения (MS4x, SerialPort) открывают COM/HID/USB ДО attach: хука CreateFileW
+// в этом случае не было, и старые ReadFile/WriteFile проверяют comHandles[handle] зря.
+// Здесь по первому обращению к неизвестному хендлу мы спрашиваем у системы путь:
+//   GetFinalPathNameByHandleW -> NtQueryObject(ObjectNameInformation=1) -> QueryDosDevice.
+// Результат раскладывается в comHandles/fileHandles/usbHandles, чтобы работали старые хуки.
+const clsCache = {};           // handle -> 'com'|'usb'|'file'|null
+let clsComMap = null;          // "\device\serial0" -> "COM1"
+let clsFailLogged = false;
+
+function clsNormPath(p) {
+  if (!p) return '';
+  let s = String(p);
+  s = s.replace(/^\\\\\?\\/, '');   // \\?\  -> остаётся путь/CON-имя
+  s = s.replace(/^\\\?\?\\/, '');   // \??\  -> то же
+  return s;
+}
+
+function clsBuildComMap() {
+  if (clsComMap) return clsComMap;
+  clsComMap = {};
+  try {
+    const fn = globalExport('QueryDosDeviceW');
+    if (!fn) return clsComMap;
+    const call = new NativeFunction(fn, 'uint32', ['pointer', 'pointer', 'uint32']);
+    for (let i = 1; i <= 64; i++) {
+      try {
+        const name = Memory.allocUtf16String('COM' + i);
+        const buf = Memory.alloc(1040);
+        const n = call(name, buf, 520);
+        if (n > 0) {
+          const target = buf.readUtf16String();
+          if (target) clsComMap[target.toLowerCase()] = 'COM' + i;
+        }
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return clsComMap;
+}
+
+function clsResolvePath(hkey) {
+  const h = parseInt(hkey, 16);
+  if (!h || isNaN(h)) return null;
+  // 1) документированный путь (работает для файлов; для COM часто 0)
+  try {
+    const fn = globalExport('GetFinalPathNameByHandleW');
+    if (fn) {
+      const call = new NativeFunction(fn, 'uint32', ['uint32', 'pointer', 'uint32', 'uint32']);
+      const buf = Memory.alloc(1040);
+      const n = call(h, buf, 520, 0);
+      if (n > 0 && n < 520) return buf.readUtf16String();
+    }
+  } catch (e) {}
+  // 2) NtQueryObject(ObjectNameInformation=1): для устройств даёт \Device\Serial0 и т.п.
+  try {
+    const fn = globalExport('NtQueryObject');
+    if (fn) {
+      const call = new NativeFunction(fn, 'int', ['uint32', 'uint32', 'pointer', 'uint32', 'pointer']);
+      const buf = Memory.alloc(0x2000);
+      const ret = call(h, 1, buf, 0x2000, ptr(0));
+      if (ret === 0) {
+        const len = buf.readU16();
+        const off = Process.pointerSize === 8 ? 8 : 4;
+        const strPtr = buf.add(off).readPointer();
+        if (len > 0 && !strPtr.isNull()) return strPtr.readUtf16String(len / 2);
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+function classifyExistingHandle(hkey) {
+  try {
+    if (!hkey) return null;
+    if (Object.prototype.hasOwnProperty.call(clsCache, hkey)) return clsCache[hkey];
+    // уже классифицирован обычными хуками?
+    try { if (comHandles[hkey]) { clsCache[hkey] = 'com'; return 'com'; } } catch (e) {}
+    try { if (fileHandles[hkey]) { clsCache[hkey] = 'file'; return 'file'; } } catch (e) {}
+    try { if (typeof usbHandles !== 'undefined' && usbHandles[hkey]) { clsCache[hkey] = 'usb'; return 'usb'; } } catch (e) {}
+
+    const path = clsResolvePath(hkey);
+    const norm = clsNormPath(path);
+    const mCom = /com\d+/i.exec(norm);
+    if (mCom) {
+      const port = mCom[0].toUpperCase();
+      try { comHandles[hkey] = port; } catch (e) {}
+      log('VCP attach-existing ' + port + ' handle=' + hkey);
+      clsCache[hkey] = 'com';
+      return 'com';
+    }
+    if (norm) {
+      const dev = clsBuildComMap()[norm.toLowerCase()];
+      if (dev) {
+        try { comHandles[hkey] = dev; } catch (e) {}
+        log('VCP attach-existing ' + dev + ' handle=' + hkey);
+        clsCache[hkey] = 'com';
+        return 'com';
+      }
+    }
+    if (/hid#|usb#vid_|winusb#/i.test(norm)) {
+      let kind = 'usb';
+      if (/hid#/i.test(norm)) kind = 'hid';
+      else if (/winusb#/i.test(norm)) kind = 'winusb';
+      try { usbHandles[hkey] = { path: norm, kind: kind, bytes: 0, writes: 0 }; } catch (e) {}
+      log('USB open path="' + norm.replace(/"/g, "'") + '" kind=' + kind + ' handle=' + hkey);
+      clsCache[hkey] = 'usb';
+      return 'usb';
+    }
+    if (typeof FILE_RE !== 'undefined' && norm && FILE_RE.test(norm)) {
+      try { fileHandles[hkey] = { path: norm, access: 0, bytes: 0, writes: 0 }; } catch (e) {}
+      log('FILE open ' + norm + ' access=0x0 handle=' + hkey);
+      clsCache[hkey] = 'file';
+      return 'file';
+    }
+    clsCache[hkey] = null;
+    if (!clsFailLogged) {
+      clsFailLogged = true;
+      log('hook: handle resolve fail handle=' + hkey + ' path="' + norm + '"');
+    }
+    return null;
+  } catch (e) {
+    try { log('hook: classify error handle=' + hkey + ': ' + e); } catch (e2) {}
+    return null;
+  }
+}
+
+// ==================== OVERLAPPED I/O (System.IO.Ports / .NET SerialPort) ==========
+// .NET SerialPort (MS4x Flasher и др.) работает overlapped-I/O: ReadFile/WriteFile
+// возвращают n=0 / ERROR_IO_PENDING, реальные счётчики и данные приходят позже в
+// GetOverlappedResult/GetOverlappedResultEx. Секция восстанавливает потерянные байты
+// и пишет их СТАРЫМ форматом (VCP RX/TX, FILE write); pending-RX не дампит мусор.
+let ovlHooked = false;
+const ovlPending = {};        // "handle|ovlPtr" -> {handle, ovl, buf, len, plen, isRead, kind, t, pendingLogged}
+const ovlPathCache = {};      // handle -> path|null
+let ovlSelfCall = 0;          //>0 — мы сами вызвали GetOverlappedResult из хука Wait
+let ovlWrap = null;           // NativeFunction(kernel32!GetOverlappedResult)
+let ovlGetLastErrFn = null;   // NativeFunction(kernel32!GetLastError)
+let ovlMissLogged = false;
+let ovlSweepTimer = null;
+const OVL_PENDING_TTL_MS = 2000;
+
+function ovlU32(ptr) { try { return ptr.readU32(); } catch (e) { return 0; } }
+function ovlLastError() {
+  try {
+    if (!ovlGetLastErrFn) {
+      const fn = globalExport('GetLastError');
+      if (fn) ovlGetLastErrFn = new NativeFunction(fn, 'uint32', []);
+    }
+    return ovlGetLastErrFn ? ovlGetLastErrFn() : 0;
+  } catch (e) { return 0; }
+}
+function ovlErr(where, err) {
+  try {
+    if (typeof HOOK_ERRORS === 'undefined') { log('overlapped hook error: ' + where + ': ' + err); return; }
+    if (HOOK_ERRORS < 20) { HOOK_ERRORS++; log('overlapped hook error: ' + where + ': ' + err); }
+  } catch (e) {}
+}
+function ovlSafeEnter(fn) { return function (args) { try { fn.call(this, args); } catch (e) { ovlErr('enter', e); } }; }
+function ovlSafeLeave(fn) { return function (retval) { try { fn.call(this, retval); } catch (e) { ovlErr('leave', e); } }; }
+
+function ovlPath(hkey) {
+  if (Object.prototype.hasOwnProperty.call(ovlPathCache, hkey)) return ovlPathCache[hkey];
+  let path = null;
+  try { if (comHandles[hkey]) path = String(comHandles[hkey]); } catch (e) {}
+  try { if (!path && fileHandles[hkey]) path = String(fileHandles[hkey].path); } catch (e) {}
+  if (!path) {
+    try {
+      const fn = globalExport('GetFinalPathNameByHandleW');
+      if (fn) {
+        const call = new NativeFunction(fn, 'uint32', ['uint32', 'pointer', 'uint32', 'uint32']);
+        const buf = Memory.alloc(1040);
+        const n = call(parseInt(hkey, 16), buf, 520, 0);
+        if (n > 0 && n < 520) path = buf.readUtf16String();
+      }
+    } catch (e) { path = null; }
+  }
+  ovlPathCache[hkey] = path;
+  return path;
+}
+
+function ovlLabel(hkey) {
+  try { classifyExistingHandle(hkey); } catch (e) {}
+  const path = ovlPath(hkey);
+  if (path) {
+    const m = /com\d+/i.exec(path);
+    return m ? m[0] : path;
+  }
+  return 'handle=' + hkey;
+}
+
+function ovlEmit(e, n) {
+  try {
+    if (!(n > 0)) return;
+    if (e.kind !== 'com' && !(e.kind === 'file' && !e.isRead)) return;  // pipe/USB и прочее не шумим
+    if (!e.isRead && e.kind === 'com') return;   // TX уже отдан на входе WriteFile
+    const hkey = e.handle;
+    let fileEnt = null;
+    try { fileEnt = fileHandles[hkey] || null; } catch (err) {}
+    if (e.isRead) {
+      if (fileEnt) return;
+      log('VCP RX ReadFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1 : ' + hexDump(e.buf, Math.min(n, MAXDUMP)));
+    } else if (fileEnt) {
+      fileEnt.bytes += n;
+      fileEnt.writes += 1;
+      log('FILE write ' + fileEnt.path + ' n=' + n + ' total=' + fileEnt.bytes);
+    } else {
+      log('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1 : ' + hexDump(e.buf, Math.min(n, MAXDUMP)));
+    }
+  } catch (err) { ovlErr('ovlEmit', err); }
+}
+
+function ovlKeyOf(hkey, ovl) { return hkey + '|' + ovl.toString(); }
+
+// hEvent в OVERLAPPED/NativeOverlapped: x64 — смещение 24, x86 — 16.
+function ovlEventOf(ovl) {
+  try {
+    if (!ovl || ovl.isNull()) return null;
+    const off = Process.pointerSize === 8 ? 24 : 16;
+    const ev = ovl.add(off).readPointer();
+    return ev && !ev.isNull() ? ev : null;
+  } catch (e) { return null; }
+}
+
+
+const OVL_STATUS_PENDING = 0x103;
+function ovlInternal(e) {
+  try {
+    if (!e || !e.ovl || e.ovl.isNull()) return OVL_STATUS_PENDING;
+    return Process.pointerSize === 8 ? e.ovl.readU64().toNumber() : e.ovl.readU32();
+  } catch (err) { return OVL_STATUS_PENDING; }
+}
+function ovlInternalHigh(e) {
+  try {
+    if (!e || !e.ovl || e.ovl.isNull()) return 0;
+    return Process.pointerSize === 8 ? e.ovl.add(8).readU64().toNumber() : e.ovl.add(4).readU32();
+  } catch (err) { return 0; }
+}
+// Ядро пишет статус/счётчик в ИСХОДНЫЙ OVERLAPPED (тот, что передан в ReadFile/WriteFile),
+// поэтому завершённые операции ищем по Internal/InternalHigh, а не по указателю из
+// GetOverlappedResult (.NET передаёт туда другую копию структуры).
+function ovlCompletedKeys(hkey) {
+  const out = [];
+  try {
+    for (const k in ovlPending) {
+      const e = ovlPending[k];
+      if (!e || e.handle !== hkey) continue;
+      if (ovlInternal(e) !== OVL_STATUS_PENDING) out.push(k);
+    }
+    out.sort(function (a, b) { return (ovlPending[a].t || 0) - (ovlPending[b].t || 0); });
+  } catch (err) { ovlErr('ovlCompletedKeys', err); }
+  return out;
+}
+
+let ovlEventDbg = 0;
+// Ключ pending по точному указателю, иначе — по handle + hEvent (главный путь для .NET),
+// и лишь в крайнем случае FIFO по handle.
+function ovlFindKey(hkey, ovlPtr) {
+  try {
+    const exact = ovlKeyOf(hkey, ovlPtr);
+    if (ovlPending[exact]) return exact;
+    const ev = ovlEventOf(ovlPtr);
+    if (ev) {
+      for (const k in ovlPending) {
+        const e = ovlPending[k];
+        if (!e || e.handle !== hkey) continue;
+        if (e.event && e.event.equals(ev)) {
+          if (ovlEventDbg < 120) { ovlEventDbg++; log('ovl: match by hEvent ' + ev + ' key=' + k); }
+          return k;
+        }
+      }
+    }
+    for (const k in ovlPending) {
+      const e = ovlPending[k];
+      if (e && e.handle === hkey) {
+        if (ovlEventDbg < 120) { ovlEventDbg++; log('ovl: FIFO fallback handle=' + hkey + ' key=' + k + ' (hEvent не совпал)'); }
+        return k;
+      }
+    }
+  } catch (err) { ovlErr('ovlFindKey', err); }
+  return null;
+}
+
+function ovlTakePending(key) {
+  if (!key) return null;
+  const e = ovlPending[key];
+  if (e) { delete ovlPending[key]; return e; }
+  if (!ovlMissLogged) {
+    ovlMissLogged = true;
+    log('ovl: pending miss key=' + key);
+  }
+  return null;
+}
+
+function ovlRemember(args, isRead) {
+  try {
+    const ovl = args[4];
+    if (!ovl || ovl.isNull()) return;
+    const hkey = args[0].toString();
+    const key = ovlKeyOf(hkey, ovl);
+    // .NET переиспользует NativeOverlapped: перед перезаписью забираем завершённую
+    // операцию из OVERLAPPED.Internal/InternalHigh (иначе результат потеряется).
+    const old = ovlPending[key];
+    if (old) {
+      try {
+        if (ovlInternal(old) !== OVL_STATUS_PENDING) {
+          const nOld = ovlInternalHigh(old);
+          delete ovlPending[key];
+          if (nOld > 0) ovlEmit(old, nOld);
+        } else {
+          delete ovlPending[key];   // переиспользование до завершения — запись битая
+        }
+      } catch (err) { ovlErr('ovlRemember reuse', err); }
+    }
+    ovlPending[key] = {
+      handle: hkey, ovl: ovl, buf: args[1], len: args[2].toInt32(),
+      plen: args[3], isRead: isRead, kind: classifyExistingHandle(hkey),
+      t: Date.now(), pendingLogged: false,
+      event: ovlEventOf(ovl)          // hEvent: .NET копирует NativeOverlapped, но событие то же
+    };
+    const ent = ovlPending[key];
+    if (!isRead && ent.kind === 'com' && ent.len > 0) {
+      try {
+        log('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + ent.len + ' ovl=1 : ' + hexDump(ent.buf, Math.min(ent.len, MAXDUMP)));
+        ent.txLogged = true;
+      } catch (err) { ovlErr('tx-enter', err); }
+    }
+    const keys = Object.keys(ovlPending);
+    if (keys.length > 4096) delete ovlPending[keys[0]];
+  } catch (err) { ovlErr('ovlRemember', err); }
+}
+
+// onLeave ReadFile/WriteFile: BOOL/счётчик -> pending или завершение; байты — в GetOverlappedResult.
+function ovlOnIoLeave(self, retval) {
+  try {
+    if (!self) return;
+    let key = self.ovlKey;
+    if (!key && self.hkey && self.ovl) key = ovlKeyOf(self.hkey, self.ovl);
+    const e = key ? ovlPending[key] : null;
+    if (!e) return;
+    let completed = true;
+    try { completed = !!retval && retval.toInt32() !== 0; } catch (err) { completed = true; }
+    const n = ovlU32(self.plen);
+    if (completed && n > 0) {
+      delete ovlPending[key];
+      let known = false;
+      try { known = !!(comHandles[self.hkey] || fileHandles[self.hkey]); } catch (err) {}
+      if (!known) ovlEmit(e, n);   // старые хуки для неизвестных хендлов молчат
+    } else {
+      e.t = Date.now();
+    }
+  } catch (err) { ovlErr('ovlOnIoLeave', err); }
+}
+
+function ovlOnGetResult(hkey, ovlPtr, pBytes) {
+  try {
+    // 1) точное совпадение указателя (классические клиенты, не .NET)
+    const exact = ovlKeyOf(hkey, ovlPtr);
+    if (ovlPending[exact]) {
+      const e = ovlPending[exact];
+      const nCore = ovlInternalHigh(e);
+      const n = nCore > 0 ? nCore : ovlU32(pBytes);
+      delete ovlPending[exact];
+      if (n > 0) { ovlEmit(e, n); return true; }
+      return false;
+    }
+    // 2) уникальный hEvent, если события разные
+    const ev = ovlEventOf(ovlPtr);
+    if (ev) {
+      for (const k in ovlPending) {
+        const e = ovlPending[k];
+        if (!e || e.handle !== hkey) continue;
+        if (e.event && e.event.equals(ev)) {
+          const nCore = ovlInternalHigh(e);
+          const n = nCore > 0 ? nCore : ovlU32(pBytes);
+          delete ovlPending[k];
+          if (n > 0) { ovlEmit(e, n); return true; }
+          return false;
+        }
+      }
+    }
+    // 3) .NET передаёт копию NativeOverlapped с общим hEvent — не угадываем:
+    //    завершённые операции заберёт ovlSweep() по OVERLAPPED.Internal/InternalHigh.
+  } catch (err) { ovlErr('ovlOnGetResult', err); }
+  return false;
+}
+
+// Fallback: GetOverlappedResult так и не пришёл — для RX пишем один раз короткую
+// строку без hex (буфер уже нельзя считать валидным), для TX просто забываем.
+function ovlSweep() {
+  try {
+    const now = Date.now();
+    const keys = Object.keys(ovlPending);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const e = ovlPending[key];
+      if (!e) continue;
+      // 1) завершилось, но GetOverlappedResult не пришёл/не связался — забираем из OVERLAPPED
+      if (ovlInternal(e) !== OVL_STATUS_PENDING) {
+        const n = ovlInternalHigh(e);
+        delete ovlPending[key];
+        if (n > 0) ovlEmit(e, n);
+        continue;
+      }
+      const age = now - e.t;
+      if (!e.pendingLogged && age >= OVL_PENDING_TTL_MS) {
+        e.pendingLogged = true;
+        if (e.isRead) {
+          if (e.kind === 'com') log('VCP RX ReadFile(' + ovlLabel(e.handle) + ') rc=0 n=0 ovl=pending');
+        } else if (e.kind === 'com') {
+          delete ovlPending[key];   // TX уже отдан на входе WriteFile
+        } else if (e.kind === 'file') {
+          let fe = null;
+          try { fe = fileHandles[e.handle] || null; } catch (err) {}
+          if (fe) { fe.bytes += e.len; fe.writes += 1; log('FILE write ' + fe.path + ' n=' + e.len + ' total=' + fe.bytes); }
+          delete ovlPending[key];
+        }
+      }
+      if (age > 30000) delete ovlPending[key];
+    }
+  } catch (err) { ovlErr('ovlSweep', err); }
+}
+
+function installOverlappedHooks() {
+  if (PAUSED || ovlHooked) return;
+  ovlHooked = true;
+
+  const pRead = globalExport('ReadFile');
+  const pWrite = globalExport('WriteFile');
+  const pReadEx = globalExport('ReadFileEx');
+  const pWriteEx = globalExport('WriteFileEx');
+  const pGet = globalExport('GetOverlappedResult');
+  const pGetEx = globalExport('GetOverlappedResultEx');
+  const pWait = globalExport('WaitForSingleObject');
+
+  if (pGet && !ovlWrap) {
+    try { ovlWrap = new NativeFunction(pGet, 'int', ['uint32', 'pointer', 'pointer', 'int']); } catch (e) { ovlWrap = null; }
+  }
+  if (!ovlSweepTimer) {
+    try { ovlSweepTimer = setInterval(ovlSweep, 250); } catch (e) { ovlSweepTimer = null; }
+  }
+
+  function attachReadWrite(addr, isRead) {
+    if (!addr) return;
+    attachHook(addr, {
+      onEnter: ovlSafeEnter(function (args) {
+        ovlRemember(args, isRead);
+        this.hkey = args[0].toString();
+        this.plen = args[3];
+        const ovl = args[4];
+        this.ovl = ovl;
+        this.ovlKey = (ovl && !ovl.isNull()) ? ovlKeyOf(this.hkey, ovl) : null;
+      }),
+      onLeave: ovlSafeLeave(function (ret) { ovlOnIoLeave(this); })
+    });
+  }
+  // отдельные listener'ы ReadFile/WriteFile не нужны: pending собирают старые VCP-хуки,
+  // иначе второй Interceptor-listener глушит первый (проверено на COM1).
+
+  // ReadFileEx/WriteFileEx (APC): завершение через APC не хукаем — логируем запрос.
+  if (pWriteEx) attachHook(pWriteEx, {
+    onEnter: ovlSafeEnter(function (args) {
+      const hkey = args[0].toString();
+      const buf = args[1];
+      const len = args[2].toInt32();
+      if (len > 0) log('VCP TX WriteFileEx(' + ovlLabel(hkey) + ') len=' + len + ' ovl=1 : ' + hexDump(buf, Math.min(len, MAXDUMP)));
+    })
+  });
+  if (pReadEx) attachHook(pReadEx, {
+    onEnter: ovlSafeEnter(function (args) {
+      const hkey = args[0].toString();
+      const len = args[2].toInt32();
+      if (len > 0) log('VCP RX ReadFileEx(' + ovlLabel(hkey) + ') len=' + len + ' ovl=1');
+    })
+  });
+
+  function attachGet(addr) {
+    if (!addr) return;
+    attachHook(addr, {
+      onEnter: ovlSafeEnter(function (args) {
+        this.hkey = args[0].toString();
+        this.ovl = args[1];
+        this.pBytes = args[2];
+        this.suppress = ovlSelfCall > 0;
+      }),
+      onLeave: ovlSafeLeave(function (ret) {
+        if (this.suppress) return;
+        if (ret.toInt32() !== 0) ovlOnGetResult(this.hkey, this.ovl, this.pBytes);
+      })
+    });
+  }
+  attachGet(pGet);
+  attachGet(pGetEx);
+
+  // Некоторые обёртки ждут на хендле файла: по WAIT_OBJECT_0 сами спрашиваем
+  // GetOverlappedResult (без ожидания). Дублей нет — ovlTakePending удаляет запись.
+  if (pWait) attachHook(pWait, {
+    onEnter: ovlSafeEnter(function (args) {
+      this.hkey = args[0].toString();
+      this.relevant = false;
+      if (!ovlWrap) return;
+      for (const key in ovlPending) {
+        const e = ovlPending[key];
+        if (e && e.handle === this.hkey) { this.relevant = true; break; }
+      }
+    }),
+    onLeave: ovlSafeLeave(function (ret) {
+      if (!this.relevant || ret.toInt32() !== 0 || ovlSelfCall > 0 || !ovlWrap) return;  // WAIT_OBJECT_0 == 0
+      const hkey = this.hkey;
+      const h = parseInt(hkey, 16);
+      const keys = Object.keys(ovlPending);
+      for (let i = 0; i < keys.length; i++) {
+        const e = ovlPending[keys[i]];
+        if (!e || e.handle !== hkey) continue;
+        const pBytes = Memory.alloc(4);
+        pBytes.writeU32(0);
+        ovlSelfCall++;
+        let ok = 0;
+        try { ok = ovlWrap(h, e.ovl, pBytes, 0); } catch (err) { ok = 0; }
+        ovlSelfCall--;
+        if (ok) ovlOnGetResult(hkey, e.ovl, pBytes);
+      }
+    })
+  });
+
+  log('overlapped: hooks read/write=' + (pRead ? 1 : 0) + '/' + (pWrite ? 1 : 0) +
+      ' get=' + (pGet ? 1 : 0) + ' getEx=' + (pGetEx ? 1 : 0) +
+      ' wait=' + (pWait ? 1 : 0) + ' ex=' + ((pReadEx || pWriteEx) ? 1 : 0) +
+      ' listeners=' + listeners.length);
+}
+installOverlappedHooks();
+
+
 
 // ---------------- канал управления от движка (sidecar/bridge.py): 'pause' / 'resume' ----------------
 // Нужен, когда приложение под хуками не выполняет критичную операцию (например,

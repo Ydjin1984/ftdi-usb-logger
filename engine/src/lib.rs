@@ -11,6 +11,9 @@ pub mod api;
 pub mod report;
 pub mod import;
 pub mod ediabas;
+pub mod usbdevices;
+pub mod j2534;
+pub mod usbpcap;
 
 use std::sync::Arc;
 use anyhow::Context;
@@ -55,3 +58,4 @@ pub async fn run(cli: config::Cli) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+

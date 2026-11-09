@@ -1,7 +1,7 @@
 /** Состояние приложения и действия. Компоненты читают state и вызывают методы. */
 
 import { api, ApiError, isDemoMode, WsClient } from "./api";
-import { demoCounts, demoEvents, demoSession, demoSteps } from "./demo";
+import { demoCounts, demoEvents, demoJ2534Drivers, demoSession, demoSteps, demoUsbDevices } from "./demo";
 import { sound } from "./sound";
 import type {
   CaptureStatus,
@@ -15,6 +15,8 @@ import type {
   StepEvent,
   StepSummary,
   ToolProcess,
+  UsbDevice,
+  J2534Driver,
 } from "./types";
 
 const RING = 60_000;
@@ -48,6 +50,9 @@ export interface StoreState {
 
   devices: FtdiDevice[];
   tools: ToolProcess[];
+  usbDevices: UsbDevice[];
+  j2534Drivers: J2534Driver[];
+  toolsMode: "auto" | "usb" | "window" | "all";
   loadingTargets: boolean;
 
   filters: Set<EventKind>;
@@ -125,6 +130,9 @@ class Store {
       hasMoreBefore: false,
       devices: [],
       tools: [],
+      usbDevices: [],
+      j2534Drivers: [],
+      toolsMode: "auto",
       loadingTargets: false,
       filters: new Set(ALL_KINDS),
       query: "",
@@ -174,14 +182,18 @@ class Store {
       const health = await api.health();
       this.state.health = health;
       this.state.status = health.capture ?? null;
-      const [sessions, devices, tools] = await Promise.all([
+      const [sessions, devices, tools, usb, j2534] = await Promise.all([
         api.sessions().catch(() => [] as SessionMeta[]),
         api.devices().catch(() => [] as FtdiDevice[]),
-        api.tools().catch(() => [] as ToolProcess[]),
+        api.tools("auto").catch(() => [] as ToolProcess[]),
+        api.usbDevices().catch(() => [] as UsbDevice[]),
+        api.j2534Drivers().catch(() => [] as J2534Driver[]),
       ]);
       this.state.sessions = sessions;
       this.state.devices = devices;
       this.state.tools = tools;
+      this.state.usbDevices = usb;
+      this.state.j2534Drivers = j2534;
       this.state.booted = true;
       this.emit();
 
@@ -259,6 +271,8 @@ class Store {
         window_title: "WinKFP - Winkfp",
       },
     ];
+    this.state.usbDevices = demoUsbDevices();
+    this.state.j2534Drivers = demoJ2534Drivers();
     this.state.active = session;
     this.state.steps = steps;
     this.state.notes = session.notes;
@@ -508,19 +522,72 @@ class Store {
 
   /* ───────────────────────────── захват ──────────────────────────────── */
 
+  async setToolsMode(mode: "auto" | "usb" | "window" | "all"): Promise<void> {
+    this.state.toolsMode = mode;
+    this.emit();
+    if (this.state.mode === "demo") return;
+    try {
+      this.state.tools = await api.tools(mode);
+      this.emit();
+    } catch (e) {
+      this.toast("warn", `список программ: ${(e as Error).message}`);
+    }
+  }
+
+  /** Прицепиться к PID вручную — универсальный путь, если драйвер не виден. */
+  async attachPid(pid: number, label?: string): Promise<void> {
+    if (!Number.isFinite(pid) || pid <= 0) {
+      this.toast("warn", "нужен корректный PID");
+      return;
+    }
+    const name = label?.trim() || `pid ${pid}`;
+    await this.attach(pid, name);
+  }
+
   async refreshTargets(): Promise<void> {
     if (this.state.mode === "demo") return;
     this.state.loadingTargets = true;
     this.emit();
     try {
-      const [devices, tools] = await Promise.all([api.devices(), api.tools()]);
+      const [devices, tools, usb, j2534] = await Promise.all([
+        api.devices().catch(() => this.state.devices),
+        api.tools(this.state.toolsMode).catch(() => this.state.tools),
+        api.usbDevices().catch(() => this.state.usbDevices),
+        api.j2534Drivers().catch(() => this.state.j2534Drivers),
+      ]);
       this.state.devices = devices;
       this.state.tools = tools;
+      this.state.usbDevices = usb;
+      this.state.j2534Drivers = j2534;
     } catch (e) {
       this.toast("warn", `не удалось обновить устройства: ${(e as Error).message}`);
     } finally {
       this.state.loadingTargets = false;
       this.emit();
+    }
+  }
+
+  /** Сырой захват USB-шины через USBPcap (нужен драйвер + права администратора). */
+  async startUsbpcap(device: string): Promise<void> {
+    if (this.state.mode === "demo") {
+      this.toast("info", "демо-режим: USBPcap недоступен");
+      return;
+    }
+    try {
+      const meta = await api.startUsbpcap(device);
+      this.state.active = meta;
+      this.state.sessions = [meta, ...this.state.sessions.filter((s) => s.id !== meta.id)];
+      this.state.events = [];
+      this.state.steps = [];
+      this.state.firstSeq = 0;
+      this.state.lastSeq = 0;
+      this.state.total = 0;
+      this.state.currentStep = null;
+      this.ws?.subscribe(meta.id, 0);
+      this.toast("ok", `сырой USB-захват: ${device}`);
+      this.emit();
+    } catch (e) {
+      this.toast("error", `USBPcap не запустился: ${(e as Error).message}`);
     }
   }
 
@@ -844,5 +911,9 @@ class Store {
 }
 
 export const store = new Store();
+
+
+
+
 
 

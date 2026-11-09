@@ -451,6 +451,19 @@ fn parse_body(rest: &str, t: f64, raw: &str) -> Event {
     if let Some(after) = rest.strip_prefix("MODULE") {
         return parse_module_line(after, t, raw);
     }
+    // ── универсальный захват (docs/02 §11.3) ──────────────────────────
+    if rest == "J2534" || rest.starts_with("J2534 ") {
+        return parse_j2534_line(rest, t, raw);
+    }
+    if rest == "USBRAW" || rest.starts_with("USBRAW ") {
+        return parse_usbraw_line(rest, t, raw);
+    }
+    if ["USB ", "WINUSB ", "HID ", "LIBUSB "]
+        .iter()
+        .any(|p| rest.starts_with(p))
+    {
+        return parse_usb_line(rest, t, raw);
+    }
     if rest.starts_with("FT_") {
         let mut ev = make_event(EventKind::Sys, Transport::Ftd2xx, t, raw);
         let api_end = rest.find(['(', ' ']).unwrap_or(rest.len());
@@ -700,8 +713,339 @@ fn parse_module_line(after: &str, t: f64, raw: &str) -> Event {
     ev
 }
 
-// ────────────────────────────── телеграммы ───────────────────────────────
+// ─────────────────── J2534 / USB (универсальный захват) ──────────────────
 
+/// Значение `key=...` с поддержкой кавычек (`name="Scanmatik - SM2 USB"`).
+fn tag_quoted(text: &str, key: &str) -> Option<String> {
+    let pat = format!("{key}=");
+    let bytes = text.as_bytes();
+    let mut search = 0usize;
+    while let Some(p) = text[search..].find(&pat) {
+        let abs = search + p;
+        let before_ok = abs == 0 || matches!(bytes[abs - 1], b' ' | b'\t' | b',' | b'(');
+        if !before_ok {
+            search = abs + pat.len();
+            continue;
+        }
+        let rest = &text[abs + pat.len()..];
+        if let Some(stripped) = rest.strip_prefix('"') {
+            return stripped.find('"').map(|end| stripped[..end].to_string());
+        }
+        let vend = rest
+            .find(|c: char| c.is_whitespace() || c == ',' || c == ')')
+            .unwrap_or(rest.len());
+        return Some(rest[..vend].trim().to_string());
+    }
+    None
+}
+
+fn set_meta_str(ev: &mut Event, key: &str, value: Option<String>) {
+    if let Some(v) = value {
+        if !v.is_empty() {
+            set_meta(ev, key, json!(v));
+        }
+    }
+}
+
+/// `J2534 open/connect/TX/RX/ioctl/disconnect/err` (docs/02 §11.3).
+fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
+    let after = rest.strip_prefix("J2534").unwrap_or(rest).trim_start();
+    let op_raw = after.split_whitespace().next().unwrap_or("");
+    let op = op_raw.to_ascii_lowercase();
+    let body = after[op_raw.len()..].trim_start();
+
+    match op.as_str() {
+        "tx" | "rx" => {
+            let (dir, kind) = if op == "tx" {
+                (Direction::Tx, EventKind::Tx)
+            } else {
+                (Direction::Rx, EventKind::Rx)
+            };
+            let (kv, hex) = split_payload(body);
+            let mut ev = make_event(kind, Transport::J2534, t, raw);
+            ev.api = format!("J2534 {}", if dir == Direction::Tx { "TX" } else { "RX" });
+            ev.direction = Some(dir);
+            set_meta_str(&mut ev, "channel", tag_quoted(kv, "ch").or_else(|| tag_quoted(kv, "channel")));
+            let protocol = tag_quoted(kv, "proto").or_else(|| tag_quoted(kv, "protocol"));
+            let can_id = tag_quoted(kv, "id").or_else(|| tag_quoted(kv, "can_id"));
+            set_meta_str(&mut ev, "protocol", protocol.clone());
+            set_meta_str(&mut ev, "can_id", can_id.clone());
+            set_meta_str(&mut ev, "flags", tag_quoted(kv, "flags"));
+            set_meta_str(&mut ev, "rxs", tag_quoted(kv, "rxs"));
+            if let Some(rc) = tag_i32(kv, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!(
+                "{} {}",
+                protocol.unwrap_or_else(|| "ISO15765".into()),
+                can_id.unwrap_or_else(|| "?".into())
+            ));
+            set_payload(&mut ev, hex, tag_u64(kv, "len"));
+            ev
+        }
+        "open" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 open".into();
+            let name = tag_quoted(body, "name");
+            set_meta_str(&mut ev, "device", name.clone());
+            set_meta_str(&mut ev, "vendor", tag_quoted(body, "vendor"));
+            set_meta_str(&mut ev, "dll", tag_quoted(body, "dll"));
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!("J2534 open {}", name.unwrap_or_default()).trim_end().to_string());
+            ev
+        }
+        "connect" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 connect".into();
+            let channel = tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel"));
+            let protocol = tag_quoted(body, "proto").or_else(|| tag_quoted(body, "protocol"));
+            set_meta_str(&mut ev, "device", tag_quoted(body, "dev"));
+            set_meta_str(&mut ev, "channel", channel.clone());
+            set_meta_str(&mut ev, "protocol", protocol.clone());
+            set_meta_str(&mut ev, "flags", tag_quoted(body, "flags"));
+            set_meta_str(&mut ev, "baud", tag_quoted(body, "baud"));
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!(
+                "connect proto={} ch={}",
+                protocol.unwrap_or_else(|| "?".into()),
+                channel.unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        "ioctl" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 ioctl".into();
+            let channel = tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel"));
+            let ioctl_id = tag_quoted(body, "id").or_else(|| tag_quoted(body, "ioctl"));
+            set_meta_str(&mut ev, "channel", channel.clone());
+            set_meta_str(&mut ev, "ioctl_id", ioctl_id.clone());
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!(
+                "ioctl {} ch={}",
+                ioctl_id.unwrap_or_else(|| "?".into()),
+                channel.unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        "disconnect" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 disconnect".into();
+            let channel = tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel"));
+            set_meta_str(&mut ev, "channel", channel.clone());
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!("disconnect ch={}", channel.unwrap_or_else(|| "?".into())));
+            ev
+        }
+        "err" | "error" => {
+            let mut ev = make_event(EventKind::Error, Transport::J2534, t, raw);
+            ev.api = "J2534 err".into();
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
+            ev.text = Some(body.to_string());
+            ev
+        }
+        _ => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = format!(
+                "J2534 {}",
+                if op_raw.is_empty() { "?" } else { op_raw }
+            );
+            set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(body.to_string());
+            ev
+        }
+    }
+}
+
+/// `USB open/close`, `WINUSB/HID/LIBUSB TX/RX` и `USB/HID ioctl` (docs/02 §11.3).
+fn parse_usb_line(rest: &str, t: f64, raw: &str) -> Event {
+    let (prefix, after) = if let Some(a) = rest.strip_prefix("WINUSB ") {
+        ("WINUSB", a)
+    } else if let Some(a) = rest.strip_prefix("HID ") {
+        ("HID", a)
+    } else if let Some(a) = rest.strip_prefix("LIBUSB ") {
+        ("LIBUSB", a)
+    } else {
+        ("USB", rest.strip_prefix("USB ").unwrap_or(rest))
+    };
+    let op_raw = after.split_whitespace().next().unwrap_or("");
+    let op = op_raw.to_ascii_lowercase();
+    let body = after[op_raw.len()..].trim_start();
+    let (kv, hex) = split_payload(body);
+
+    // Обмен WINUSB/HID/LIBUSB (и USB, если когда-нибудь появится).
+    if matches!(prefix, "WINUSB" | "HID" | "LIBUSB" | "USB") && (op == "tx" || op == "rx") {
+        let (dir, kind) = if op == "tx" {
+            (Direction::Tx, EventKind::Tx)
+        } else {
+            (Direction::Rx, EventKind::Rx)
+        };
+        let mut ev = make_event(kind, Transport::Usb, t, raw);
+        ev.api = format!("{prefix} {}", if dir == Direction::Tx { "TX" } else { "RX" });
+        ev.direction = Some(dir);
+        let attr = match prefix {
+            "WINUSB" => ("pipe", tag_quoted(kv, "pipe")),
+            "LIBUSB" => ("ep", tag_quoted(kv, "ep")),
+            "HID" => ("report", tag_quoted(kv, "report")),
+            _ => ("pipe", tag_quoted(kv, "pipe")),
+        };
+        set_meta_str(&mut ev, attr.0, attr.1.clone());
+        if let Some(rc) = tag_i32(kv, "rc") {
+            ev.rc = Some(rc);
+        }
+        ev.text = Some(match attr.1 {
+            Some(v) => format!("{prefix} {}={v}", attr.0),
+            None => format!("{prefix} {}", if dir == Direction::Tx { "TX" } else { "RX" }),
+        });
+        set_payload(&mut ev, hex, tag_u64(kv, "len"));
+        return ev;
+    }
+
+    // USB open/close/ioctl и прочие USB*-вызовы — EventKind::Usb.
+    let mut ev = make_event(EventKind::Usb, Transport::Usb, t, raw);
+    ev.api = format!("{prefix} {}", if op_raw.is_empty() { "?" } else { op_raw });
+    let path = tag_quoted(kv, "path");
+    set_meta_str(&mut ev, "path", path.clone());
+    set_meta_str(&mut ev, "device", path.clone());
+    set_meta_str(&mut ev, "kind", tag_quoted(kv, "kind"));
+    set_meta_str(&mut ev, "handle", tag_quoted(kv, "handle"));
+    if let Some(bytes) = tag_u64(kv, "bytes") {
+        set_meta(&mut ev, "bytes", json!(bytes));
+        ev.len = bytes.min(u32::MAX as u64) as u32;
+    }
+    if let Some(writes) = tag_u64(kv, "writes") {
+        set_meta(&mut ev, "writes", json!(writes));
+    }
+    if let Some(rc) = tag_i32(kv, "rc") {
+        ev.rc = Some(rc);
+    }
+    if let Some(hex) = hex {
+        if !hex.is_empty() {
+            set_payload(&mut ev, Some(hex), tag_u64(kv, "len"));
+        }
+    }
+    let mut text = format!("{prefix} {op_raw}");
+    if let Some(path) = &path {
+        text.push(' ');
+        text.push_str(path);
+    } else if !body.is_empty() {
+        text.push(' ');
+        text.push_str(body);
+    }
+    ev.text = Some(text.trim().to_string());
+    ev
+}
+
+/// USBPcap raw-захват:
+/// `USBRAW bus=1 dev=4 ep=0x01 bulk fdo->pdo func=0x9 status=0x0 len=4 : 12 04 0d 1b`.
+///
+/// Направление `fdo->pdo` — TX, `pdo->fdo` — RX. Кадры без данных (`len=0`, обычно
+/// control) идут как `EventKind::Sys`, чтобы не засорять поток обмена.
+fn parse_usbraw_line(rest: &str, t: f64, raw: &str) -> Event {
+    let after = rest.strip_prefix("USBRAW").unwrap_or(rest).trim_start();
+    let (kv, hex) = split_payload(after);
+
+    let mut transfer = String::new();
+    let mut direction: Option<Direction> = None;
+    for token in kv.split_whitespace() {
+        match token.to_ascii_lowercase().as_str() {
+            "isochronous" | "interrupt" | "control" | "bulk" | "unknown" => {
+                transfer = token.to_ascii_lowercase()
+            }
+            "fdo->pdo" | "out" => direction = Some(Direction::Tx),
+            "pdo->fdo" | "in" => direction = Some(Direction::Rx),
+            _ => {}
+        }
+    }
+
+    let bus = tag_u64(kv, "bus");
+    let device = tag_u64(kv, "dev").or_else(|| tag_u64(kv, "device"));
+    let endpoint = tag_quoted(kv, "ep").or_else(|| tag_quoted(kv, "endpoint"));
+    let function = tag_quoted(kv, "func").or_else(|| tag_quoted(kv, "function"));
+    let status = tag_quoted(kv, "status");
+    let declared = tag_u64(kv, "len");
+    let payload_bytes = hex.map(hex_to_bytes).unwrap_or_default();
+    let no_data = payload_bytes.is_empty() && declared.unwrap_or(0) == 0;
+
+    let mut ev = if no_data {
+        make_event(EventKind::Sys, Transport::Usb, t, raw)
+    } else {
+        let dir = direction.unwrap_or_else(|| {
+            let ep = endpoint
+                .as_deref()
+                .map(|s| s.trim())
+                .map(|s| s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s))
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+                .unwrap_or(0);
+            if ep & 0x80 != 0 {
+                Direction::Rx
+            } else {
+                Direction::Tx
+            }
+        });
+        let kind = if dir == Direction::Tx {
+            EventKind::Tx
+        } else {
+            EventKind::Rx
+        };
+        let mut e = make_event(kind, Transport::Usb, t, raw);
+        e.direction = Some(dir);
+        e
+    };
+    // Как и в живых событиях capture (boba): control-setup без данных — `USBRAW-SETUP`,
+    // остальной обмен — `USBRAW`. Это сохраняет одинаковую семантику после импорта raw.log.
+    ev.api = if no_data && transfer == "control" {
+        "USBRAW-SETUP".into()
+    } else {
+        "USBRAW".into()
+    };
+    if let Some(bus) = bus {
+        set_meta(&mut ev, "bus", json!(bus));
+    }
+    if let Some(device) = device {
+        set_meta(&mut ev, "device", json!(device));
+    }
+    if let Some(endpoint) = &endpoint {
+        set_meta(&mut ev, "endpoint", json!(endpoint));
+    }
+    if !transfer.is_empty() {
+        set_meta(&mut ev, "transfer", json!(transfer));
+    }
+    if let Some(function) = &function {
+        set_meta(&mut ev, "function", json!(function));
+    }
+    if let Some(status) = &status {
+        set_meta(&mut ev, "status", json!(status));
+    }
+    set_meta(&mut ev, "usbpcap", json!(true));
+    if no_data {
+        ev.len = 0;
+    } else {
+        set_payload(&mut ev, hex, declared);
+    }
+    let ep_text = endpoint.unwrap_or_else(|| "?".into());
+    ev.text = Some(if transfer.is_empty() {
+        format!("USBRAW ep={ep_text}")
+    } else {
+        format!("USBRAW {transfer} ep={ep_text}")
+    });
+    ev
+}
+
+// ────────────────────────────── телеграммы ───────────────────────────────
 struct Exchange {
     tx_t: f64,
     api: String,
@@ -737,6 +1081,14 @@ impl Exchange {
 fn collect_exchanges(events: &[&Event]) -> Vec<Exchange> {
     let mut out: Vec<Exchange> = Vec::new();
     for ev in events {
+        // J2534/USB-обмен разбирается отдельно (по can_id/pipe), не как serial-телеграммы.
+        let serial = matches!(
+            ev.transport,
+            Transport::Ftd2xx | Transport::Vcp | Transport::None
+        );
+        if !serial {
+            continue;
+        }
         match ev.kind {
             EventKind::Tx => out.push(Exchange::new(ev)),
             EventKind::Rx => {
@@ -991,6 +1343,58 @@ fn read_file_hashes(events: &[&Event]) -> Vec<FileHash> {
     out
 }
 
+/// Транспорт(ы) сессии по событиям: один транспорт как есть, несколько — `mixed`.
+/// Используется при закрытии сессии, чтобы `session.json` отражал универсальный захват.
+pub fn transport_summary(events: &[Event]) -> String {
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for ev in events {
+        let name = match ev.transport {
+            Transport::Ftd2xx => "ftd2xx",
+            Transport::Vcp => "vcp",
+            Transport::Usb => "usb",
+            Transport::J2534 => "j2534",
+            _ => continue,
+        };
+        if !kinds.contains(&name) {
+            kinds.push(name);
+        }
+    }
+    match kinds.len() {
+        0 => String::new(),
+        1 => kinds[0].to_string(),
+        _ => "mixed".to_string(),
+    }
+}
+
+/// Ключ гистограммы J2534: протокол + CAN-id (например `ISO15765 0x7E0`).
+fn j2534_hist_key(ev: &Event) -> String {
+    let proto = ev
+        .meta
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("ISO15765");
+    let id = ev
+        .meta
+        .get("can_id")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    format!("{proto} {id}")
+}
+
+/// Ключ гистограммы USB-обмена: текст события (`WINUSB pipe=0x01`) или api.
+fn usb_hist_key(ev: &Event) -> String {
+    ev.text
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if ev.api.is_empty() {
+                "USB".to_string()
+            } else {
+                ev.api.clone()
+            }
+        })
+}
+
 /// Сводка шага — надмножество старого `PHASE-JSON`.
 ///
 /// `events` может быть как срезом шага, так и всем потоком сессии: границы
@@ -1085,6 +1489,32 @@ pub fn summarize_step(
             }
         }
         *summary.cmd_hist.entry(tx_summary(&ex.tx)).or_insert(0) += 1;
+    }
+
+    // Универсальный захват: гистограммы J2534 по протоколу/can_id, USB — по pipe/report.
+    // Чтения (READ 0x06) собираем только из K-line — J2534/USB сюда не попадают.
+    for ev in &slice {
+        match (ev.transport, ev.kind) {
+            (Transport::J2534, EventKind::Tx) => {
+                exchanges += 1;
+                tx_bytes += ev.payload().len() as u64;
+                *summary.cmd_hist.entry(j2534_hist_key(ev)).or_insert(0) += 1;
+            }
+            (Transport::J2534, EventKind::Rx) => {
+                rx_bytes += ev.payload().len() as u64;
+                *summary.resp_hist.entry(j2534_hist_key(ev)).or_insert(0) += 1;
+            }
+            (Transport::Usb, EventKind::Tx) => {
+                exchanges += 1;
+                tx_bytes += ev.payload().len() as u64;
+                *summary.cmd_hist.entry(usb_hist_key(ev)).or_insert(0) += 1;
+            }
+            (Transport::Usb, EventKind::Rx) => {
+                rx_bytes += ev.payload().len() as u64;
+                *summary.resp_hist.entry(usb_hist_key(ev)).or_insert(0) += 1;
+            }
+            _ => {}
+        }
     }
 
     summary.exchanges = exchanges;
@@ -1225,6 +1655,163 @@ pub fn decode_payload(hex: &str) -> PayloadDecode {
     } else {
         out.cmd = Some(format!("cmd=0x{:02X}", bytes[0]));
         out.notes.push("короткий payload".into());
+    }
+    out
+}
+
+/// Разбор payload события с учётом транспорта: для J2534 с `can_id` — ISOTP/CAN.
+pub fn decode_payload_event(ev: &Event) -> PayloadDecode {
+    if ev.transport == Transport::J2534 {
+        if let Some(can_id) = ev.meta.get("can_id").and_then(Value::as_str) {
+            let protocol = ev
+                .meta
+                .get("protocol")
+                .and_then(Value::as_str)
+                .unwrap_or("ISO15765");
+            return decode_isotp(&ev.hex, can_id, protocol);
+        }
+    }
+    decode_payload(&ev.hex)
+}
+
+fn service_name(sid: u8) -> Option<&'static str> {
+    Some(match sid {
+        0x10 => "StartDiagnosticSession",
+        0x11 => "ECUReset",
+        0x14 => "ClearDiagnosticInformation",
+        0x19 => "ReadDTCInformation",
+        0x22 => "ReadDataByIdentifier",
+        0x23 => "ReadMemoryByAddress",
+        0x27 => "SecurityAccess",
+        0x28 => "CommunicationControl",
+        0x2E => "WriteDataByIdentifier",
+        0x2F => "InputOutputControlByIdentifier",
+        0x31 => "RoutineControl",
+        0x34 => "RequestDownload",
+        0x35 => "RequestUpload",
+        0x36 => "TransferData",
+        0x37 => "RequestTransferExit",
+        0x3E => "TesterPresent",
+        0x85 => "ControlDTCSetting",
+        0x86 => "ResponseOnEvent",
+        0x87 => "LinkControl",
+        _ => return None,
+    })
+}
+
+/// ISOTP (ISO 15765-2) поверх CAN-кадра: SF/FF/CF/FC + service id KWP/UDS.
+pub fn decode_isotp(hex: &str, can_id: &str, protocol: &str) -> PayloadDecode {
+    let bytes = hex_to_bytes(hex);
+    let mut out = PayloadDecode {
+        len: bytes.len(),
+        hex: bytes_to_hex(&bytes),
+        ascii: ascii_preview(&bytes),
+        ..Default::default()
+    };
+    if bytes.is_empty() {
+        out.cmd = Some(format!("{protocol} {can_id} · пусто"));
+        out.notes.push("пустой CAN-кадр".into());
+        return out;
+    }
+
+    let b0 = bytes[0];
+    let pci = b0 >> 4;
+    let low = (b0 & 0x0F) as usize;
+    let (desc, payload): (String, Vec<u8>) = match pci {
+        0x0 => {
+            // Single Frame: длина в младшем ниббле.
+            let end = (1 + low).min(bytes.len());
+            let body = bytes[1..end].to_vec();
+            out.notes.push(format!("ISOTP PCI: SF, заявлено {low} B"));
+            (format!("SF {low}B"), body)
+        }
+        0x1 => {
+            // First Frame: 12-битная длина.
+            let total = (low << 8) | bytes.get(1).copied().unwrap_or(0) as usize;
+            let body = if bytes.len() > 2 {
+                bytes[2..].to_vec()
+            } else {
+                Vec::new()
+            };
+            out.notes
+                .push(format!("ISOTP PCI: FF, всего {total} B"));
+            (format!("FF {total}B"), body)
+        }
+        0x2 => {
+            // Consecutive Frame: порядковый номер.
+            let seq = low & 0x0F;
+            let body = if bytes.len() > 1 {
+                bytes[1..].to_vec()
+            } else {
+                Vec::new()
+            };
+            out.notes.push(format!("ISOTP PCI: CF seq={seq}"));
+            (format!("CF seq={seq}"), body)
+        }
+        0x3 => {
+            // Flow Control: статус + block size + STmin.
+            let status = match low & 0x0F {
+                0 => "CTS",
+                1 => "WAIT",
+                2 => "OVFLW",
+                _ => "?",
+            };
+            if bytes.len() >= 3 {
+                out.notes.push(format!(
+                    "ISOTP PCI: FC {status}, block={}, STmin={}ms",
+                    bytes[1], bytes[2]
+                ));
+            } else {
+                out.notes.push(format!("ISOTP PCI: FC {status} (короткий кадр)"));
+            }
+            out.payload_hex = if bytes.len() > 1 {
+                bytes_to_hex(&bytes[1..])
+            } else {
+                String::new()
+            };
+            out.cmd = Some(format!("{protocol} {can_id} · FC {status}"));
+            return out;
+        }
+        _ => {
+            out.notes
+                .push(format!("неизвестный ISOTP PCI 0x{b0:02X}"));
+            let body = if bytes.len() > 1 {
+                bytes[1..].to_vec()
+            } else {
+                Vec::new()
+            };
+            (format!("PCI 0x{b0:02X}"), body)
+        }
+    };
+
+    out.ascii = ascii_preview(&payload);
+    out.payload_hex = bytes_to_hex(&payload);
+    out.cmd = Some(format!("{protocol} {can_id} · {desc}"));
+    if let Some(&sid) = payload.first() {
+        if sid == 0x7F && payload.len() >= 3 {
+            let nrc = payload[2];
+            let name = kwp_nrc_name(nrc).unwrap_or("");
+            let svc = payload[1];
+            out.notes.push(format!(
+                "негативный ответ 7F на 0x{svc:02X}{}",
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({name})")
+                }
+            ));
+        } else if sid >= 0x40 {
+            let request = sid - 0x40;
+            let name = service_name(request)
+                .map(|n| format!(" — ответ на {n} (0x{request:02X})"))
+                .unwrap_or_default();
+            out.notes.push(format!("service id 0x{sid:02X}{name}"));
+        } else {
+            let name = service_name(sid)
+                .map(|n| format!(" {n}"))
+                .unwrap_or_default();
+            out.notes.push(format!("service id 0x{sid:02X}{name}"));
+        }
     }
     out
 }

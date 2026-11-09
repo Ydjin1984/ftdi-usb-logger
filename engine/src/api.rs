@@ -6,8 +6,9 @@
 use crate::capture::CaptureManager;
 use crate::config::Config;
 use crate::models::{
-    CaptureStatus, ClientMsg, Event, EventKind, FileHash, FtdiDevice, PayloadDecode, ProcessDetail,
-    ServerMsg, SessionCounts, SessionMeta, StepEvent, StepSummary, ToolProcess,
+    CaptureStatus, ClientMsg, EnvCapabilities, Event, EventKind, FileHash, FtdiDevice, J2534Driver,
+    PayloadDecode, ProcessDetail, ServerMsg, SessionCounts, SessionMeta, StepEvent, StepSummary,
+    ToolProcess, UsbDevice,
 };
 use crate::store::SessionStore;
 use crate::{decode, import, procscan, report};
@@ -136,6 +137,10 @@ pub fn router(state: AppState) -> Router {
         .route("/devices", get(devices))
         .route("/tools", get(tools))
         .route("/tools/:pid/detail", get(tool_detail))
+        .route("/usb/devices", get(usb_devices))
+        .route("/usbpcap/devices", get(usbpcap_devices))
+        .route("/usbpcap/start", post(usbpcap_start))
+        .route("/j2534/drivers", get(j2534_drivers))
         .route("/capture/status", get(capture_status))
         .route("/capture/attach", post(capture_attach))
         .route("/capture/detach", post(capture_detach))
@@ -280,6 +285,7 @@ async fn api_not_found() -> AppError {
 
 async fn health(State(st): State<AppState>) -> Json<Value> {
     let sessions = st.store.list().len();
+    let capabilities = env_capabilities();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": st.started.elapsed().as_secs(),
@@ -288,13 +294,101 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         "sessions": sessions,
         "ui_dist": st.cfg.ui_dist.is_dir(),
         "python": st.cfg.python.to_string_lossy(),
+        "universal": true,
+        "capabilities": capabilities,
     }))
+}
+
+/// `EnvCapabilities`: что реально доступно на машине (docs/02 §11.2).
+fn env_capabilities() -> EnvCapabilities {
+    EnvCapabilities {
+        process_scan: true,
+        usb_enum: true,
+        ftd2xx: ftd2xx_dll_present(),
+        j2534: crate::j2534::list_drivers().len(),
+        usbpcap: crate::usbdevices::usbpcap_available(),
+        usbpcap_devices: crate::usbdevices::usbpcap_devices(),
+    }
+}
+
+/// Наличие `ftd2xx.dll` — System32/SysWOW64 и PATH (docs: capabilities.ftd2xx).
+fn ftd2xx_dll_present() -> bool {
+    let names = ["ftd2xx.dll", "ftd2xx64.dll"];
+    if let Ok(root) = std::env::var("SystemRoot") {
+        let root = PathBuf::from(root);
+        for dir in ["System32", "SysWOW64"] {
+            for name in names {
+                if root.join(dir).join(name).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for name in names {
+                if dir.join(name).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ─────────────────────────── discovery / процессы ────────────────────────
 
 async fn devices() -> Json<Vec<FtdiDevice>> {
     Json(crate::discovery::list_ftdi_devices())
+}
+
+async fn usb_devices() -> Json<Vec<UsbDevice>> {
+    Json(crate::usbdevices::list_usb_devices())
+}
+
+async fn j2534_drivers() -> Json<Vec<J2534Driver>> {
+    Json(crate::j2534::list_drivers())
+}
+
+async fn usbpcap_devices() -> Json<Vec<String>> {
+    Json(crate::usbdevices::usbpcap_devices())
+}
+
+#[derive(Debug, Deserialize)]
+struct UsbpcapStartReq {
+    #[serde(default)]
+    device: String,
+}
+
+/// POST /api/usbpcap/start — сырой захват USB-шины через USBPcapCMD.
+///
+/// Сессию поднимает `capture.start_raw_usb` (label `USB raw: <device>`, transport=usb);
+/// останавливается обычным `POST /api/capture/detach`.
+async fn usbpcap_start(
+    State(st): State<AppState>,
+    Json(req): Json<UsbpcapStartReq>,
+) -> ApiResult<Json<SessionMeta>> {
+    let device = req.device.trim().to_string();
+    if device.is_empty() {
+        return Err(AppError::bad(
+            r#"device обязателен, например "\\\\.\\USBPcap1""#,
+        ));
+    }
+    if !crate::usbdevices::usbpcap_available() {
+        return Err(AppError::conflict(
+            "USBPcap не установлен (нет драйвера или USBPcapCMD.exe)",
+        ));
+    }
+    let meta = st
+        .capture
+        .start_raw_usb(&device)
+        .await
+        .map_err(|err| AppError::conflict(format!("{err:#}")))?;
+    let _ = st.bus.send(ServerMsg::Toast {
+        level: "info".into(),
+        text: format!("сырой USB-захват запущен: {}", meta.id),
+    });
+    Ok(Json(meta))
 }
 
 const KNOWN_TOOLS: &[&str] = &[
@@ -307,8 +401,16 @@ const KNOWN_TOOLS: &[&str] = &[
     "quickflash.exe",
 ];
 
-async fn tools() -> Json<Vec<ToolProcess>> {
-    Json(procscan::list_candidates(KNOWN_TOOLS))
+#[derive(Debug, Deserialize)]
+struct ToolsQuery {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// `GET /api/tools?mode=auto|usb|window|all` (по умолчанию `auto`).
+async fn tools(Query(q): Query<ToolsQuery>) -> Json<Vec<ToolProcess>> {
+    let mode = procscan::CandidateMode::parse(q.mode.as_deref().unwrap_or("auto"));
+    Json(procscan::list_candidates_mode(KNOWN_TOOLS, mode))
 }
 
 async fn tool_detail(Path(pid): Path<u32>) -> ApiResult<Json<ProcessDetail>> {
@@ -349,9 +451,24 @@ async fn capture_attach(
 }
 
 async fn capture_detach(State(st): State<AppState>) -> ApiResult<Json<Option<SessionMeta>>> {
-    let meta = st.capture.detach().await?;
+    let mut meta = st.capture.detach().await?;
+    // Универсальный захват: фиксируем фактический транспорт(ы) сессии по событиям.
+    if let Some(m) = meta.as_mut() {
+        if let Ok(reader) = st.store.reader(&m.id) {
+            let transport = decode::transport_summary(&reader.all_events());
+            if !transport.is_empty() && transport != m.transport {
+                m.transport = transport;
+                if let Err(err) = st.store.update_meta(m) {
+                    tracing::warn!(session = %m.id, "не обновить транспорт сессии: {err:#}");
+                }
+            }
+        }
+    }
     Ok(Json(meta))
 }
+
+/// Транспорт(ы) сессии по событиям: один транспорт как есть, несколько — `mixed`.
+/// (реализация — `decode::transport_summary`, используется при detach)
 
 #[derive(Debug, Deserialize)]
 struct HookReq {
@@ -611,7 +728,7 @@ async fn event_decode(
         .into_iter()
         .next()
         .ok_or_else(|| AppError::not_found(format!("событие seq={seq} не найдено")))?;
-    Ok(Json(decode::decode_payload(&event.hex)))
+    Ok(Json(decode::decode_payload_event(&event)))
 }
 
 async fn step_detail(

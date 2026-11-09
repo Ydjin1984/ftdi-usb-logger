@@ -17,7 +17,7 @@ export type EventKind =
   | "error"
   | "raw";
 
-export type Transport = "ftd2xx" | "vcp" | "file" | "app" | "none";
+export type Transport = "ftd2xx" | "vcp" | "usb" | "j2534" | "file" | "app" | "none";
 export type Direction = "tx" | "rx";
 
 export interface Event {
@@ -168,9 +168,49 @@ export interface ToolProcess {
   name: string;
   exe: string;
   has_ftd2xx: boolean;
+  has_j2534?: boolean;
+  has_usb?: boolean;
   known_tool?: string | null;
   started_at?: string | null;
   window_title?: string | null;
+  cmdline?: string | null;
+  capabilities?: string[];
+  modules_denied?: boolean;
+  arch?: string;
+}
+
+export interface UsbDevice {
+  id: string;
+  vid?: number | null;
+  pid?: number | null;
+  serial: string;
+  description: string;
+  manufacturer: string;
+  friendly_name: string;
+  service: string;
+  class_name: string;
+  com_port?: number | null;
+  present: boolean;
+  interfaces: string[];
+  kind: string;
+}
+
+export interface J2534Driver {
+  registry_key: string;
+  name: string;
+  vendor: string;
+  dll: string;
+  dll_present: boolean;
+  version: string;
+}
+
+export interface EnvCapabilities {
+  process_scan: boolean;
+  usb_enum: boolean;
+  ftd2xx: boolean;
+  j2534: number;
+  usbpcap: boolean;
+  usbpcap_devices: string[];
 }
 
 export interface ProcessDetail {
@@ -198,6 +238,8 @@ export interface Health {
   sessions: number;
   ui_dist: boolean;
   python: string;
+  capabilities?: EnvCapabilities;
+  universal?: boolean;
 }
 
 export interface PayloadDecode {
@@ -240,3 +282,5 @@ export type ServerMsg =
 export type ClientMsg =
   | { op: "subscribe"; session: string | null; since: number }
   | { op: "ping" };
+
+

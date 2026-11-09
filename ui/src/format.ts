@@ -147,6 +147,8 @@ export function kindLabel(kind: string): string {
       return "MOD";
     case "vcp":
       return "VCP";
+    case "usb":
+      return "USB";
     case "note":
       return "NOTE";
     case "shot":
@@ -179,6 +181,7 @@ export function kindClass(kind: string): string {
       return "row--error";
     case "module":
     case "vcp":
+    case "usb":
       return "row--sys";
     case "sys":
     case "summary":
@@ -200,3 +203,4 @@ export function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+

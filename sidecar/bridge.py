@@ -10,15 +10,20 @@
 docs/02-architecture.md §5, типы: engine/src/models.rs, enum BridgeMsg).
 
 Движок → мост:  {"cmd":"attach",...} {"cmd":"hookctl",...} {"cmd":"mark",...}
-                {"cmd":"note",...} {"cmd":"stop"}
+                {"cmd":"note",...} {"cmd":"status"} {"cmd":"stop"}
 Мост → движок:  hello, ready, event, rpc, log, error, bye (поля — как в BridgeMsg).
+
+По умолчанию грузится универсальный агент `sidecar/agents/universal_capture.js`
+(FTDI/VCP/файлы + J2534 PassThru + WinUSB + HID + libusb + USB-пути, docs/02 §11.3).
+Старые агенты (`ftdi_capture.js`, `ftdi_capture_blocks.js`) остаются и выбираются
+полем `script` в команде attach.
 
 Смоук без устройства и без Frida:
 
     python sidecar/bridge.py --self-test
 
-печатает hello, ready, 20 синтетических event-строк валидной грамматики старого
-лога (TX/RX/VCP/FILE/MARK) и bye, затем выходит с кодом 0.
+печатает hello, ready, 34 синтетических event-строк (20 старых TX/RX/VCP/FILE/MARK +
+10 новых J2534/USB/WINUSB/HID/LIBUSB по §11.3 + 4 overlapped-I/O) и bye, затем выходит с кодом 0.
 """
 
 from __future__ import annotations
@@ -38,8 +43,8 @@ BRIDGE_VERSION = "0.1.0"
 # Корень репозитория/установки: <root>/sidecar/bridge.py
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Строка-визитка агента (её печатает ftdi_capture.js при загрузке) — из неё
-# берём arch/modules для сообщения ready.
+# Строка-визитка агента (её печатают universal_capture.js/ftdi_capture.js при загрузке) —
+# из неё берём arch/modules для сообщения ready.
 PROBE_RE = re.compile(r"capture script loaded: pid=(\d+) arch=(\S+) modules=(\d+)")
 
 # frida импортируем лениво: --self-test должен работать и без установленной Frida.
@@ -177,9 +182,12 @@ class Bridge:
     # ──────────────────────────── команды ─────────────────────────────
 
     def resolve_script(self, value: str) -> str:
-        """Путь к JS-агенту из команды attach: абсолютный или относительно корня."""
+        """Путь к JS-агенту из команды attach: абсолютный или относительно корня.
+
+        По умолчанию — универсальный агент (J2534/WinUSB/HID/libusb + старые хуки).
+        """
         if not value:
-            return os.path.join(REPO_ROOT, "sidecar", "agents", "ftdi_capture.js")
+            return os.path.join(REPO_ROOT, "sidecar", "agents", "universal_capture.js")
         if os.path.isabs(value):
             return value
         candidates = [
@@ -283,6 +291,23 @@ class Bridge:
             raise NonFatalError("ping: %s: %s" % (type(exc).__name__, exc))
         self.emit({"type": "rpc", "name": "ping", "result": str(result)})
 
+    def cmd_status(self) -> None:
+        """rpc.exports.status() агента: какие семейства хуков активны (JSON-строка)."""
+        if self.script is None:
+            raise NonFatalError("status: мост не подключён")
+        try:
+            exports = getattr(self.script, "exports_sync", None)
+            if exports is None:
+                exports = getattr(self.script, "exports")
+            result = exports.status()
+        except Exception as exc:  # noqa: BLE001
+            raise NonFatalError("status: %s: %s" % (type(exc).__name__, exc))
+        if isinstance(result, str):
+            text = result
+        else:
+            text = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+        self.emit({"type": "rpc", "name": "status", "result": text})
+
     def cmd_mark(self, cmd: dict) -> None:
         """Разметку ведёт движок; мост только фиксирует факт команды в логе."""
         action = cmd.get("action")
@@ -354,6 +379,8 @@ class Bridge:
                         self.cmd_mark(cmd)
                     elif name == "ping":
                         self.cmd_ping()
+                    elif name == "status":
+                        self.cmd_status()
                     else:
                         self.emit(
                             {"type": "error", "fatal": False, "msg": "неизвестная команда: %r" % (name,)}
@@ -403,6 +430,31 @@ SELF_TEST_LINES = [
     "# MARK wall=2026-11-09 12:00:00 rel=+3.300s START 1: читаю идентификаторы",
 ]
 
+# 10 строк нового универсального захвата — ровно в формате docs/02 §11.3:
+# J2534 PassThru (open/connect/TX/RX/ioctl/disconnect), USB open, WINUSB, HID, LIBUSB.
+# J2534 TX/RX: ISO15765, CAN ID уже вынут из Data[0..3] (big-endian), в хвосте — payload.
+UNIVERSAL_TEST_LINES = [
+    '[+1.234s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" rc=0',
+    "[+1.300s] J2534 connect dev=1 ch=1 proto=ISO15765 flags=0x0 baud=500000 rc=0",
+    "[+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : 02 10 03 00 00 00 00 00",
+    "[+2.150s] J2534 RX ch=1 proto=ISO15765 id=0x7E8 rxs=0x0 len=8 : 06 50 03 00 00 00 00 00",
+    "[+3.000s] J2534 ioctl ch=1 id=0x0701 rc=0",
+    "[+3.100s] J2534 disconnect ch=1 rc=0",
+    '[+4.000s] USB open path="\\\\?\\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4',
+    "[+4.200s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b",
+    "[+4.300s] HID TX report=0x02 len=9 : 02 12 04 0d 1b 00 00 00 00",
+    "[+4.400s] LIBUSB TX ep=0x01 len=8 : 12 04 0d 1b",
+]
+
+# 4 строки overlapped-I/O (.NET SerialPort: реальные n и данные приходят в
+# GetOverlappedResult, но старый формат VCP/FILE сохраняется для импорта/тестов):
+OVL_TEST_LINES = [
+    "[+6.100s] VCP attach-existing COM1 handle=0x2b4",
+    "[+6.200s] VCP TX WriteFile(COM1) rc=0 n=4 ovl=1 : 12 04 0d 1b",
+    "[+6.300s] VCP RX ReadFile(COM1) rc=0 n=12 ovl=1 : 12 4c a0 0f 00 3f e8 08 c2 00 00 00",
+    "[+6.400s] VCP TX WriteFileEx(COM1) len=4 ovl=1 : 12 04 0d 1b",
+]
+
 
 def self_test(out=None) -> int:
     out = out if out is not None else sys.stdout
@@ -419,10 +471,10 @@ def self_test(out=None) -> int:
             "python": platform.python_version(),
         }
     )
-    write({"type": "ready", "pid": 4321, "arch": "x64", "modules": 31, "script": "ftdi_capture.js"})
-    for line in SELF_TEST_LINES:
+    write({"type": "ready", "pid": 4321, "arch": "x64", "modules": 31, "script": "universal_capture.js"})
+    for line in SELF_TEST_LINES + UNIVERSAL_TEST_LINES + OVL_TEST_LINES:
         write({"type": "event", "line": line, "wall": rfc3339_now()})
-    write({"type": "bye", "code": 0, "events": len(SELF_TEST_LINES)})
+    write({"type": "bye", "code": 0, "events": len(SELF_TEST_LINES) + len(UNIVERSAL_TEST_LINES) + len(OVL_TEST_LINES)})
     return 0
 
 
@@ -445,7 +497,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="напечатать hello/ready/20 event/bye и выйти (смоук без устройства и Frida)",
+        help="напечатать hello/ready/34 event/bye и выйти (смоук без устройства и Frida)",
     )
     parser.add_argument("--version", action="version", version="bridge " + BRIDGE_VERSION)
     args = parser.parse_args(argv)

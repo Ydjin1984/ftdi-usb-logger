@@ -26,6 +26,7 @@ pub fn kind_name(kind: EventKind) -> &'static str {
         EventKind::Sys => "sys",
         EventKind::Module => "module",
         EventKind::Vcp => "vcp",
+        EventKind::Usb => "usb",
         EventKind::Note => "note",
         EventKind::Shot => "shot",
         EventKind::Summary => "summary",
@@ -67,6 +68,17 @@ fn event_dir(ev: &Event) -> &'static str {
     }
 }
 
+/// Факт относится к USB/J2534-окружению (для отдельной группы в шапке отчёта).
+fn is_usb_or_j2534_fact(fact: &str) -> bool {
+    let lower = fact.to_ascii_lowercase();
+    [
+        "usb", "j2534", "passthru", "pass-thru", "winusb", "hid", "libusb", "usbpcap",
+        "scanmatik", "chipsoft", "openport", "tactrix", "vxdiag",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 // ────────────────────────────── report.txt ───────────────────────────────
 
 /// Текстовый отчёт в формате старого логера.
@@ -95,7 +107,7 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         meta.transport.clone()
     };
     out.push_str(&format!(
-        "  транспорт: {transport}   версия движка: {}   машина: {}\n",
+        "  транспорт(ы): {transport}   версия движка: {}   машина: {}\n",
         meta.engine_version, meta.host
     ));
     if let Some(tool) = &meta.tool_path {
@@ -125,9 +137,22 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         ));
     }
     if !meta.facts.is_empty() {
-        out.push_str(&format!("  факты ({}):\n", meta.facts.len()));
-        for fact in &meta.facts {
-            out.push_str(&format!("    {fact}\n"));
+        // Универсальный захват: USB/J2534-факты показываем отдельной группой.
+        let (usb_facts, other_facts): (Vec<&String>, Vec<&String>) = meta
+            .facts
+            .iter()
+            .partition(|fact| is_usb_or_j2534_fact(fact));
+        if !other_facts.is_empty() {
+            out.push_str(&format!("  факты ({}):\n", other_facts.len()));
+            for fact in &other_facts {
+                out.push_str(&format!("    {fact}\n"));
+            }
+        }
+        if !usb_facts.is_empty() {
+            out.push_str(&format!("  USB/J2534-факты ({}):\n", usb_facts.len()));
+            for fact in &usb_facts {
+                out.push_str(&format!("    {fact}\n"));
+            }
         }
     }
     if !meta.tags.is_empty() {
@@ -554,3 +579,4 @@ pub fn export_jsonl(dir: &Path, out: &Path) -> anyhow::Result<()> {
 pub fn export_markdown(meta: &SessionMeta, steps: &[StepSummary], out: &Path) -> anyhow::Result<()> {
     write_text_atomic(out, &render_markdown(meta, steps))
 }
+

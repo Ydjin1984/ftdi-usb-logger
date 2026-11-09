@@ -326,3 +326,74 @@ stdin/stdout, по одному JSON-объекту на строку, UTF-8, б
 | Скрипты сборки/запуска, упаковка, README | `scripts/**`, `README.md`, `docs/03-runbook.md` | zhoporuk |
 | Разведка старого логера | `docs/01-original-contracts.md` | biba |
 
+
+## 11. Универсальный захват: USB / COM / J2534
+
+Цель: логер не привязан к Quickflash. Он цепляется к **любому** процессу и пишет обмен
+с любым устройством, которое приложение использует: FTDI D2XX, виртуальный COM,
+WinUSB/HID/libusb, J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG,
+Bosch MDI, UCDS и т.д.).
+
+### 11.1 Выбор цели
+
+`ToolProcess` (см. §3.4) получает признаки: `has_ftd2xx`, `has_j2534`, `has_usb`,
+`window_title`, `capabilities[] = ftd2xx|j2534|usb|window`, `modules_denied`, `arch`.
+`GET /api/tools?mode=auto|usb|window|all`:
+* `auto` — процессы с окном **или** USB/COM/J2534-модулями **или** известные инструменты;
+* `usb` — только с признаками USB/FTDI/J2534 (без «пустых» окон);
+* `window` — только процессы с видимым окном;
+* `all` — все процессы пользователя (страховка: если драйвер не виден, цепляемся вручную).
+
+`modules_denied=true` → UI показывает предупреждение «запустите логер от администратора».
+
+### 11.2 USB-устройства и J2534-драйверы
+
+* `GET /api/usb/devices` → `UsbDevice[]`: `id, vid, pid, serial, description, friendly_name,
+  manufacturer, service, class_name, com_port, present, interfaces[], kind`
+  (источник: SetupAPI `GUID_DEVINTERFACE_USB_DEVICE` + реестр `Enum\USB`, COM-порт из
+  `Device Parameters\PortName`; `kind = ftdi|serial|hid|usb|composite`).
+* `GET /api/j2534/drivers` → `J2534Driver[]`: `registry_key, name, vendor, dll, dll_present, version`
+  (источник: `HKLM\SOFTWARE\WOW6432Node\PassThruSupport.04.04` и 64-битная ветка).
+* `GET /api/health` дополняется `capabilities: EnvCapabilities`:
+  `{process_scan, usb_enum, ftd2xx, j2534: <кол-во>, usbpcap, usbpcap_devices[]}`.
+
+### 11.3 Грамматика новых строк захвата
+
+Формат тот же — `[+<t>s] <текст>` (совместим со старым логом), новые префиксы:
+
+```
+[+1.234s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" rc=0
+[+1.300s] J2534 connect dev=1 ch=1 proto=ISO15765 flags=0x0 baud=500000 rc=0
+[+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : 02 10 03 00 00 00 00 00
+[+2.150s] J2534 RX ch=1 proto=ISO15765 id=0x7E8 rxs=0x0 len=8 : 06 50 03 00 00 00 00 00
+[+3.000s] J2534 ioctl ch=1 id=0x0701 rc=0
+[+3.100s] J2534 disconnect ch=1 rc=0
+[+4.000s] USB open path="\\?\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4
+[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3
+[+4.200s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b
+[+4.250s] WINUSB RX pipe=0x81 len=64 : ...
+[+4.300s] HID TX report=0x02 len=9 : ...
+[+4.350s] HID RX report=0x01 len=9 : ...
+[+4.400s] LIBUSB TX ep=0x01 len=8 : ...
+[+4.450s] LIBUSB RX ep=0x81 len=8 : ...
+```
+
+Маппинг `transport`: `FT_*`→`ftd2xx`, `VCP`→`vcp`, `J2534`→`j2534`, `USB/WINUSB/HID/LIBUSB`→`usb`.
+`EventKind`: `tx`/`rx` для обмена, `usb` для open/close, `sys` для open/connect/disconnect.
+
+### 11.4 Разбор
+
+`decode::parse_capture_line` понимает новые префиксы; для J2534 кладёт в `meta`:
+`{channel, protocol, can_id, flags, rxs}` и `text` вида `ISO15765 0x7E0: 02 10 03`.
+Инспектор дополнительно декодирует CAN/ISOTP: длина кадра, PCI-тип (SF/FF/CF/FC),
+service id для KWP/UDS. Для USB open/close `meta`: `{path, kind, device}`.
+
+### 11.5 Сырой захват шины (USBPcap)
+
+Если установлен USBPcap (драйвер + `USBPcapCMD.exe`), доступен режим «сырой USB»:
+движок запускает `USBPcapCMD` на выбранном корневом хабе, разбирает pcap-поток
+(USBPcap header + URB payload) и пишет события `kind=usb`, `transport=usb`,
+`meta={urb_type, endpoint, transfer, bus, device, address}`. Требует прав администратора
+и установленного драйвера; при отсутствии — UI показывает подсказку и режим недоступен.
+Эта функция не заменяет хуки: она нужна для устройств, которые приложение открывает
+через собственный драйвер (без WinUSB/HID/FTDI/J2534 API).

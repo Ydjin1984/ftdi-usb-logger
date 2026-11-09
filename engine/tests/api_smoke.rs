@@ -510,3 +510,137 @@ async fn api_error_contract() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn api_universal() {
+    // Универсальный захват: tools?mode, USB-устройства, J2534-драйверы, health.capabilities.
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().to_path_buf();
+    let cli = Cli::parse_from([
+        "ftdi-logger",
+        "--root",
+        root.to_str().unwrap(),
+        "--no-open",
+        "--no-bridge",
+    ]);
+    let cfg = Arc::new(Config::from_cli(&cli).unwrap());
+    cfg.ensure_dirs().unwrap();
+    let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
+    let (bus, _) = tokio::sync::broadcast::channel::<ServerMsg>(64);
+    let capture = Arc::new(ftdi_logger::capture::CaptureManager::new(
+        cfg.clone(),
+        store.clone(),
+        bus.clone(),
+    ));
+    let state = ftdi_logger::api::AppState {
+        cfg: cfg.clone(),
+        store: store.clone(),
+        capture: capture.clone(),
+        bus: bus.clone(),
+        started: Instant::now(),
+    };
+    let app = ftdi_logger::api::router(state);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // health: universal + capabilities (EnvCapabilities).
+    let health = get_json(addr, "/api/health").await;
+    assert_eq!(health.get("universal"), Some(&Value::Bool(true)));
+    let caps = health
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("нет capabilities: {health}"));
+    for key in [
+        "process_scan",
+        "usb_enum",
+        "ftd2xx",
+        "j2534",
+        "usbpcap",
+        "usbpcap_devices",
+    ] {
+        assert!(caps.contains_key(key), "capabilities.{key} отсутствует: {caps:?}");
+    }
+    assert_eq!(caps.get("process_scan"), Some(&Value::Bool(true)));
+    assert!(caps.get("ftd2xx").unwrap().is_boolean());
+    assert!(caps.get("j2534").unwrap().is_u64());
+    assert!(caps.get("usbpcap").unwrap().is_boolean());
+    assert!(caps.get("usbpcap_devices").unwrap().is_array());
+
+    // USB-устройства и J2534-драйверы — массивы (могут быть пустыми без железа).
+    let (code, _h, body) = http(addr, "GET", "/api/usb/devices", None, "").await;
+    assert_eq!(code, 200);
+    let usb: Vec<Value> = serde_json::from_str(&body).unwrap_or_else(|e| panic!("usb/devices: {e}: {body}"));
+    for device in &usb {
+        assert!(device.get("id").is_some(), "у UsbDevice нет id: {device}");
+    }
+
+    let (code, _h, body) = http(addr, "GET", "/api/j2534/drivers", None, "").await;
+    assert_eq!(code, 200);
+    let drivers: Vec<Value> =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("j2534/drivers: {e}: {body}"));
+    for driver in &drivers {
+        assert!(driver.get("registry_key").is_some(), "у J2534Driver нет registry_key: {driver}");
+    }
+
+    // /api/tools?mode=... — массив для всех режимов, неизвестный режим = auto.
+    for mode in ["auto", "usb", "window", "all", "bogus"] {
+        let path = format!("/api/tools?mode={mode}");
+        let (code, _h, body) = http(addr, "GET", &path, None, "").await;
+        assert_eq!(code, 200, "{path}: {body}");
+        let arr: Vec<Value> = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("{path}: не массив ({e}): {body}"));
+        if mode == "all" {
+            // boba реализовал procscan::list_candidates_mode(All) — процессов на машине > 0,
+            // значит список обязан быть непустым и содержать новые поля ToolProcess.
+            assert!(!arr.is_empty(), "/api/tools?mode=all пуст, хотя процессы есть");
+            for tool in &arr {
+                assert!(tool.get("pid").is_some(), "ToolProcess без pid: {tool}");
+                assert!(tool.get("capabilities").is_some(), "нет capabilities: {tool}");
+            }
+        }
+    }
+    // Без параметра ручка работает как раньше (auto).
+    let (code, _h, body) = http(addr, "GET", "/api/tools", None, "").await;
+    assert_eq!(code, 200);
+    let _: Vec<Value> = serde_json::from_str(&body).unwrap();
+
+    // Контракт ошибок не сломан: неизвестная сессия по-прежнему 404 JSON.
+    let (code, headers, body) = http(addr, "GET", "/api/sessions/nope", None, "").await;
+    assert_json_error(code, &headers, &body, 404, "sessions/nope после новых ручек");
+
+    // USBPcap: список устройств (string[]) и понятные ошибки start-ручки.
+    let (code, _h, body) = http(addr, "GET", "/api/usbpcap/devices", None, "").await;
+    assert_eq!(code, 200);
+    let _: Vec<String> = serde_json::from_str(&body).unwrap_or_else(|e| panic!("usbpcap/devices: {e}: {body}"));
+
+    let (code, headers, body) = http(
+        addr,
+        "POST",
+        "/api/usbpcap/start",
+        Some(r#"{"device":""}"#),
+        "application/json",
+    )
+    .await;
+    assert_json_error(code, &headers, &body, 400, "usbpcap/start без device");
+
+    let (code, headers, body) = http(
+        addr,
+        "POST",
+        "/api/usbpcap/start",
+        Some(r#"{"device":"\\\\.\\USBPcap1"}"#),
+        "application/json",
+    )
+    .await;
+    assert!(
+        code == 409,
+        "usbpcap/start: ожидали 409/501 (нет USBPcap или нет capture.start_raw_usb), получили {code}: {body}"
+    );
+    assert_json_error(code, &headers, &body, code, "usbpcap/start");
+
+    server.abort();
+}

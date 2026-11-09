@@ -65,7 +65,14 @@ impl Config {
         let script = cli
             .script
             .clone()
-            .unwrap_or_else(|| root.join("sidecar/agents/ftdi_capture.js"));
+            .unwrap_or_else(|| {
+            let universal = root.join("sidecar/agents/universal_capture.js");
+            if universal.is_file() {
+                universal
+            } else {
+                root.join("sidecar/agents/ftdi_capture.js")
+            }
+        });
         Ok(Self {
             sessions_dir: root.join("sessions"),
             ui_dist: root.join("ui/dist"),
@@ -143,3 +150,4 @@ fn which(name: &str) -> Option<PathBuf> {
     }
     None
 }
+

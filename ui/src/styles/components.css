@@ -927,3 +927,54 @@
   background: var(--bg-1);
   text-align: center;
 }
+
+/* ── универсальный захват: управление списком программ ──────────────────── */
+.rail-controls {
+  padding: 6px 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+}
+.rail-pid {
+  display: grid;
+  grid-template-columns: 1fr 28px;
+  gap: 4px;
+}
+.rail-pid input {
+  height: 22px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-1);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0 7px;
+  outline: none;
+  min-width: 0;
+}
+.rail-pid input:focus {
+  border-color: var(--line-3);
+}
+.rail-pid .btn {
+  height: 22px;
+  padding: 0;
+  justify-content: center;
+}
+.badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+.badge-tag--warn {
+  color: var(--warn);
+  border-color: rgba(255, 171, 74, 0.45);
+}
+.panel__body--short {
+  max-height: 30vh;
+}
+.panel__grow {
+  flex: 1 1 auto;
+}

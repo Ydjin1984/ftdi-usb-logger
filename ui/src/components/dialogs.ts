@@ -274,6 +274,50 @@ export function openExportDialog(): void {
   void m;
 }
 
+/* ─────────────────────────────── USBPcap ───────────────────────────────── */
+
+export function openUsbpcapDialog(devices: string[]): void {
+  if (!devices.length) {
+    store.toast(
+      "warn",
+      "USBPcap не найден. Установите USBPcap (desowin.org/usbpcap), перезагрузите ПК и запустите логер от администратора.",
+    );
+    return;
+  }
+  let chosen = devices[0];
+  const list = el("div", "decoded");
+  for (const dev of devices) {
+    const row = el("button", `format-option${dev === chosen ? " is-active" : ""}`);
+    row.type = "button";
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.append(el("span", "format-option__title", dev));
+    row.addEventListener("click", () => {
+      chosen = dev;
+      for (const n of Array.from(list.children)) n.classList.remove("is-active");
+      row.classList.add("is-active");
+    });
+    list.append(row);
+  }
+  const body = el("div");
+  body.append(
+    field("корневой USB-хаб для захвата", list, "нужны права администратора; трафик всех устройств на этом хабе"),
+  );
+  const m = modal({
+    title: "Сырой захват USB-шины (USBPcap)",
+    body,
+    footer: [
+      ghost("отмена", () => m.close()),
+      primary("начать запись", () => {
+        m.close();
+        void store.startUsbpcap(chosen);
+      }),
+    ],
+    width: 620,
+  });
+  void m;
+}
+
 /* ────────────────────────────── шаблоны ────────────────────────────────── */
 
 export function openTemplatesDialog(): void {
@@ -419,3 +463,4 @@ export class Toasts {
     }
   }
 }
+
