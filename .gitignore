@@ -20,4 +20,5 @@ __pycache__/
 Thumbs.db
 # Машинные артефакты edge-прогона (перегенерируются run-edge.ps1)
 /tests/e2e/edge/out/
+/build/
 

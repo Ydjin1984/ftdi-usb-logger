@@ -191,6 +191,22 @@ $sidecarDst = Join-Path $DistDir 'sidecar'
 if ($LASTEXITCODE -ge 8) { Fail ('robocopy sidecar завершился с кодом ' + $LASTEXITCODE) }
 Write-Host '  + sidecar\'
 
+# splash-логотип, иконка приложения и сам splash-скрипт
+foreach ($asset in @('splash.png', 'app.ico')) {
+    $src = Join-Path $Root ('assets\' + $asset)
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $DistDir $asset) -Force
+        Write-Host ('  + ' + $asset)
+    } else {
+        Warn ('нет assets\' + $asset + ' — splash/иконка не попадут в dist')
+    }
+}
+$splashScript = Join-Path $Root 'scripts\splash.ps1'
+if (Test-Path -LiteralPath $splashScript) {
+    Copy-Item -LiteralPath $splashScript -Destination (Join-Path $DistDir 'splash.ps1') -Force
+    Write-Host '  + splash.ps1'
+}
+
 # logger.cmd самоопределяет раскладку (рядом exe = dist; иначе репозиторий),
 # поэтому копируется в dist как есть, без подстановки путей.
 Copy-Item -LiteralPath (Join-Path $Root 'logger.cmd') -Destination (Join-Path $DistDir 'logger.cmd') -Force

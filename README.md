@@ -1,5 +1,7 @@
 # FTDI/USB Logger
 
+![FTDI/USB Logger](assets/splash.png)
+
 Стационарный логер обмена диагностического шнурка с ЭБУ: живой поток, шаги, таймлайн,
 HEX-инспектор, скриншоты, отчёты, экспорт/импорт — и **универсальный захват** любых
 USB/COM/J2534-устройств, а не только FTDI.
@@ -201,6 +203,39 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 Порт можно поменять: `scripts\run.ps1 -Port 7812` (или `ftdi-logger.exe --port 7812`).
 
 ---
+
+## Установка на другую машину (независимая сборка)
+
+Приложение не требует установленных Python/Frida/Rust: в установщик и portable-версию
+встроен Python 3.12 с Frida.
+
+| Что | Где | Размер | Как ставится |
+|---|---|---|---|
+| **Установщик** | `dist\FTDI_USB_Logger_Setup.exe` | ≈43 МБ | per-user, без администратора: `%LOCALAPPDATA%\FTDI_USB_Logger`, ярлыки на рабочем столе и в меню Пуск, запись в «Установка и удаление программ», uninstall |
+| **Portable ZIP** | `build\FTDI_USB_Logger_portable.zip` | ≈64 МБ | распаковать куда угодно и запустить `logger.cmd`; ничего не устанавливается |
+| Обычный dist | `dist\FTDI_USB_Logger\` | ≈7 МБ | для машины, где Python+Frida уже есть |
+
+- **Splash при старте**: логотип из `assets/splash.png` показывается, пока движок поднимается,
+  и закрывается сам, когда `/api/health` ответил. Скрипт — `scripts/splash.ps1`.
+- **Иконка приложения**: `assets/app.ico` — на ярлыках и в панели задач (UI-окно получает
+  favicon из `ui/public/favicon.png`).
+- Установщик не подписан: при первом запуске Windows SmartScreen может показать
+  «Неизвестный издатель» → «Подробнее» → «Выполнить всё равно». Для распространения нужен
+  код-сертификат (не входит в репозиторий).
+- Сессии и логи хранятся в каталоге установки (`sessions\`), при удалении можно сохранить их.
+
+### Сборка установщика
+
+```powershell
+# 1) portable: dist + встроенный Python + frida  → build\FTDI_USB_Logger_portable.zip
+powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
+
+# 2) setup.exe (7-Zip SFX, per-user установка)   → dist\FTDI_USB_Logger_Setup.exe
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
+```
+
+Для сборки нужны 7-Zip и интернет (первый раз скачивается embeddable Python, кешируется
+в `build\cache`). Установка/удаление: `scripts\installer\install.cmd|ps1`, `uninstall.cmd|ps1`.
 
 ## Как логировать
 
@@ -483,6 +518,7 @@ sessions/20261109-154706-bmw-scanner-e2e/
 ---
 
 <sub>Проект использует [Frida](https://frida.re), [Rust](https://www.rust-lang.org), [axum](https://github.com/tokio-rs/axum), [Vite](https://vitejs.dev). Старый логер и `parse_family.py` сохранены в `tools/legacy/` как эталон разбора.</sub>
+
 
 
 

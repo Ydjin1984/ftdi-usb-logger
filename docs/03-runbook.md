@@ -355,3 +355,17 @@ cargo build --release --manifest-path engine\Cargo.toml
 4. Если нужного устройства/программы нет — переключить фильтр в панели «ПРОГРАММЫ» на
    «все»/«окна» или ввести PID вручную; для диагностики: `GET /api/session/new` возвращает
    актуальные `devices`, `usb_devices`, `j2534_drivers`, `tools`.
+## Независимая сборка и установка
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1    # build\FTDI_USB_Logger_portable.zip
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1   # dist\FTDI_USB_Logger_Setup.exe
+```
+
+- В portable/setup встроен Python 3.12 embeddable + frida 17 (`FTDI_USB_Logger\python\`).
+  Движок сам выбирает `python\python.exe` рядом с собой (config: bundled python), поэтому
+  целевой машине не нужны установленные Python/Frida.
+- Установщик per-user: `%LOCALAPPDATA%\FTDI_USB_Logger`, ярлыки, uninstall-запись HKCU,
+  splash с логотипом (`splash.ps1` + `splash.png`), иконка `app.ico`.
+- Установщик не подписан — SmartScreen предупредит; для раздачи подписывайте Authenticode.
+- Удаление: ярлык «Удалить FTDI/USB Logger» или `uninstall.cmd` (можно сохранить sessions).

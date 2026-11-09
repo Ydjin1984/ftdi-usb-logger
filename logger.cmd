@@ -45,7 +45,10 @@ rem HttpClient без прокси: неудачный запрос не дол�
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Net.Http; $handler=[System.Net.Http.HttpClientHandler]::new(); $handler.UseProxy=$false; $h=[System.Net.Http.HttpClient]::new($handler); $h.Timeout=[TimeSpan]::FromMilliseconds(900); try { $r=$h.GetAsync('%HEALTH%').GetAwaiter().GetResult(); if([int]$r.StatusCode -eq 200){ exit 0 } } catch {}; exit 1"
 if not errorlevel 1 goto :already_running
 
-rem --- 2. Старт: логи в файлы, иначе пользователь не увидит причину ошибки ----
+rem --- 2. Splash с логотипом, пока движок поднимается (закрывается по health) ---
+if exist "%DIST%\splash.ps1" if exist "%DIST%\splash.png" start "" powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%DIST%\splash.ps1" -Port %PORT% -Logo "%DIST%\splash.png" -Seconds 60
+
+rem --- 3. Старт: логи в файлы, иначе пользователь не увидит причину ошибки ----
 del /q "%OUTLOG%" "%ERRLOG%" >nul 2>nul
 if defined EXTRA goto :start_with_extra
 powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '--root','%ROOT%','--port','%PORT%' -WorkingDirectory '%ROOT%' -RedirectStandardOutput '%OUTLOG%' -RedirectStandardError '%ERRLOG%' -WindowStyle Hidden"
@@ -105,3 +108,4 @@ echo       Затем снова запустите logger.cmd.
 echo.
 timeout /t 12 /nobreak >nul 2>nul
 exit /b 1
+

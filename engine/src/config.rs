@@ -59,6 +59,12 @@ impl Config {
         let python = cli
             .python
             .clone()
+            .or_else(|| {
+                // Portable/installer: рядом с приложением лежит собственный Python
+                // с frida — на чужой машине ничего доустанавливать не нужно.
+                let bundled = root.join("python").join("python.exe");
+                bundled.is_file().then_some(bundled)
+            })
             .or_else(default_python)
             .unwrap_or_else(|| PathBuf::from("python.exe"));
         let sidecar = cli.sidecar.clone().unwrap_or_else(|| root.join("sidecar/bridge.py"));
@@ -150,4 +156,5 @@ fn which(name: &str) -> Option<PathBuf> {
     }
     None
 }
+
 
