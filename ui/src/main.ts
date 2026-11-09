@@ -17,6 +17,7 @@ import {
   openExportDialog,
   openHelpDialog,
   openMarkPrompt,
+  openNewSessionDialog,
   openStepPrompt,
   openStopConfirm,
 } from "./components/dialogs";
@@ -43,6 +44,12 @@ function build(): void {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
+      if (store.state.needsReload) {
+        store.state.needsReload = false;
+        location.reload();
+        return;
+      }
+      if (store.state.connectionLost) showOffline();
       topbar.update();
       rail.update();
       stream.update();
@@ -119,6 +126,11 @@ function installHotkeys(stream: Stream): void {
       openExportDialog();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      openNewSessionDialog();
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
       e.preventDefault();
       pickAndImport();
@@ -179,6 +191,31 @@ function installDropzone(): void {
   });
 }
 
+function showOffline(): void {
+  if (!boot.isConnected) document.body.prepend(boot);
+  if (boot.classList.contains("boot--offline")) {
+    boot.hidden = false;
+    return;
+  }
+  boot.hidden = false;
+  boot.classList.add("boot--error", "boot--offline");
+  bootText.textContent = "";
+  const wrap = el("div");
+  wrap.append(
+    el("div", "boot__text", "Движок не отвечает: логер остановлен или перезапускается. Предыдущая сессия уже не пишется."),
+    el("div", "boot__hint", "Запустите ярлык logger.cmd заново — эта страница переподключится сама, как только движок поднимется."),
+  );
+  const actions = el("div", "row-actions");
+  actions.style.justifyContent = "center";
+  actions.style.marginTop = "14px";
+  const retry = el("button", "btn btn--primary", "переподключиться");
+  retry.type = "button";
+  retry.addEventListener("click", () => location.reload());
+  actions.append(retry);
+  wrap.append(actions);
+  bootText.replaceWith(wrap);
+}
+
 function showBootError(message: string): void {
   // Слой мог быть откреплён прошлой навигацией/сборкой — возвращаем его на экран.
   if (!boot.isConnected) document.body.prepend(boot);
@@ -221,6 +258,7 @@ async function main(): Promise<void> {
 }
 
 void main();
+
 
 
 

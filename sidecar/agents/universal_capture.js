@@ -1270,6 +1270,10 @@ function usbPathKind(path) {
   return m ? m[1].toLowerCase() : null;
 }
 function emitUsbTransfer(dir, kind, buf, len, reportFirst) {
+  // Если приложение работает через FTDI D2XX, то же самое уже логируется как
+  // TX/RX ftd2xx FT_Write/FT_Read. USB-события из DeviceIoControl в этом случае —
+  // внутренняя реализация драйвера, и мы их не дублируем (иначе tx/rx байты ×2).
+  if (ftMod && !PAUSED) return;
   if (!buf || len <= 0) return;
   const hex = hx(buf, len);
   if (kind === 'hid') log('HID ' + dir + ' report=' + hex2(reportFirst ? u8(buf) : 0) + ' len=' + len + ' : ' + hex);
@@ -1427,6 +1431,7 @@ rpc.exports = {
 };
 
 log('capture script loaded: pid=' + Process.id + ' arch=' + Process.arch + ' modules=' + Process.enumerateModules().length + ' wall=' + new Date().toISOString());
+
 
 
 

@@ -33,6 +33,8 @@ export interface StoreState {
   mode: "live" | "demo";
   booted: boolean;
   bootError: string | null;
+  connectionLost: boolean;
+  needsReload: boolean;
   wsState: "connecting" | "open" | "closed";
 
   health: Health | null;
@@ -108,6 +110,7 @@ class Store {
   private ws: WsClient | null = null;
   private toastSeq = 0;
   private pollTimer: number | null = null;
+  private healthFails = 0;
   private tickTimer: number | null = null;
 
   constructor() {
@@ -116,6 +119,8 @@ class Store {
       mode: demo ? "demo" : "live",
       booted: false,
       bootError: null,
+      connectionLost: false,
+      needsReload: false,
       wsState: "connecting",
       health: null,
       status: null,
@@ -289,6 +294,16 @@ class Store {
     this.toast("info", "демо-режим: данные синтетические, устройство не требуется");
   }
 
+  /** Только устройства (USB/COM/J2534) — дешёвый опрос, работает и во время записи. */
+  async refreshDevices(): Promise<void> {
+    if (this.state.mode === "demo") return;
+    const [devices, usb, j2534] = await Promise.allSettled([api.devices(), api.usbDevices(), api.j2534Drivers()]);
+    if (devices.status === "fulfilled") this.state.devices = devices.value;
+    if (usb.status === "fulfilled") this.state.usbDevices = usb.value;
+    if (j2534.status === "fulfilled") this.state.j2534Drivers = j2534.value;
+    this.emit();
+  }
+
   private startPolling(): void {
     if (this.pollTimer != null) window.clearInterval(this.pollTimer);
     let idleTicks = 0;
@@ -296,18 +311,33 @@ class Store {
       void api
         .health()
         .then((h) => {
+          this.healthFails = 0;
+          if (this.state.connectionLost) {
+            // Движок вернулся (например, перезапущен ярлыком) — перезагружаем страницу,
+            // чтобы синхронизировать сессии/статус и убрать слой «нет связи».
+            this.state.connectionLost = false;
+            this.state.needsReload = true;
+          }
           this.state.health = h;
           this.state.status = h.capture ?? this.state.status;
           this.emit();
-          // Когда захвата нет — раз в ~12 с обновляем список процессов/устройств,
-          // чтобы запущенная «прямо сейчас» программа появлялась сама.
+          // Устройства обновляем всегда (шнурок могли заменить во время записи),
+          // процессы — только когда захват не идёт.
           idleTicks += 1;
-          if (!h.capture?.recording && !this.state.loadingTargets && idleTicks % 3 === 0) {
-            void this.refreshTargets();
+          if (idleTicks % 3 === 0 && !this.state.loadingTargets) {
+            void this.refreshDevices();
+            if (!h.capture?.recording) void this.refreshTargets();
           }
         })
         .catch(() => {
           this.state.wsState = "closed";
+          // Движок остановлен/перезапускается: после 3 подряд неудач показываем
+          // блокирующий слой «нет связи» (иначе UI навсегда показывает старый REC).
+          this.healthFails += 1;
+          if (this.healthFails >= 3 && !this.state.connectionLost) {
+            this.state.connectionLost = true;
+            this.state.status = null;
+          }
           this.emit();
         });
     }, 4000);
@@ -591,13 +621,52 @@ class Store {
     }
   }
 
-  async attach(pid: number, label?: string): Promise<void> {
+  /** «Новая сессия»: остановить текущую (если идёт), пересканировать всё окружение. */
+  async newSession(): Promise<import("./types").NewSessionResult | null> {
+    if (this.state.mode === "demo") {
+      this.toast("info", "демо-режим: новая сессия недоступна");
+      return null;
+    }
+    try {
+      const res = await api.newSession();
+      this.state.devices = res.devices ?? [];
+      this.state.tools = res.tools ?? [];
+      this.state.usbDevices = res.usb_devices ?? [];
+      this.state.j2534Drivers = res.j2534_drivers ?? [];
+      if (res.capabilities && this.state.health) this.state.health.capabilities = res.capabilities;
+      if (res.stopped) {
+        const st = res.stopped;
+        this.state.sessions = this.state.sessions.map((s) => (s.id === st.id ? st : s));
+        this.toast("ok", `сессия ${st.id} завершена`);
+      }
+      this.state.active = null;
+      this.state.events = [];
+      this.state.steps = [];
+      this.state.notes = [];
+      this.state.selection = null;
+      this.state.currentStep = null;
+      this.state.stepStartEpoch = 0;
+      this.state.firstSeq = 0;
+      this.state.lastSeq = 0;
+      this.state.total = 0;
+      this.state.pendingNew = 0;
+      this.ws?.subscribe(null, 0);
+      await this.refreshSessions();
+      this.emit();
+      return res;
+    } catch (e) {
+      this.toast("error", `новая сессия: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  async attach(pid: number, label?: string, adapter?: string): Promise<void> {
     if (this.state.mode === "demo") {
       this.toast("info", "демо-режим: attach недоступен");
       return;
     }
     try {
-      const meta = await api.attach(pid, label);
+      const meta = await api.attach(pid, label, adapter);
       this.state.active = meta;
       this.state.sessions = [meta, ...this.state.sessions.filter((s) => s.id !== meta.id)];
       this.state.events = [];
@@ -911,6 +980,10 @@ class Store {
 }
 
 export const store = new Store();
+
+
+
+
 
 
 

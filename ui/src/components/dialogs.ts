@@ -464,3 +464,166 @@ export class Toasts {
   }
 }
 
+/* ───────────────────────────── новая сессия ────────────────────────────── */
+
+/** «Новая сессия»: остановить текущую, пересканировать устройства/программы, выбрать цель. */
+export function openNewSessionDialog(): void {
+  if (store.state.mode === "demo") {
+    store.toast("info", "демо-режим: новая сессия недоступна");
+    return;
+  }
+  const active = store.state.active;
+  const recording = !!store.state.status?.recording || active?.status === "recording";
+  if (active && recording) {
+    const body = el("div");
+    body.append(
+      el(
+        "div",
+        "sec__empty",
+        `Текущая сессия «${active.label || active.id}» будет завершена и сохранена, затем логер заново просканирует шнурки и программы.`,
+      ),
+    );
+    const m: { close: () => void } = modal({
+      title: "Новая сессия",
+      body,
+      footer: [
+        ghost("отмена", () => m.close()),
+        primary("завершить и пересканировать", () => {
+          m.close();
+          void runRescan();
+        }),
+      ],
+    });
+    return;
+  }
+  void runRescan();
+}
+
+async function runRescan(): Promise<void> {
+  const body = el("div");
+  const busy = el("div", "sec__empty");
+  busy.append(el("span", "spinner"), document.createTextNode("  Сканирую USB-устройства, J2534-драйверы и программы…"));
+  body.append(busy);
+  const wait = modal({ title: "Новая сессия", body, width: 720 });
+  const res = await store.newSession();
+  wait.close();
+  if (!res) return;
+  renderNewSession(res);
+}
+
+function renderNewSession(res: import("../types").NewSessionResult): void {
+  const devices = res.devices ?? [];
+  const tools = res.tools ?? [];
+
+  let chosenAdapter: string | null = devices.length ? devices[0].serial || devices[0].description : null;
+  let chosenPid: number | null = tools.length ? tools[0].pid : null;
+  let manualPid: number | null = null;
+
+  const body = el("div");
+
+  // Адаптер
+  body.append(el("div", "sec__title", "АДАПТЕР (FTDI / USB)"));
+  const adapters = el("div", "decoded");
+  if (!devices.length) {
+    adapters.append(div("muted", "FTDI-шнурки не найдены — проверьте драйвер и подключение."));
+  } else {
+    const none = el("button", "format-option", "не указывать (любой шнурок)");
+    none.type = "button";
+    none.addEventListener("click", () => {
+      chosenAdapter = null;
+      for (const n of Array.from(adapters.children)) n.classList.remove("is-active");
+      none.classList.add("is-active");
+    });
+    adapters.append(none);
+    for (const d of devices) {
+      const row = el("button", "format-option");
+      row.type = "button";
+      const title = [d.description || "FTDI", d.serial ? `· ${d.serial}` : "", d.com_port != null ? `· COM${d.com_port}` : ""]
+        .filter(Boolean)
+        .join(" ");
+      row.append(el("div", "format-option__title", title), el("div", "format-option__desc", d.source || ""));
+      if (chosenAdapter === d.serial || (!d.serial && chosenAdapter === d.description)) row.classList.add("is-active");
+      row.addEventListener("click", () => {
+        chosenAdapter = d.serial || d.description;
+        for (const n of Array.from(adapters.children)) n.classList.remove("is-active");
+        row.classList.add("is-active");
+      });
+      adapters.append(row);
+    }
+  }
+  body.append(adapters);
+
+  // Программа
+  const progTitle = el("div", "sec__title", "ПРОГРАММА");
+  progTitle.style.marginTop = "12px";
+  body.append(progTitle);
+  const programs = el("div", "decoded");
+  programs.style.maxHeight = "220px";
+  programs.style.overflow = "auto";
+  if (!tools.length) {
+    programs.append(div("muted", "Программы не найдены — переключите фильтр в панели «ПРОГРАММЫ» или введите PID."));
+  }
+  for (const t of tools) {
+    const row = el("button", "format-option");
+    row.type = "button";
+    const caps = [t.has_ftd2xx ? "FTDI" : "", t.has_j2534 ? "J2534" : "", t.has_usb ? "USB" : "", t.window_title ? "окно" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    row.append(
+      el("div", "format-option__title", `${t.known_tool || t.name}  ·  pid ${t.pid}`),
+      el("div", "format-option__desc", [caps, t.window_title].filter(Boolean).join(" · ")),
+    );
+    if (chosenPid === t.pid) row.classList.add("is-active");
+    row.addEventListener("click", () => {
+      chosenPid = t.pid;
+      manualPid = null;
+      for (const n of Array.from(programs.children)) n.classList.remove("is-active");
+      row.classList.add("is-active");
+    });
+    programs.append(row);
+  }
+  body.append(programs);
+
+  const manual = el("div", "rail-pid");
+  manual.style.marginTop = "8px";
+  const manualInput = textInput("PID вручную, если программы нет в списке", "");
+  const manualBtn = primary("выбрать PID", () => {
+    const pid = Number(manualInput.value);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    manualPid = pid;
+    chosenPid = pid;
+    for (const n of Array.from(programs.children)) n.classList.remove("is-active");
+    manualHint.textContent = `выбран PID ${pid}`;
+  });
+  manual.append(manualInput, manualBtn);
+  const manualHint = el("div", "field__hint", "");
+  body.append(manual, manualHint);
+
+  let m: { close: () => void };
+  const start = primary("начать сессию", () => {
+    const pid = manualPid ?? chosenPid;
+    if (!pid) {
+      store.toast("warn", "выберите программу или укажите PID");
+      return;
+    }
+    const tool = tools.find((t) => t.pid === pid);
+    const label = tool?.known_tool || tool?.name?.replace(/\.exe$/i, "") || `pid ${pid}`;
+    m.close();
+    void store.attach(pid, label, chosenAdapter ?? undefined);
+  });
+  const cancel = ghost("отмена", () => m.close());
+  m = modal({
+    title: "Новая сессия: выбор цели",
+    body,
+    footer: [cancel, start],
+    width: 720,
+  });
+}
+
+function div(cls: string, text: string): HTMLElement {
+  const d = el("div", cls, text);
+  return d;
+}
+
+
+

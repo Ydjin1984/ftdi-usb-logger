@@ -145,6 +145,7 @@ pub fn router(state: AppState) -> Router {
         .route("/capture/attach", post(capture_attach))
         .route("/capture/detach", post(capture_detach))
         .route("/capture/hookctl", post(capture_hookctl))
+        .route("/session/new", post(session_new))
         .route("/sessions", get(sessions))
         .route("/sessions/:id", get(session_detail).delete(session_delete))
         .route("/sessions/:id/events", get(session_events))
@@ -450,7 +451,29 @@ async fn capture_attach(
     Ok(Json(meta))
 }
 
-async fn capture_detach(State(st): State<AppState>) -> ApiResult<Json<Option<SessionMeta>>> {
+async fn capture_detach(State(st): State<AppState>) -> Json<Option<SessionMeta>> {
+    Json(detach_robust(&st).await)
+}
+
+/// Detach с бюджетом: если мост/писатель зависли, не держим UI 30 секунд, а
+/// принудительно освобождаем захват (`detach_force`). Так «Стоп» и «Новая сессия»
+/// не могут застрять на предыдущей сессии.
+async fn detach_robust(st: &AppState) -> Option<SessionMeta> {
+    match tokio::time::timeout(Duration::from_secs(8), detach_finalize(st)).await {
+        Ok(Ok(meta)) => meta,
+        Ok(Err(err)) => {
+            tracing::warn!("штатный detach не удался: {err:?} — принудительная остановка");
+            st.capture.detach_force().await
+        }
+        Err(_) => {
+            tracing::warn!("detach не ответил за 8 с — принудительная остановка");
+            st.capture.detach_force().await
+        }
+    }
+}
+
+/// Общая финализация: detach (если идёт) + пересчёт фактического транспорта сессии.
+async fn detach_finalize(st: &AppState) -> ApiResult<Option<SessionMeta>> {
     let mut meta = st.capture.detach().await?;
     // Универсальный захват: фиксируем фактический транспорт(ы) сессии по событиям.
     if let Some(m) = meta.as_mut() {
@@ -461,10 +484,45 @@ async fn capture_detach(State(st): State<AppState>) -> ApiResult<Json<Option<Ses
                 if let Err(err) = st.store.update_meta(m) {
                     tracing::warn!(session = %m.id, "не обновить транспорт сессии: {err:#}");
                 }
+                // Отчёт уже записан при финализации writer'а со старым транспортом —
+                // перегенерируем, иначе в report.txt останется vcp/ftd2xx неверным.
+                if let Ok(reader) = st.store.reader(&m.id) {
+                    let steps = reader.steps();
+                    let dir = st.store.dir_for(&m.id);
+                    if let Err(err) = report::write_session_reports(&dir, m, &steps) {
+                        tracing::warn!(session = %m.id, "перегенерация отчёта: {err:#}");
+                    }
+                }
             }
         }
     }
-    Ok(Json(meta))
+    Ok(meta)
+}
+
+/// `POST /api/session/new` — «Новая сессия»: завершает текущую (если идёт), сбрасывает
+/// кэш сканирования процессов и возвращает свежий снимок окружения. Нужен, когда
+/// поменяли шнурок/адаптер или запустили другую программу: всё пересканируется сразу,
+/// не дожидаясь фонового опроса.
+async fn session_new(State(st): State<AppState>) -> ApiResult<Json<Value>> {
+    let stopped = detach_robust(&st).await;
+    procscan::invalidate_candidates_cache();
+    let devices = crate::discovery::list_ftdi_devices();
+    let tools = procscan::list_candidates_mode(KNOWN_TOOLS, procscan::CandidateMode::Auto);
+    let usb_devices = crate::usbdevices::list_usb_devices();
+    let j2534_drivers = crate::j2534::list_drivers();
+    let capabilities = env_capabilities();
+    let _ = st.bus.send(ServerMsg::Toast {
+        level: "info".into(),
+        text: "новое сканирование: устройства и программы обновлены".into(),
+    });
+    Ok(Json(json!({
+        "stopped": stopped,
+        "devices": devices,
+        "tools": tools,
+        "usb_devices": usb_devices,
+        "j2534_drivers": j2534_drivers,
+        "capabilities": capabilities,
+    })))
 }
 
 /// Транспорт(ы) сессии по событиям: один транспорт как есть, несколько — `mixed`.
@@ -1251,6 +1309,9 @@ async fn ws_loop(socket: WebSocket, st: AppState) {
     }
     let _ = sender.send(Message::Close(None)).await;
 }
+
+
+
 
 
 

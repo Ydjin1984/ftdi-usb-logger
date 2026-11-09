@@ -2,9 +2,9 @@
 
 import { store } from "../store";
 import { isMuted, setMuted } from "../sound";
-import { el, icon, iconButton } from "../dom";
+import { button, el, icon, iconButton } from "../dom";
 import { fmtTimeOnly } from "../format";
-import { openHelpDialog } from "./dialogs";
+import { openHelpDialog, openNewSessionDialog } from "./dialogs";
 
 export class Topbar {
   el: HTMLElement;
@@ -34,9 +34,14 @@ export class Topbar {
       setMuted(next);
       this.mute.replaceChildren(icon(next ? "mute" : "volume"));
     });
+    const newSession = button("НОВАЯ СЕССИЯ", {
+      cls: "btn--primary btn--new-session",
+      title: "завершить текущую сессию, пересканировать шнурки и программы (Ctrl+Alt+N)",
+      onClick: () => openNewSessionDialog(),
+    });
     const help = iconButton("help", "как работать (F1)", () => openHelpDialog());
 
-    this.el.append(brand, this.pills, spacer, this.clock, this.mute, help);
+    this.el.append(brand, this.pills, spacer, newSession, this.clock, this.mute, help);
     this.update();
   }
 
@@ -107,6 +112,7 @@ function pill(kind: "ok" | "warn" | "err" | "", label: string, value: string): H
   p.append(el("span", "pill__label", label), b);
   return p;
 }
+
 
 
 

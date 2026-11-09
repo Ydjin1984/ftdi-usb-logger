@@ -742,6 +742,34 @@ impl CaptureManager {
         }
     }
 
+    /// Аварийное завершение, если штатный `detach` завис (мост/писатель не отвечают).
+    ///
+    /// Не ждём writer-задачу: глушим источник, снимаем pump и очищаем состояние. Сессия
+    /// помечается `aborted`; при следующем старте движка `recover_stale` доведёт отчёты.
+    pub async fn detach_force(&self) -> Option<SessionMeta> {
+        let active = self.shared.active.lock().clone();
+        self.shared.stopping.store(true, Ordering::SeqCst);
+        *self.shared.hooks.lock() = "off".into();
+        if self.shared.raw_usb.load(Ordering::SeqCst) {
+            self.stop_raw_usb().await;
+        }
+        let _ = self.bridge.stop().await;
+        if let Some(pump) = self.shared.pump.lock().take() {
+            pump.abort();
+        }
+        self.clear_shared();
+        if let Some(mut meta) = active {
+            meta.status = "aborted".into();
+            meta.ended_at.get_or_insert_with(now_rfc3339);
+            if let Err(err) = self.store.update_meta(&meta) {
+                tracing::warn!(session = %meta.id, "force-abort: не обновить мету: {err:#}");
+            }
+            toast(&self.bus, "warn", format!("сессия {} остановлена принудительно", meta.id));
+            return Some(meta);
+        }
+        None
+    }
+
     // ─────────────────────────── управление хуками ───────────────────────
 
     /// `pause` | `resume` — управление хуками Frida-агента через мост.

@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1
 
 | Что за устройство / API | Как ловится | Статус |
 |---|---|---|
-| FTDI D2XX (`ftd2xx.dll`, Quickflash, ms41-studio) | хуки `FT_*` (36 функций) | ✅ полностью |
+| FTDI D2XX (`ftd2xx.dll`: Quickflash, ms41-studio, **BMW Scanner 1.4.0** — 32-битный Delphi) | хуки `FT_*` (36 функций); внутренние USB-ioctl не дублируются | ✅ полностью |
 | Виртуальный COM / VCP (WinKFP, EDIABAS, `System.IO.Ports`) | хуки `CreateFileW/A`, `ReadFile`, `WriteFile`, `GetOverlappedResult(Ex)`, `DeviceIoControl` | ✅, включая overlapped-I/O и порт, открытый до attach |
 | WinUSB (`winusb.dll`) | `WinUsb_ReadPipe/WritePipe/ControlTransfer` | ✅ |
 | HID (`hid.dll`, `\\?\hid#…`) | `HidD_*`, ReadFile/WriteFile/DeviceIoControl по HID-путям | ✅ |
@@ -247,6 +247,8 @@ powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 
 Полный порядок установки, проверки моста, прав администратора и разбор ошибок —
 **[docs/03-runbook.md](docs/03-runbook.md)**.
+
+
 
 
 

@@ -282,5 +282,11 @@ export type ServerMsg =
 export type ClientMsg =
   | { op: "subscribe"; session: string | null; since: number }
   | { op: "ping" };
-
-
+export interface NewSessionResult {
+  stopped: SessionMeta | null;
+  devices: FtdiDevice[];
+  tools: ToolProcess[];
+  usb_devices: UsbDevice[];
+  j2534_drivers: J2534Driver[];
+  capabilities?: EnvCapabilities;
+}

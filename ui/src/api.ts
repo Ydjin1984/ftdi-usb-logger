@@ -9,6 +9,7 @@ import type {
   ProcessDetail,
   UsbDevice,
   J2534Driver,
+  NewSessionResult,
   ServerMsg,
   SessionCounts,
   SessionDetail,
@@ -102,6 +103,8 @@ export const api = {
   tools: (mode: "auto" | "usb" | "window" | "all" = "auto") =>
     req<ToolProcess[]>(`/api/tools?mode=${mode}`),
   usbDevices: () => req<UsbDevice[]>("/api/usb/devices"),
+  /** «Новая сессия»: завершить текущую и пересканировать окружение. */
+  newSession: () => req<NewSessionResult>("/api/session/new", json({})),
   usbpcapDevices: () => req<string[]>("/api/usbpcap/devices"),
   startUsbpcap: (device: string) => req<SessionMeta>("/api/usbpcap/start", json({ device })),
   j2534Drivers: () => req<J2534Driver[]>("/api/j2534/drivers"),
@@ -272,6 +275,7 @@ export function sessionFileUrl(id: string, rel: string): string {
 }
 
 export type { SessionCounts, StepSummary, StepEvent };
+
 
 
 
