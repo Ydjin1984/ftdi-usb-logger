@@ -1,4 +1,4 @@
-/** Транспортная панель: шаг, метки, пауза хуков, скриншот, стоп, экспорт. */
+/** Транспортная панель: шаг, пресеты действий, метка, пауза, скриншот, стоп, экспорт. */
 
 import { el, icon } from "../dom";
 import { fmtBytes, fmtClock, fmtNum } from "../format";
@@ -12,8 +12,8 @@ export class Transport {
   private rec: HTMLElement;
   private countsEl: HTMLElement;
   private stepBtn: HTMLButtonElement;
+  private presetSel: HTMLSelectElement;
   private pauseBtn: HTMLButtonElement;
-  private chips: HTMLElement;
   private lastKey = "";
 
   constructor() {
@@ -31,54 +31,59 @@ export class Transport {
     this.countsEl = el("div", "transport__counts");
     this.el.append(timer, this.countsEl);
 
-    // Шаг и быстрые названия
+    // Шаг: компактная кнопка + комбо пресетов + настройка пресетов
     const stepGroup = el("div", "transport__group");
-    this.stepBtn = el("button", "btn btn--step");
+    this.stepBtn = el("button", "btn btn--step btn--icon");
     this.stepBtn.type = "button";
     this.stepBtn.addEventListener("click", () => void this.toggleStep());
-    stepGroup.append(this.stepBtn);
+    this.stepBtn.replaceChildren(icon("step"));
 
-    this.chips = el("div", "transport__group");
-    stepGroup.append(this.chips);
+    this.presetSel = el("select", "transport__preset");
+    this.presetSel.title = "пресеты действий: выберите — шаг откроется (предыдущий закроется). Шестерёнка — редактировать список";
+    this.presetSel.addEventListener("change", () => void this.applyPreset());
+
+    const presetEdit = el("button", "btn btn--icon");
+    presetEdit.type = "button";
+    presetEdit.title = "пресеты действий: добавить, удалить, вернуть стандартные";
+    presetEdit.appendChild(icon("settings"));
+    presetEdit.addEventListener("click", () => openTemplatesDialog());
+
+    stepGroup.append(this.stepBtn, this.presetSel, presetEdit);
     this.el.append(stepGroup);
 
     const spacer = el("div", "transport__spacer");
     this.el.append(spacer);
 
-    // Действия
+    // Действия — только иконки, название всплывает при наведении
     const actions = el("div", "transport__group");
     actions.append(
-      this.action("F5", "метка", "mark", () => openMarkPrompt()),
+      this.action("F5", "метка в потоке", "mark", () => openMarkPrompt()),
       (this.pauseBtn = this.action("F6", "пауза хуков", "pause", () => {
         const paused = store.state.status?.hooks === "paused";
         void store.hookctl(paused ? "resume" : "pause");
       })),
-      this.action("F8", "скриншот", "camera", () => void store.shot()),
-      this.action("Esc", "стоп", "stop", () => openStopConfirm()),
+      this.action("F8", "скриншот окна", "camera", () => void store.shot()),
+      this.action("Esc", "остановить сессию", "stop", () => openStopConfirm()),
     );
     this.el.append(actions);
 
     const right = el("div", "transport__group");
-    const exportBtn = this.action("Ctrl+E", "экспорт", "download", () => openExportDialog());
+    const exportBtn = this.action("Ctrl+E", "экспорт сессии", "download", () => openExportDialog());
     exportBtn.classList.add("btn--primary");
-    const importBtn = this.action("Ctrl+O", "импорт", "upload", () => void store.importLog());
-    const templates = this.action("", "", "settings", () => openTemplatesDialog());
-    right.append(exportBtn, importBtn, templates);
+    const importBtn = this.action("Ctrl+O", "импорт старого лога", "upload", () => void store.importLog());
+    right.append(exportBtn, importBtn);
     this.el.append(right);
 
     this.update();
   }
 
+  /** Иконка без подписи; полное название и горячая клавиша — в подсказке при наведении. */
   private action(hint: string, label: string, ic: string, onClick: () => void): HTMLButtonElement {
-    const b = el("button", "btn");
+    const b = el("button", "btn btn--icon");
     b.type = "button";
+    b.title = hint ? `${label} (${hint})` : label;
+    b.setAttribute("aria-label", label);
     b.appendChild(icon(ic));
-    if (label) b.appendChild(el("span", "", label));
-    if (hint) {
-      const k = el("span", "kbd", hint);
-      k.style.marginLeft = "2px";
-      b.appendChild(k);
-    }
     b.addEventListener("click", onClick);
     return b;
   }
@@ -86,6 +91,19 @@ export class Transport {
   private async toggleStep(): Promise<void> {
     if (store.state.currentStep) await store.endStep();
     else await store.startStep();
+  }
+
+  /** Выбранный пресет: закрыть текущий шаг (если открыт) и открыть новый. */
+  private async applyPreset(): Promise<void> {
+    const value = this.presetSel.value;
+    this.presetSel.value = "";
+    if (!value) return;
+    if (!store.state.active) {
+      store.toast("warn", "нет активной сессии — сначала подключитесь к программе");
+      return;
+    }
+    if (store.state.currentStep) await store.endStep();
+    await store.startStep(value);
   }
 
   update(): void {
@@ -118,38 +136,48 @@ export class Transport {
       countItem("RX", counts ? fmtNum(counts.rx) : "0", counts ? fmtBytes(counts.rx_bytes) : "", "rx"),
     );
 
-    const key = [stepOpen, s.currentStep?.idx ?? 0, s.active?.id ?? "", s.quickTitles.join(","), s.status?.hooks ?? ""].join("|");
+    const key = [
+      stepOpen,
+      s.currentStep?.idx ?? 0,
+      s.active?.id ?? "",
+      s.quickTitles.join(","),
+      s.status?.hooks ?? "",
+      s.active ? 1 : 0,
+    ].join("|");
     if (key !== this.lastKey) {
       this.lastKey = key;
-      // Кнопка шага
+
       this.stepBtn.replaceChildren(icon(stepOpen ? "stepStop" : "step"));
-      this.stepBtn.append(
-        el("span", "", stepOpen ? "ЗАКРЫТЬ ШАГ" : "ШАГ"),
-        el("span", "kbd", "F2"),
-      );
       this.stepBtn.classList.toggle("is-open", stepOpen);
       this.stepBtn.disabled = !s.active;
       this.stepBtn.title = stepOpen
         ? "закрыть шаг и собрать сводку (F2)"
-        : "открыть шаг с автоназванием (F2), Shift+F2 — с названием";
+        : "открыть шаг с автоназванием (F2); Shift+F2 — с названием";
 
-      // Быстрые названия
-      this.chips.replaceChildren();
-      if (!stepOpen) {
-        for (const title of s.quickTitles.slice(0, 4)) {
-          const b = el("button", "chip", title);
-          b.type = "button";
-          b.title = `открыть шаг «${title}»`;
-          b.disabled = !s.active;
-          b.addEventListener("click", () => void store.startStep(title));
-          this.chips.append(b);
-        }
+      // Комбо пресетов: строится из сохранённого списка
+      const current = this.presetSel.value;
+      this.presetSel.replaceChildren();
+      const placeholder = el("option");
+      placeholder.value = "";
+      placeholder.textContent = s.active
+        ? stepOpen
+          ? "следующее действие…"
+          : "быстрое действие…"
+        : "нет сессии";
+      this.presetSel.append(placeholder);
+      for (const title of s.quickTitles) {
+        const o = el("option");
+        o.value = title;
+        o.textContent = title;
+        this.presetSel.append(o);
       }
+      this.presetSel.value = current && s.quickTitles.includes(current) ? current : "";
+      this.presetSel.disabled = !s.active;
 
-      // Пауза хуков
       const paused = s.status?.hooks === "paused";
-      this.pauseBtn.replaceChildren(icon(paused ? "play" : "pause"), el("span", "", paused ? "вернуть" : "пауза"));
+      this.pauseBtn.replaceChildren(icon(paused ? "play" : "pause"));
       this.pauseBtn.title = paused ? "вернуть хуки (F6)" : "снять хуки на время операции (F6)";
+      this.pauseBtn.classList.toggle("is-open", paused);
       this.pauseBtn.disabled = s.mode === "demo" ? true : !s.status?.bridge;
     }
   }

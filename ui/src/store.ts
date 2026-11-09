@@ -85,7 +85,16 @@ const ALL_KINDS: EventKind[] = [
   "error",
 ];
 
-const DEFAULT_TITLES = ["идентификация", "чтение калибровки", "запись тюна", "проверка", "сброс ошибок"];
+const DEFAULT_TITLES = [
+  "Идентификация",
+  "Чтение калибровок",
+  "Чтение фулл флеш",
+  "Запись калибровок",
+  "Запись фулл флеш",
+  "Сброс ошибок",
+  "Сброс адаптаций",
+  "Верификация",
+];
 
 function loadTitles(): string[] {
   try {
@@ -734,6 +743,7 @@ class Store {
       return;
     }
     const name = (title ?? "").trim() || this.defaultTitle();
+    if ((title ?? "").trim()) this.addQuickTitle(name);
     if (s.mode === "demo") {
       const idx = (s.steps[s.steps.length - 1]?.idx ?? 0) + 1;
       const ev: Event = {
@@ -839,6 +849,7 @@ class Store {
     if (!s.active) return;
     const text = title.trim();
     if (!text) return;
+    this.addQuickTitle(text);
     if (s.mode === "demo") {
       s.events = [
         ...s.events,
@@ -905,8 +916,36 @@ class Store {
   }
 
   saveQuickTitles(titles: string[]): void {
-    const clean = titles.map((t) => t.trim()).filter(Boolean).slice(0, 8);
-    this.state.quickTitles = clean.length ? clean : [...DEFAULT_TITLES];
+    const seen = new Set<string>();
+    const clean: string[] = [];
+    for (const raw of titles) {
+      const t = raw.trim().replace(/^[-*]\s*/, "");
+      if (!t) continue;
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      clean.push(t);
+    }
+    this.state.quickTitles = clean.length ? clean.slice(0, 40) : [...DEFAULT_TITLES];
+    try {
+      localStorage.setItem("ftdi.quickTitles", JSON.stringify(this.state.quickTitles));
+    } catch {
+      /* ignore */
+    }
+    this.emit();
+  }
+
+  /** Сохранить название как пресет (если его ещё нет) — вызывается при ручном шаге/метке. */
+  addQuickTitle(title: string): void {
+    const t = title.trim();
+    if (!t) return;
+    if (this.state.quickTitles.some((x) => x.toLowerCase() === t.toLowerCase())) return;
+    this.saveQuickTitles([...this.state.quickTitles, t]);
+  }
+
+  /** Вернуть стандартный набор пресетов. */
+  resetQuickTitles(): void {
+    this.state.quickTitles = [...DEFAULT_TITLES];
     try {
       localStorage.setItem("ftdi.quickTitles", JSON.stringify(this.state.quickTitles));
     } catch {

@@ -72,7 +72,10 @@
   font-size: 13px;
 }
 .btn--step {
-  min-width: 154px;
+  min-width: 30px;
+  width: 30px;
+  padding: 0;
+  justify-content: center;
   background: #2a2214;
   border-color: #5c4a1f;
   color: #ffd784;
@@ -988,4 +991,54 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 600;
+}
+
+/* ── транспорт: пресеты и компактные иконки ─────────────────────────────── */
+.transport__preset {
+  height: 26px;
+  max-width: 210px;
+  min-width: 150px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.transport__preset:hover {
+  border-color: var(--line-3);
+  background: var(--bg-3);
+}
+.transport__preset:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.transport .btn {
+  height: 26px;
+  padding: 0 8px;
+  justify-content: center;
+  min-width: 30px;
+}
+.transport .btn--icon {
+  width: 30px;
+  padding: 0;
+}
+.transport__group {
+  flex: 0 0 auto;
+}
+.transport__spacer {
+  flex: 1 1 auto;
+  min-width: 6px;
+}
+@media (max-width: 1320px) {
+  .transport__preset { min-width: 120px; max-width: 160px; }
+  .transport__counts { display: none; }
+}
+@media (max-width: 1120px) {
+  .transport__timer { min-width: 120px; }
+  .transport__preset { min-width: 100px; max-width: 130px; }
 }

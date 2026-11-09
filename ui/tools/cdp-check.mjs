@@ -188,8 +188,8 @@ try {
   );
   await cdp.shot("03-step-summary.png");
 
-  // экспорт
-  await cdp.eval(`[...document.querySelectorAll('.btn')].find(b=>b.textContent.includes('экспорт'))?.click()`);
+  // экспорт (кнопка транспорта теперь иконка — ищем по title/aria-label)
+  await cdp.eval(`[...document.querySelectorAll('.transport .btn')].find(b => (b.title || '').includes('экспорт') || (b.getAttribute('aria-label') || '').includes('экспорт'))?.click()`);
   await sleep(300);
   check("диалог экспорта", await cdp.eval(`!!document.querySelector('.modal-backdrop')`));
   await cdp.shot("04-export.png");
@@ -253,6 +253,7 @@ try {
   console.log(`\n${results.length - failed}/${results.length} проверок пройдено`);
   process.exit(failed ? 1 : 0);
 }
+
 
 
 
