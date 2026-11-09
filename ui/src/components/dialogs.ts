@@ -1,8 +1,8 @@
 /** Диалоги: экспорт/отправка, метки, шаги, шаблоны, справка, светофор. */
 
-import { el, icon, iconButton } from "../dom";
-import { fmtBytes, fmtDurationSeconds } from "../format";
+import { el, iconButton } from "../dom";
 import { store } from "../store";
+import type { NewSessionResult } from "../types";
 
 interface ModalOpts {
   title: string;
@@ -30,7 +30,12 @@ function modal(opts: ModalOpts): { close: () => void; body: HTMLElement } {
     box.append(foot);
   }
   backdrop.append(box);
+  // Запоминаем фокус и на время диалога делаем фон inert (как в референсе).
+  const previous = document.activeElement;
   document.body.append(backdrop);
+  const app = document.getElementById("app");
+  if (app) app.inert = true;
+  closeBtn.focus();
 
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === "Escape") {
@@ -50,6 +55,8 @@ function modal(opts: ModalOpts): { close: () => void; body: HTMLElement } {
     closed = true;
     document.removeEventListener("keydown", onKey, true);
     backdrop.remove();
+    if (app) app.inert = !!document.querySelector(".modal-backdrop");
+    if (previous instanceof HTMLElement) previous.focus();
     opts.onClose?.();
   }
   return { close, body };
@@ -169,10 +176,8 @@ export function openStepPrompt(): void {
 /* ─────────────────────────────── стоп ──────────────────────────────────── */
 
 export function openStopConfirm(): void {
-  if (store.state.mode === "demo") {
-    store.toast("info", "демо-режим: остановка недоступна");
-    return;
-  }
+  // В демо стоп имеет смысл только когда запись реально идёт.
+  if (store.state.mode === "demo" && !store.state.status?.recording) return;
   if (!store.state.active) {
     store.toast("warn", "сессия не выбрана");
     return;
@@ -182,7 +187,9 @@ export function openStopConfirm(): void {
     el(
       "div",
       "sec__empty",
-      "Захват остановится, хуки будут сняты, отчёт соберётся автоматически. Файлы сессии останутся на диске.",
+      store.state.mode === "demo"
+        ? "Демонстрационная запись остановится. Пример лога останется доступен для просмотра."
+        : "Захват остановится, хуки будут сняты, отчёт соберётся автоматически. Файлы сессии останутся на диске.",
     ),
   );
   const m = modal({
@@ -468,8 +475,9 @@ export class Toasts {
 
 /** «Новая сессия»: остановить текущую, пересканировать устройства/программы, выбрать цель. */
 export function openNewSessionDialog(): void {
+  // Демо: движок не нужен — пикер строим на синтетических данных из store.
   if (store.state.mode === "demo") {
-    store.toast("info", "демо-режим: новая сессия недоступна");
+    renderNewSession({ devices: store.state.devices, tools: store.state.tools });
     return;
   }
   const active = store.state.active;
@@ -511,20 +519,34 @@ async function runRescan(): Promise<void> {
   renderNewSession(res);
 }
 
-function renderNewSession(res: import("../types").NewSessionResult): void {
+function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): void {
   const devices = res.devices ?? [];
   const tools = res.tools ?? [];
 
+  // Адаптер по умолчанию — первый найденный шнурок; программу НЕ выбираем
+  // заранее: иначе «начать сессию» цепляется к первому процессу в списке
+  // (часто explorer) и кажется, что логер «держит» не то устройство.
   let chosenAdapter: string | null = devices.length ? devices[0].serial || devices[0].description : null;
-  // Программу НЕ выбираем заранее: иначе «начать сессию» цепляется к первому
-  // в списке (часто explorer) и кажется, что логер «держит» не то устройство.
   let chosenPid: number | null = null;
   let manualPid: number | null = null;
 
-  const body = el("div");
+  const body = el("div", "session-picker");
+  body.append(
+    el("p", "picker-intro", "Выберите адаптер и программу. Перед запуском проверьте выбранную цель внизу окна."),
+  );
+  // Сводка выбранной цели — в футере рядом с кнопкой запуска.
+  const summary = el("div", "picker-summary");
 
-  // Адаптер
-  body.append(el("div", "sec__title", "АДАПТЕР (FTDI / USB)"));
+  /** Подсветить выбранную строку и проставить aria-pressed у остальных. */
+  const selectOption = (container: HTMLElement, selected: Element | null): void => {
+    for (const node of container.querySelectorAll("button")) {
+      node.classList.toggle("is-active", node === selected);
+      node.setAttribute("aria-pressed", String(node === selected));
+    }
+  };
+
+  // 01 — адаптер FTDI / USB / COM-порт
+  body.append(el("div", "sec__title", "01  /  Адаптер FTDI / USB"));
   const adapters = el("div", "decoded");
   if (!devices.length) {
     adapters.append(div("muted", "FTDI-шнурки не найдены — проверьте драйвер и подключение."));
@@ -533,8 +555,8 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
     none.type = "button";
     none.addEventListener("click", () => {
       chosenAdapter = null;
-      for (const n of Array.from(adapters.children)) n.classList.remove("is-active");
-      none.classList.add("is-active");
+      selectOption(adapters, none);
+      updateStart();
     });
     adapters.append(none);
     for (const d of devices) {
@@ -547,21 +569,37 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
       if (chosenAdapter === d.serial || (!d.serial && chosenAdapter === d.description)) row.classList.add("is-active");
       row.addEventListener("click", () => {
         chosenAdapter = d.serial || d.description;
-        for (const n of Array.from(adapters.children)) n.classList.remove("is-active");
-        row.classList.add("is-active");
+        selectOption(adapters, row);
+        updateStart();
       });
       adapters.append(row);
     }
   }
+  selectOption(adapters, adapters.querySelector(".is-active"));
   body.append(adapters);
 
-  // Программа
-  const progTitle = el("div", "sec__title", "ПРОГРАММА");
+  // 02 — программа: поиск по имени, PID и заголовку окна
+  const progTitle = el("div", "sec__title", "02  /  Программа");
   progTitle.style.marginTop = "12px";
   body.append(progTitle);
   const programs = el("div", "decoded");
-  programs.style.maxHeight = "220px";
-  programs.style.overflow = "auto";
+  programs.classList.add("picker-programs");
+  const query = textInput("Поиск по имени, PID или окну");
+  query.type = "search";
+  query.setAttribute("aria-label", "Поиск программы");
+  const noResults = el("p", "muted", "Нет совпадений. Измените запрос или укажите PID.");
+  noResults.hidden = true;
+  body.append(query);
+  // Фильтр по тексту строки: в нём есть имя/known_tool, «pid N» и заголовок окна.
+  query.oninput = () => {
+    const needle = query.value.trim().toLowerCase();
+    let found = 0;
+    for (const row of programs.querySelectorAll("button")) {
+      row.hidden = !(row.textContent ?? "").toLowerCase().includes(needle);
+      if (!row.hidden) found++;
+    }
+    noResults.hidden = found > 0;
+  };
   if (!tools.length) {
     programs.append(div("muted", "Программы не найдены — переключите фильтр в панели «ПРОГРАММЫ» или введите PID."));
   }
@@ -579,27 +617,46 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
     row.addEventListener("click", () => {
       chosenPid = t.pid;
       manualPid = null;
-      for (const n of Array.from(programs.children)) n.classList.remove("is-active");
-      row.classList.add("is-active");
+      selectOption(programs, row);
+      manualHint.textContent = "";
       updateStart();
     });
     programs.append(row);
   }
-  body.append(programs);
+  // Ни один процесс не выбран заранее: старт заблокирован до явного выбора.
+  selectOption(programs, null);
+  body.append(programs, noResults);
 
+  // Ручной PID — на случай, если процесса нет в списке.
   const manual = el("div", "rail-pid");
   manual.style.marginTop = "8px";
-  manual.style.gridTemplateColumns = "1fr auto";
+  manual.classList.add("picker-pid");
   const manualInput = textInput("PID вручную, если программы нет в списке", "");
-  const manualBtn = primary("выбрать PID", () => {
-    const pid = Number(manualInput.value);
-    if (!Number.isFinite(pid) || pid <= 0) return;
+  manualInput.inputMode = "numeric";
+  manualInput.setAttribute("aria-label", "PID программы");
+  const manualBtn = primary("Выбрать PID", () => {
+    const raw = manualInput.value.trim();
+    // PID Win32: только цифры, целое в диапазоне 1..2147483647.
+    if (!/^\d+$/.test(raw)) {
+      manualHint.textContent = "Введите положительный целый PID (только цифры).";
+      manualInput.focus();
+      return;
+    }
+    const pid = Number(raw);
+    if (!Number.isInteger(pid) || pid < 1 || pid > 2147483647) {
+      manualHint.textContent = "PID должен быть целым в диапазоне 1..2147483647.";
+      manualInput.focus();
+      return;
+    }
     manualPid = pid;
     chosenPid = pid;
-    for (const n of Array.from(programs.children)) n.classList.remove("is-active");
+    selectOption(programs, null);
     manualHint.textContent = `выбран PID ${pid}`;
     updateStart();
   });
+  manualInput.onkeydown = (e) => {
+    if (e.key === "Enter") manualBtn.click();
+  };
   manual.append(manualInput, manualBtn);
   const manualHint = el("div", "field__hint", "");
   body.append(manual, manualHint);
@@ -614,13 +671,21 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
     const tool = tools.find((t) => t.pid === pid);
     const label = tool?.known_tool || tool?.name?.replace(/\.exe$/i, "") || `pid ${pid}`;
     m.close();
-    void store.attach(pid, label, chosenAdapter ?? undefined);
+    // Программа из списка → attach с выбранным адаптером; PID введён вручную
+    // без адаптера → attachPid (универсальный путь по номеру процесса).
+    if (manualPid !== null && !chosenAdapter) void store.attachPid(pid, label);
+    else void store.attach(pid, label, chosenAdapter ?? undefined);
   });
   const cancel = ghost("отмена", () => m.close());
   start.disabled = true;
   start.title = "сначала выберите программу (или введите PID)";
   const updateStart = (): void => {
     const pid = manualPid ?? chosenPid;
+    const tool = tools.find((t) => t.pid === pid);
+    summary.textContent = [
+      chosenAdapter || "Любой адаптер",
+      pid ? `${tool?.known_tool || tool?.name || "Программа"} · PID ${pid}` : "Выберите программу или PID",
+    ].join("  /  ");
     start.disabled = !pid;
     start.title = pid ? "" : "сначала выберите программу (или введите PID)";
   };
@@ -628,7 +693,7 @@ function renderNewSession(res: import("../types").NewSessionResult): void {
   m = modal({
     title: "Новая сессия: выбор цели",
     body,
-    footer: [cancel, start],
+    footer: [summary, cancel, start],
     width: 720,
   });
 }

@@ -22,6 +22,8 @@ export class Inspector {
   constructor() {
     this.el = el("aside", "inspect");
     this.tabsEl = el("div", "tabs");
+    // A11y: вкладки как tablist/tab (сверх референса — требование ТЗ).
+    this.tabsEl.setAttribute("role", "tablist");
     const defs: Array<[Tab, string]> = [
       ["event", "событие"],
       ["step", "шаг"],
@@ -31,6 +33,8 @@ export class Inspector {
       const b = el("button", "tab", label);
       b.type = "button";
       b.dataset.tab = id;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(id === this.tab));
       b.addEventListener("click", () => {
         this.tab = id;
         this.refresh(true);
@@ -62,11 +66,15 @@ export class Inspector {
   private refresh(markTabs: boolean): void {
     if (markTabs) {
       for (const b of Array.from(this.tabsEl.children) as HTMLElement[]) {
-        b.classList.toggle("is-active", b.dataset.tab === this.tab);
+        const active = b.dataset.tab === this.tab;
+        b.classList.toggle("is-active", active);
+        b.setAttribute("aria-selected", String(active));
       }
     } else {
       for (const b of Array.from(this.tabsEl.children) as HTMLElement[]) {
-        b.classList.toggle("is-active", b.dataset.tab === this.tab);
+        const active = b.dataset.tab === this.tab;
+        b.classList.toggle("is-active", active);
+        b.setAttribute("aria-selected", String(active));
       }
     }
     this.body.replaceChildren();

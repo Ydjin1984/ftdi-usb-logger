@@ -5,10 +5,21 @@ import type { Event, J2534Driver, SessionCounts, SessionMeta, StepSummary, UsbDe
 
 const ID = "demo-20261109-120013-BMS46";
 
+/**
+ * Начало демо-сессии всегда «недавно»: иначе таймер показывает часы, а окно
+ * телеметрии уезжает в пустоту (демо — живая запись с фиксированным логом).
+ */
+const DEMO_START_MS = Date.now() - 442_000;
+
+/** ISO-время демо-события по его `t` (секунды от начала сессии). */
+function isoAt(t: number): string {
+  return new Date(DEMO_START_MS + Math.round(t * 1000)).toISOString();
+}
+
 export function demoSession(): SessionMeta {
   return {
     id: ID,
-    started_at: "2026-11-09T12:00:13.000Z",
+    started_at: isoAt(0),
     ended_at: null,
     label: "BMS46 Quickflash",
     tool_path: "D:\\BMW_Flashers\\BMS46 Quickflash\\BMS46 Quickflash.exe",
@@ -52,8 +63,8 @@ export function demoSteps(): StepSummary[] {
       png: null,
       winkfp_jobs: [],
       verdict: { denied: 0, no_answer: 3, echo: true, unparsed: 1 },
-      started_at: "2026-11-09T12:00:15.000Z",
-      ended_at: "2026-11-09T12:00:27.400Z",
+      started_at: isoAt(2),
+      ended_at: isoAt(14.4),
     },
     {
       idx: 2,
@@ -71,8 +82,8 @@ export function demoSteps(): StepSummary[] {
       png: null,
       winkfp_jobs: [],
       verdict: { denied: 0, no_answer: 2, echo: true, unparsed: 0 },
-      started_at: "2026-11-09T12:00:31.000Z",
-      ended_at: "2026-11-09T12:01:55.200Z",
+      started_at: isoAt(18),
+      ended_at: isoAt(102.2),
     },
     {
       idx: 3,
@@ -91,8 +102,8 @@ export function demoSteps(): StepSummary[] {
       png: demoShotDataUrl(3, "запись тюна"),
       winkfp_jobs: [],
       verdict: { denied: 2, no_answer: 1, echo: true, unparsed: 0 },
-      started_at: "2026-11-09T12:02:10.000Z",
-      ended_at: "2026-11-09T12:07:43.300Z",
+      started_at: isoAt(117),
+      ended_at: isoAt(407.2),
     },
   ];
 }
@@ -118,7 +129,7 @@ export function demoEvents(): Event[] {
     out.push({
       seq: seq++,
       t: ev.t,
-      wall: new Date(Date.parse("2026-11-09T12:00:13.000Z") + ev.t * 1000).toISOString(),
+      wall: isoAt(ev.t),
       kind: ev.kind,
       transport: ev.transport ?? (ev.api.startsWith("FT_") ? "ftd2xx" : "vcp"),
       api: ev.api,
@@ -249,7 +260,7 @@ export function demoEvents(): Event[] {
       push({ kind: "note", t: 109.0 + i * 1.15, api: "NOTE", text: "цикл питания после записи", step: 3 });
     }
   }
-  push({ kind: "step_end", t: 441.3, api: "STEP", text: "запись тюна · 333.3 с · TX 1204 / 61 200 B · скриншот", step: 3 });
+  push({ kind: "step_end", t: 407.2, api: "STEP", text: "запись тюна · 290.2 с · TX 1204 / 61 200 B · скриншот", step: 3 });
   return out;
 }
 

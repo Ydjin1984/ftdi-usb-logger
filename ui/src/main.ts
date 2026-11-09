@@ -12,6 +12,8 @@ import { Stream } from "./components/stream";
 import { Inspector } from "./components/inspector";
 import { Timeline } from "./components/timeline";
 import { Transport } from "./components/transport";
+import { TrafficMeter } from "./components/traffic";
+import { Workspace } from "./workspace";
 import {
   Toasts,
   openExportDialog,
@@ -35,8 +37,45 @@ function build(): void {
   const timeline = new Timeline((seq) => stream.scrollToSeq(seq));
   const transport = new Transport();
   const toasts = new Toasts();
+  // Телеметрия обмена (пишет ded-bekend): вставляется над тулбаром потока.
+  const traffic = new TrafficMeter();
+  stream.mountPanel(traffic.el);
+  // Левая панель: грип-разделитель + кнопка скрытия в шапке.
+  const workspace = new Workspace(app, topbar.el, rail.el);
 
-  app.replaceChildren(topbar.el, rail.el, stream.el, inspector.el, timeline.el, transport.el);
+  // Навигация по разделам — нужна на узком экране (CSS показывает её до 1040px).
+  const workspaceNav = el("nav", "workspace-nav");
+  workspaceNav.setAttribute("aria-label", "Разделы рабочего пространства");
+  app.dataset.view = "stream";
+  const sections: Array<[string, string]> = [
+    ["rail", "Сессии и USB"],
+    ["stream", "Поток"],
+    ["inspect", "Инспектор"],
+  ];
+  for (const [id, label] of sections) {
+    const tab = el("button", "btn", label);
+    tab.type = "button";
+    tab.setAttribute("aria-pressed", String(id === "stream"));
+    tab.addEventListener("click", () => {
+      app.dataset.view = id;
+      for (const b of Array.from(workspaceNav.children)) {
+        b.setAttribute("aria-pressed", String(b === tab));
+      }
+      stream.refresh();
+    });
+    workspaceNav.append(tab);
+  }
+
+  app.replaceChildren(
+    topbar.el,
+    workspaceNav,
+    rail.el,
+    workspace.el,
+    stream.el,
+    inspector.el,
+    timeline.el,
+    transport.el,
+  );
   app.hidden = false;
 
   let raf = 0;
@@ -53,6 +92,7 @@ function build(): void {
       topbar.update();
       rail.update();
       stream.update();
+      traffic.update();
       inspector.update();
       timeline.update();
       transport.update();
@@ -69,7 +109,7 @@ function build(): void {
 
   installHotkeys(stream);
   // Отладочный доступ: window.__ftdi.store (используется tests/e2e и ручной диагностикой).
-  (window as unknown as { __ftdi: unknown }).__ftdi = { store, components: { stream } };
+  (window as unknown as { __ftdi: unknown }).__ftdi = { store, components: { stream, traffic, workspace } };
 }
 
 function installHotkeys(stream: Stream): void {

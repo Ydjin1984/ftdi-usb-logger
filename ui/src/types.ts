@@ -240,6 +240,8 @@ export interface Health {
   python: string;
   capabilities?: EnvCapabilities;
   universal?: boolean;
+  /** Запущен ли движок с правами администратора (нужны Frida-хукам). */
+  admin?: boolean;
 }
 
 export interface PayloadDecode {

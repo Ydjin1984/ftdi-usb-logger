@@ -1,11 +1,20 @@
-/** Центральная лента: виртуализированный поток событий, фильтры, поиск. */
+/**
+ * Центральная лента: виртуализированный поток событий, фильтры, поиск.
+ *
+ * Разметка и поведение перенесены из референса дизайна (components__stream.ts):
+ * heading, чипы групп, поиск, .new-events-pill, виртуализация ROW_H=34/OVERSCAN=14,
+ * клавиатурная навигация. Сверх референса — пятая колонка «Δ обмена» и
+ * `mountPanel()` для блока телеметрии.
+ */
 
-import { el, icon, iconButton } from "../dom";
+import { el, iconButton } from "../dom";
 import { eventPreview, fmtBytes, fmtTime, kindClass, kindLabel } from "../format";
 import { store } from "../store";
+import { emptyDeltaState, extendDeltaMap, type DeltaState } from "../traffic-core";
 import type { Event, EventKind } from "../types";
 
-const ROW_H = 22;
+/** Высота строки и запас виртуализации — как в референсе. */
+const ROW_H = 34;
 const OVERSCAN = 14;
 
 interface FilterGroup {
@@ -24,7 +33,20 @@ const GROUPS: FilterGroup[] = [
   { id: "err", label: "ERR", kinds: ["error"] },
 ];
 
+const DELTA_HINT = "Интервал между записями обмена в загруженном логе";
+
+/** Мс → «50 мс» / «1.25 с»; хвостовые нули не показываем. */
+function fmtDelta(ms: number): string {
+  if (ms < 1000) return `${trimZeros(ms.toFixed(2))} мс`;
+  return `${trimZeros((ms / 1000).toFixed(3))} с`;
+}
+
+function trimZeros(s: string): string {
+  return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+}
+
 export class Stream {
+  /** Контейнер панели потока. */
   el: HTMLElement;
   private viewport: HTMLElement;
   private canvas: HTMLElement;
@@ -34,6 +56,7 @@ export class Stream {
   private chips: HTMLElement;
   private empty: HTMLElement;
   private pill: HTMLButtonElement;
+  private heading: HTMLElement;
 
   private vis: Event[] = [];
   private lastEventsRef: Event[] | null = null;
@@ -45,6 +68,12 @@ export class Stream {
   private programmatic = false;
   private rafPending = false;
   private pendingOlder = false;
+
+  /** Δ мс по seq: пересчитывается только при смене массива events/сессии. */
+  private deltas = new Map<number, number>();
+  private deltaSource: Event[] | null = null;
+  /** Сколько событий уже учтено в `deltas` — живой поток дописывает только хвост. */
+  private deltaState: DeltaState = emptyDeltaState();
 
   constructor() {
     this.el = el("section", "stream");
@@ -91,7 +120,20 @@ export class Stream {
     });
 
     this.viewport.append(this.canvas, this.empty, this.pill);
-    this.el.append(toolbar, this.viewport);
+    this.heading = el("header", "stream-heading");
+    this.heading.append(el("span", "eyebrow", "МОНИТОР ОБМЕНА"), el("h1", "", "Поток событий"));
+    this.search.setAttribute("aria-label", "Поиск по событиям");
+
+    const columns = el("div", "stream-columns");
+    const columnLabels = ["Время", "Тип", "Вызов / данные", "Байт", "Δ обмена"];
+    for (let i = 0; i < columnLabels.length; i++) {
+      const span = el("span", "", columnLabels[i]);
+      // Подсказка у нового заголовка: Δ — интервал в логе, а не время ответа ЭБУ.
+      if (i === columnLabels.length - 1) span.title = DELTA_HINT;
+      columns.append(span);
+    }
+
+    this.el.append(this.heading, toolbar, columns, this.viewport);
 
     let debounce = 0;
     this.search.addEventListener("input", () => {
@@ -106,7 +148,15 @@ export class Stream {
     this.update();
   }
 
+  /** Вставить блок над тулбаром: сразу после .stream-heading (контракт main.ts). */
+  mountPanel(node: HTMLElement): void {
+    const toolbar = this.el.querySelector<HTMLElement>(".stream__toolbar");
+    if (toolbar) this.el.insertBefore(node, toolbar);
+    else this.heading.after(node);
+  }
+
   update(): void {
+    this.updateDeltas(store.state.events);
     const s = store.state;
     const changed =
       s.events !== this.lastEventsRef ||
@@ -153,6 +203,27 @@ export class Stream {
       }
       this.renderWindow();
     });
+  }
+
+  /**
+   * Пересчитать кэш Δ. Живой поток приходит новым массивом на каждый WS-батч:
+   * если это тот же лог с дописанным хвостом — считаем только новые события,
+   * иначе (смена сессии, подгрузка истории, усечение ring-буфера) — полный пересчёт.
+   */
+  private updateDeltas(events: Event[]): void {
+    if (this.deltaSource === events) return;
+    const old = this.deltaSource;
+    const keep =
+      old !== null &&
+      old.length >= this.deltaState.count &&
+      events.length >= this.deltaState.count &&
+      (this.deltaState.count === 0 || old[this.deltaState.count - 1]?.seq === events[this.deltaState.count - 1]?.seq);
+    if (!keep) {
+      this.deltas.clear();
+      this.deltaState = emptyDeltaState();
+    }
+    this.deltaState = extendDeltaMap(this.deltas, events, this.deltaState);
+    this.deltaSource = events;
   }
 
   private renderEmpty(): void {
@@ -243,11 +314,23 @@ export class Stream {
     const showApi = ["tx", "rx", "file", "file_hash", "module", "vcp", "error"].includes(ev.kind);
     const apiText = showApi && ev.api && ev.api !== kindLabel(ev.kind) ? ev.api : "";
     const api = el("span", "row__api", apiText);
-    const text = el("span", "row__text", ev.kind === "step_start" || ev.kind === "step_end" ? `${ev.step ? `ШАГ ${ev.step} · ` : ""}${eventPreview(ev)}` : eventPreview(ev));
+    const text = el(
+      "span",
+      "row__text",
+      ev.kind === "step_start" || ev.kind === "step_end"
+        ? `${ev.step ? `ШАГ ${ev.step} · ` : ""}${eventPreview(ev)}`
+        : eventPreview(ev),
+    );
     main.append(api, text);
 
     const bytes = el("span", "row__bytes", ev.len ? fmtBytes(ev.len) : "");
-    row.append(main, bytes);
+    // Δ обмена: интервал до предыдущего непустого TX/RX; нет пары/битая метка — «—».
+    const deltaCell = el("span", "row__delta");
+    const deltaMs = this.deltas.get(ev.seq);
+    deltaCell.textContent = deltaMs === undefined ? "—" : fmtDelta(deltaMs);
+    deltaCell.title = DELTA_HINT;
+
+    row.append(main, bytes, deltaCell);
     row.title = ev.raw || `${ev.api} ${ev.hex}`.trim();
     row.addEventListener("click", () => {
       store.selectEvent(ev);
@@ -310,6 +393,12 @@ export class Stream {
   /** Перерисовать принудительно (например, после resize). */
   refresh(): void {
     this.lastEventsRef = null;
+    this.lastFilters = null;
+    this.lastQuery = "\u0000";
+    this.lastActiveId = null;
+    this.deltaSource = null;
+    this.deltaState = emptyDeltaState();
+    this.deltas.clear();
     this.update();
   }
 
@@ -359,8 +448,7 @@ export class Stream {
 }
 
 function title(text: string): HTMLElement {
-  const h = el("h3", "", text);
-  return h;
+  return el("h3", "", text);
 }
 
 function p(text: string): HTMLElement {
@@ -372,7 +460,3 @@ function recordStepShortcut(ev: Event): void {
     store.selectEvent(ev);
   }
 }
-
-
-
-

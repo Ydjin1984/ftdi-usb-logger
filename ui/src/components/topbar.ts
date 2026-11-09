@@ -20,8 +20,8 @@ export class Topbar {
     const mark = el("div", "brand__mark");
     mark.appendChild(icon("step"));
     const names = el("div");
-    names.appendChild(el("div", "brand__name", "FTDI/USB LOGGER"));
-    names.appendChild(el("div", "brand__sub", "обмен · шаги · разбор"));
+    names.appendChild(el("div", "brand__name", "FTDI / USB Logger"));
+    names.appendChild(el("div", "brand__sub", "DAVINCI  /  CAPTURE CONSOLE"));
     brand.append(mark, names);
 
     this.pills = el("div", "statusbar");
@@ -34,7 +34,7 @@ export class Topbar {
       setMuted(next);
       this.mute.replaceChildren(icon(next ? "mute" : "volume"));
     });
-    const newSession = button("НОВАЯ СЕССИЯ", {
+    const newSession = button("+ Новая сессия", {
       cls: "btn--primary btn--new-session",
       title: "завершить текущую сессию, пересканировать шнурки и программы (Ctrl+Alt+N)",
       onClick: () => openNewSessionDialog(),
@@ -56,11 +56,21 @@ export class Topbar {
     const ws = s.wsState;
 
     const capsKey = s.health?.capabilities ? `${s.health.capabilities.j2534}:${s.health.capabilities.usbpcap}` : "";
-    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey].join("|");
+    const admin = s.health?.admin;
+    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey, String(admin)].join("|");
     if (key === this.lastKey) return;
     this.lastKey = key;
 
     this.pills.replaceChildren();
+    // Права администратора: зелёный «админ есть» / красный «админ нет».
+    // В демо-режиме health синтетический и признак неизвестен — пилюлю не рисуем.
+    if (typeof admin === "boolean") {
+      const p = pill(admin ? "ok" : "err", "админ", admin ? "есть" : "нет");
+      p.title = admin
+        ? "движок запущен с правами администратора: Frida-хуки и чтение чужих процессов доступны"
+        : "движок запущен БЕЗ прав администратора: Frida-хуки не смогут подключиться к программе. Запустите FTDI_USB_Logger.exe (или logger.cmd) и разрешите UAC";
+      this.pills.append(p);
+    }
     this.pills.append(
       pill(
         ws === "open" ? "ok" : ws === "connecting" ? "warn" : "err",
@@ -70,7 +80,7 @@ export class Topbar {
       pill(
         bridge ? "ok" : s.mode === "demo" ? "warn" : "",
         "движок",
-        s.mode === "demo" ? "демо" : bridge ? "готов" : "ждёт цель",
+        s.mode === "demo" ? "демоданные" : bridge ? "готов" : "ждёт цель",
       ),
       pill(
         hooks === "on" ? "ok" : hooks === "paused" ? "warn" : "err",
@@ -87,7 +97,6 @@ export class Topbar {
       this.pills.append(pill("", "цель", "не выбрана"));
     }
 
-    if (s.mode === "demo") this.pills.append(pill("warn", "режим", "демо"));
     const caps = s.health?.capabilities;
     if (caps && s.mode !== "demo") {
       const value = `USB/J2534 · ${caps.j2534}${caps.usbpcap ? " · raw" : ""}`;

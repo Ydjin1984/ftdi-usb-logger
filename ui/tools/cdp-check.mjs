@@ -137,7 +137,10 @@ try {
     for (const it of items) {
       it.click();
       await new Promise(r => setTimeout(r, 800));
-      if (document.querySelectorAll('.row').length > 40 &&
+      // Порог 10, а не 40: после редизайна над потоком появился блок «Тайминги и
+      // скорость обмена», из-за него видимая область ниже и виртуализатор держит
+      // в DOM меньше строк (ровно поэтому следующая проверка ожидает 10..200).
+      if (document.querySelectorAll('.row').length > 10 &&
           document.querySelectorAll('.inspect .session-item').length > 0) return true;
     }
     return false;
