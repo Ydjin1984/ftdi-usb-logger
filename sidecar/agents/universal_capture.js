@@ -86,9 +86,16 @@ const hooked = {};
 const listeners = [];      // наши InvocationListener-ы: пауза снимает только их (detachAll убивает recv)
 let ftMod = null;          // модуль ftd2xx: нужен для повторной установки после паузы
 let PAUSED = false;        // пауза хуков (логер может снять их на время критичной операции)
+const hookedAddrs = new Set();  // адреса, на которых уже стоит наш listener
 
+// Идемпотентно: повторная установка на тот же адрес (повторный dispatch модуля,
+// повторный onAdded от наблюдателя) давала ВТОРОЙ listener — и каждая строка
+// писалась дважды (`LAN CLOSE …` парами в логе PCMflash).
 function attachHook(target, cbs) {
+  const key = String(target);
+  if (hookedAddrs.has(key)) return null;
   const l = Interceptor.attach(target, cbs);
+  hookedAddrs.add(key);
   listeners.push(l);
   return l;
 }
@@ -101,6 +108,7 @@ function pauseHooks() {
     try { listeners[i].detach(); n++; } catch (e) {}
   }
   listeners.length = 0;
+  hookedAddrs.clear();  // после detach адреса свободны — resume поставит хуки заново
   vcpOn = false;
   log('hookctl: ПАУЗА — снято хуков ' + n + ' (байтовый поток и файлы не пишутся); resume — вернуть');
 }
@@ -286,6 +294,9 @@ function installVcpHooks() {
     }
     if (FILE_RE.test(path) && ret.toString() !== '-1') {
       const key = ret.toString();
+      // CreateFileA внутри вызывает CreateFileW — без этой проверки каждый файл
+      // попадал в лог 2–3 раза (та же ручка, тот же путь), и счётчик files врал.
+      if (fileHandles[key] && fileHandles[key].path === path) return;
       fileHandles[key] = { path: path, access: access, bytes: 0, writes: 0 };
       log('FILE open ' + path + ' access=0x' + access.toString(16) + ' handle=' + key);
     }
@@ -360,7 +371,11 @@ function installVcpHooks() {
       onLeave(ret) {
         if (this.usbEnt) {
           let n = 0; try { n = this.pr.readU32(); } catch (e) {}
+          // Синхронно завершившийся overlapped-запрос: снимаем pending, иначе
+          // ovlSweep позже выдаст те же байты второй раз.
+          if (this.ovlKey) { try { delete ovlPending[this.ovlKey]; } catch (e) {} }
           this.usbEnt.bytes += n;
+          this.usbEnt.reads = (this.usbEnt.reads || 0) + 1;
           if (n > 0) { try { emitUsbTransfer('RX', this.usbEnt.kind, this.buf, n, true); } catch (e) {} }
           return;
         }
@@ -735,9 +750,21 @@ function ovlLabel(hkey) {
 function ovlEmit(e, n) {
   try {
     if (!(n > 0)) return;
-    if (e.kind !== 'com' && !(e.kind === 'file' && !e.isRead)) return;  // pipe/USB и прочее не шумим
-    if (!e.isRead && e.kind === 'com') return;   // TX уже отдан на входе WriteFile
     const hkey = e.handle;
+    // USB-устройство с проприетарным драйвером (Scanmatik/PCMflash и подобные):
+    // bulk-обмен идёт overlapped-ReadFile. При pending ReadFile возвращает 0, а
+    // байты приходят позже в GetOverlappedResult. Раньше эта ветка USB просто
+    // игнорировала — и в логе PCMflash 4 МБ чтения флеша не попадали вообще,
+    // а `USB close` показывал bytes=0 при реальном трафике.
+    if (e.kind === 'usb') {
+      if (!e.isRead) return;                     // TX уже отдан на входе WriteFile
+      const ent = usbHandles[hkey];
+      if (ent) { ent.bytes += n; ent.reads = (ent.reads || 0) + 1; }
+      emitUsbTransfer('RX', ent ? ent.kind : 'usb', e.buf, n, true);
+      return;
+    }
+    if (e.kind !== 'com' && !(e.kind === 'file' && !e.isRead)) return;  // pipe и прочее не шумим
+    if (!e.isRead && e.kind === 'com') return;   // TX уже отдан на входе WriteFile
     let fileEnt = null;
     try { fileEnt = fileHandles[hkey] || null; } catch (err) {}
     if (e.isRead) {
@@ -964,6 +991,9 @@ function ovlSweep() {
         e.pendingLogged = true;
         if (e.isRead) {
           if (e.kind === 'com') log('VCP RX ReadFile(' + ovlLabel(e.handle) + ') rc=0 n=0 ovl=pending');
+          // USB: операция не завершилась — честно говорим об этом, чтобы «дыра»
+          // в логе была видна, а не выглядела как отсутствие обмена.
+          else if (e.kind === 'usb') log('USB RX ovl=pending handle=' + e.handle + ' want=' + e.len);
         } else if (e.kind === 'com') {
           delete ovlPending[key];   // TX уже отдан на входе WriteFile
         } else if (e.kind === 'file') {
@@ -1137,8 +1167,14 @@ const J2534_MODULE_RE = /(j2534|passthru|pass-thru|ptshim|op20pt|smj2534|vcxpt|e
 const PT_MSG_SIZE = 4152;      // 6 * unsigned long (24) + Data[4128]; unsigned long = 4 байта и x86, и x64
 const PT_PROTO = { 1: 'J1850VPW', 2: 'J1850PWM', 3: 'ISO9141', 4: 'ISO14230', 5: 'CAN', 6: 'ISO15765',
   7: 'SCI_A_ENGINE', 8: 'SCI_A_TRANS', 9: 'SCI_B_ENGINE', 10: 'SCI_B_TRANS' };
-const J2534_EXPORTS = ['PassThruOpen', 'PassThruConnect', 'PassThruDisconnect', 'PassThruReadMsgs',
-  'PassThruWriteMsgs', 'PassThruStartMsgFilter', 'PassThruIoctl', 'PassThruClose', 'PassThruGetLastError'];
+// PassThruSetProgrammingVoltage добавлен 18.11.2026: без него в логе не было
+// ни одной записи об управлении питанием — BitBox включает 12 В именно им,
+// а хук его не перехватывал, и пять секунд между READ_VBATT и первым кадром
+// выглядели пустыми. PassThruReadVersion — чтобы видеть версию API целиком.
+// 18.11.2026: фиксированный список заменён обходом всех экспортов `PassThru*`
+// (см. hookJ2534Module) — у вендоров разный набор функций, и всё, чего не было
+// в списке, молча выпадало из лога (PassThruConnect у Scanmatik, StopMsgFilter,
+// SetConfig у части драйверов).
 
 function ptProtoName(id) { return PT_PROTO[id] || ('0x' + id.toString(16)); }
 
@@ -1195,19 +1231,50 @@ function readPtMsg(base, idx) {
 }
 
 // ISO15765/CAN: Data[0..3] = CAN ID (big-endian), дальше ISO-TP payload.
+// Вендорные протоколы (PCMflash/Scanmatik 0x8003 и подобные) шлют 2-байтовый
+// BE-префикс длины — его не срезаем (лог должен остаться байт-в-байт), но по нему
+// находим сервисный байт и пишем `svc=0x27`, чтобы сводка шага показывала
+// «0x27 SecurityAccess», а не «0x8003 ?».
+function ptStripLength(ptr, size) {
+  try {
+    if (size < 3) return 0;
+    const n = ((ptr.readU8() << 8) | ptr.add(1).readU8()) >>> 0;
+    return n === size - 2 ? 2 : 0;
+  } catch (e) { return 0; }
+}
+function ptServiceByte(proto, ptr, size, svcOff) {
+  try {
+    if (size <= svcOff) return null;
+    if (proto === 5 || proto === 6) {
+      const pci = ptr.add(svcOff).readU8();
+      if ((pci & 0xF0) === 0x00 && size - svcOff >= 2) return ptr.add(svcOff + 1).readU8();
+      return null;   // FF/CF/FC — сервиса в этом кадре нет
+    }
+    // Стандартные не-CAN протоколы (ISO9141/ISO14230/SAE) кодируют заголовок
+    // (FMT/TGT/SRC), поэтому первый байт — не сервис. Их разбирает движок
+    // (decode::j2534_service по ISO 14230-2), здесь не выдумываем.
+    if (PT_PROTO[proto] !== undefined) return null;
+    return ptr.add(svcOff).readU8();
+  } catch (e) { return null; }
+}
 function emitPtMsg(dir, ch, m) {
   let size = m.size >>> 0;
   if (size > 4128) size = 4128;              // защита от мусорного DataSize
   let off = 0;
   let canId = -1;
-  if (m.proto === 5 || m.proto === 6) {      // CAN / ISO15765
+  const isCan = (m.proto === 5 || m.proto === 6);
+  if (isCan) {                               // CAN / ISO15765
     if (size >= 4) { canId = readBe32(m.dataPtr); off = 4; }
   }
+  const svcOff = isCan ? off : ptStripLength(m.dataPtr, size);
+  const svc = ptServiceByte(m.proto, m.dataPtr, size, svcOff);
   const len = size - off;
   const hex = hx(m.dataPtr.add(off), len);
   const tail = dir === 'TX' ? (' flags=' + hexLow(m.flags)) : (' rxs=' + hexLow(m.rxs));
   const idPart = canId >= 0 ? (' id=0x' + canId.toString(16).toUpperCase()) : '';
-  log('J2534 ' + dir + ' ch=' + ch + ' proto=' + ptProtoName(m.proto) + idPart + tail + ' len=' + len + ' : ' + hex);
+  const svcPart = svc === null ? '' : (' svc=0x' + (svc < 16 ? '0' : '') + svc.toString(16));
+  log('J2534 ' + dir + ' ch=' + ch + ' proto=' + ptProtoName(m.proto) + idPart + tail + svcPart +
+    ' len=' + len + ' : ' + hex);
 }
 
 function installJ2534Hook(name, addr, mod) {
@@ -1248,13 +1315,25 @@ function installJ2534Hook(name, addr, mod) {
         this.ch = args[0].toInt32();
         this.pMsg = args[1];
         this.pNum = args[2];
+        this.want = u32(args[2]);
       }),
       onLeave: leaveSafe(function (ret) {
         const rc = ret.toInt32();
         const n = u32(this.pNum);
-        if (rc === 0 && n > 0) {
-          const cap = Math.min(n, 32);
+        if (rc !== 0) {
+          // 0x10 ERR_BUFFER_EMPTY и 0x11 ERR_TIMEOUT — штатные ответы опроса,
+          // их не пишем (иначе поток забивается пустыми строками).
+          if (rc !== 0x10 && rc !== 0x11) {
+            log('J2534 rx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=ReadMsgs');
+          }
+          return;
+        }
+        if (n > 0) {
+          const cap = Math.min(n, 64);
           for (let i = 0; i < cap; i++) emitPtMsg('RX', this.ch, readPtMsg(this.pMsg, i));
+          if (n > cap) {
+            log('J2534 rx-truncated ch=' + this.ch + ' returned=' + n + ' logged=' + cap);
+          }
         }
       })
     });
@@ -1262,11 +1341,19 @@ function installJ2534Hook(name, addr, mod) {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         const ch = args[0].toInt32();
+        this.ch = ch;
         const n = u32(args[2]);           // pNumMsgs — указатель на число сообщений
         const pMsg = args[1];
         if (pMsg.isNull()) return;
         const cap = Math.min(n, 16);
         for (let i = 0; i < cap; i++) emitPtMsg('TX', ch, readPtMsg(pMsg, i));
+        if (n > cap) log('J2534 tx-truncated ch=' + ch + ' queued=' + n + ' logged=' + cap);
+      }),
+      onLeave: leaveSafe(function (ret) {
+        const rc = ret.toInt32();
+        if (rc !== 0) {
+          log('J2534 tx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=WriteMsgs');
+        }
       })
     });
   } else if (name === 'PassThruStartMsgFilter') {
@@ -1305,6 +1392,55 @@ function installJ2534Hook(name, addr, mod) {
         log('J2534 error text="' + quote(str8(this.pText)) + '" rc=' + ret.toInt32());
       })
     });
+  } else if (name === 'PassThruSetProgrammingVoltage') {
+    // PassThruSetProgrammingVoltage(DeviceID, Pin, Voltage)
+    // Voltage — это не только милливольты: 0xFFFFFFFF = OFF,
+    // 0xFFFFFFFE = SHORT_TO_GROUND, 0xFFFFFFFD = SHORT_TO_VBAT.
+    // Значение печатаем как unsigned, иначе -1 вместо OFF.
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.dev = args[0].toInt32();
+        this.pin = args[1].toInt32();
+        this.mv = args[2];
+      }),
+      onLeave: leaveSafe(function (ret) {
+        const raw = this.mv.toUInt32();
+        const val = raw === 0xFFFFFFFF ? 'OFF'
+          : raw === 0xFFFFFFFE ? 'SHORT_TO_GROUND'
+            : raw === 0xFFFFFFFD ? 'SHORT_TO_VBAT' : raw + ' mV';
+        log('J2534 voltage dev=' + this.dev + ' pin=' + this.pin + ' ' + val + ' rc=' + ret.toInt32());
+      })
+    });
+  } else if (name === 'PassThruReadVersion') {
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.pFw = args[1]; this.pDll = args[2]; this.pApi = args[3];
+      }),
+      onLeave: leaveSafe(function (ret) {
+        log('J2534 version fw="' + quote(str8(this.pFw)) + '" dll="' + quote(str8(this.pDll)) +
+          '" api="' + quote(str8(this.pApi)) + '" rc=' + ret.toInt32());
+      })
+    });
+  } else {
+    // Неизвестный PassThru*-экспорт (PassThruStopMsgFilter, PassThruSetConfig,
+    // PassThruLogicalConnect, PassThruQueuedWriteMsgs, вендорные расширения):
+    // ставим generic-трассу. Без этого часть API-вызовов молча выпадала из лога —
+    // именно так пропадал PassThruConnect у Scanmatik (в логе PCMflash не было
+    // ни одной строки `J2534 connect`, хотя канал 1 работал).
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        const parts = [];
+        for (let i = 0; i < 6; i++) {
+          let v = '?';
+          try { v = '0x' + args[i].toUInt32().toString(16); } catch (e) { v = '?'; }
+          parts.push(v);
+        }
+        this.argdump = parts.join(',');
+      }),
+      onLeave: leaveSafe(function (ret) {
+        log('J2534 ' + name + ' args=[' + this.argdump + '] rc=' + ret.toInt32());
+      })
+    });
   }
 }
 
@@ -1313,17 +1449,396 @@ function hookJ2534Module(mod) {
   const key = mod.name + '|' + String(mod.base);
   if (j2534Hooked[key]) return;
   let installed = 0;
-  for (let i = 0; i < J2534_EXPORTS.length; i++) {
-    const name = J2534_EXPORTS[i];
-    const addr = exportAddr(mod, name);
-    if (!addr) continue;
-    try { installJ2534Hook(name, addr, mod); installed++; } catch (e) { hookError('j2534 ' + name, e); }
+  // Хукаем КАЖДЫЙ экспорт `PassThru*`, а не фиксированный список: набор функций
+  // у вендоров разный (Scanmatik/CHIPSOFT/Tactrix/VXDIAG/MDI), и пропущенная
+  // функция = дырка в логе.
+  let exports = [];
+  try { exports = mod.enumerateExports(); } catch (e) { hookError('j2534 enumerateExports', e); }
+  for (let i = 0; i < exports.length; i++) {
+    const ex = exports[i];
+    if (!ex || ex.type !== 'function' || !/^PassThru/i.test(ex.name)) continue;
+    if (!ex.address) continue;
+    try { installJ2534Hook(ex.name, ex.address, mod); installed++; } catch (e) { hookError('j2534 ' + ex.name, e); }
   }
   j2534Hooked[key] = true;
   if (installed > 0) {
     j2534ModulesHooked++;
     log('J2534 module: ' + mod.name + ' ' + (mod.path || '') + ' base=' + mod.base + ' exports=' + installed);
   }
+}
+
+// ── LAN: Winsock (ws2_32) ──────────────────────────────────────────────────
+// Сетевые адаптеры диагностики и всё, что ходит не через USB/COM:
+// J2534-по-IP, DoIP (ISO 13400), BMW ICOM/HSFZ (порт 6801), любые TCP/UDP-обёртки.
+//
+// Формат строк (разбор — engine/src/decode.rs `parse_lan_line`):
+//   LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 rc=0
+//   LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=32 : 02 fd 80 01 …
+//   LAN RX tcp local=192.168.1.10:13400 remote=192.168.1.5:50123 len=40 : …
+//   LAN CLOSE tcp fd=0x1a4 local=… remote=… bytes=1234 reads=9 writes=7
+//
+// Блокирующий обмен пишем на выходе из вызова (там известен результат и реальное
+// число байт), overlapped — по WSAGetOverlappedResult либо подметанием
+// WSAOVERLAPPED.Internal (клиенты на APC/completion-routine, как .NET Socket).
+const LAN_MODULE_RE = /^ws2_32\.dll$/i;
+const LAN_SWEEP_MS = 200;
+let lanHooked = false, lanSeen = false, lanPeerFn = null, lanLocalFn = null, lanSweepTimer = null;
+let lanIdleClosed = 0;   // сокеты, закрытые без обмена: считаем, но не логируем построчно
+const lanSocks = {};   // fd -> { key, fd, l4, local, remote, bytesIn, bytesOut, reads, writes }
+const lanOvl = {};     // "fd|overlapped" -> { ent, bufs, t, ovl }
+
+function lanSaString(ptr) {
+  try {
+    if (!ptr || ptr.isNull()) return '';
+    const fam = ptr.readU16();
+    const port = (ptr.add(2).readU8() << 8) | ptr.add(3).readU8();
+    if (fam === 2) {                       // AF_INET
+      const b = new Uint8Array(ptr.add(4).readByteArray(4));
+      return b[0] + '.' + b[1] + '.' + b[2] + '.' + b[3] + ':' + port;
+    }
+    if (fam === 23) {                      // AF_INET6
+      const b = new Uint8Array(ptr.add(8).readByteArray(16));
+      const g = [];
+      for (let i = 0; i < 16; i += 2) g.push(((b[i] << 8) | b[i + 1]).toString(16));
+      return '[' + g.join(':') + ']:' + port;
+    }
+    return '';
+  } catch (e) { return ''; }
+}
+
+function lanSock(fd, l4) {
+  const key = String(fd);
+  let ent = lanSocks[key];
+  if (!ent) {
+    ent = { key: key, fd: fd, l4: l4 || 'tcp', local: '', remote: '',
+      bytesIn: 0, bytesOut: 0, reads: 0, writes: 0 };
+    lanSocks[key] = ent;
+  } else if (l4) {
+    ent.l4 = l4;
+  }
+  return ent;
+}
+
+// Локальный и удалённый адрес спрашиваем у самой winsock один раз на сокет:
+// у приложения под рукой может не быть своих структур sockaddr (например,
+// после connect через хелпер). Неудача не мешает логировать обмен.
+function lanResolve(ent) {
+  if (!ent || (ent.local && ent.remote)) return;
+  try {
+    const buf = Memory.alloc(128);
+    const lenp = Memory.alloc(4);
+    if (!ent.local && lanLocalFn) {
+      lenp.writeS32(128);
+      if (lanLocalFn(ent.fd, buf, lenp) === 0) ent.local = lanSaString(buf);
+    }
+    if (!ent.remote && lanPeerFn) {
+      lenp.writeS32(128);
+      if (lanPeerFn(ent.fd, buf, lenp) === 0) ent.remote = lanSaString(buf);
+    }
+  } catch (e) { /* сокет уже закрыт — не страшно */ }
+}
+
+function lanEmit(dir, ent, buf, len) {
+  try {
+    if (!ent || !buf || buf.isNull() || len <= 0) return;
+    lanResolve(ent);
+    if (dir === 'TX') { ent.bytesOut += len; ent.writes += 1; }
+    else { ent.bytesIn += len; ent.reads += 1; }
+    log('LAN ' + dir + ' ' + ent.l4 + ' local=' + (ent.local || '?') + ' remote=' + (ent.remote || '?') +
+      ' len=' + len + ' : ' + hx(buf, len));
+  } catch (e) { hookError('lan emit', e); }
+}
+
+// WSABUF: { ULONG len; CHAR *buf; } — на x86 8 байт, на x64 16 (выравнивание).
+function lanBufs(arr, count) {
+  const out = [];
+  try {
+    if (!arr || arr.isNull()) return out;
+    const stride = Process.pointerSize === 8 ? 16 : 8;
+    const boff = Process.pointerSize === 8 ? 8 : 4;
+    const n = Math.min(count, 64);
+    for (let i = 0; i < n; i++) {
+      const p = arr.add(i * stride);
+      out.push({ len: p.readU32(), buf: p.add(boff).readPointer() });
+    }
+  } catch (e) { hookError('lan bufs', e); }
+  return out;
+}
+
+function lanEmitBufs(dir, ent, bufs, total) {
+  let left = total;
+  for (let i = 0; i < bufs.length && left > 0; i++) {
+    const take = Math.min(left, bufs[i].len);
+    lanEmit(dir, ent, bufs[i].buf, take);
+    left -= take;
+  }
+}
+
+// WSARecv с completion-routine вообще не доходит до WSAGetOverlappedResult:
+// забираем результат из WSAOVERLAPPED (Internal/InternalHigh), как ovlSweep для COM.
+function lanSweep() {
+  if (PAUSED) return;
+  try {
+    const now = Date.now();
+    const keys = Object.keys(lanOvl);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const e = lanOvl[key];
+      if (!e) continue;
+      if (ovlInternal({ ovl: e.ovl }) !== OVL_STATUS_PENDING) {
+        const n = ovlInternalHigh({ ovl: e.ovl });
+        delete lanOvl[key];
+        if (n > 0) lanEmitBufs('RX', e.ent, e.bufs, n);
+        continue;
+      }
+      if (now - e.t > 30000) delete lanOvl[key];
+    }
+    // Сокеты, открытые и закрытые без обмена (пробы сети, внутренний резолвер
+    // приложения): построчно их не пишем, но счётчик показываем — иначе в логе
+    // появлялся десяток `LAN CLOSE … local=? bytes=0`, по которым нечего делать.
+    if (lanIdleClosed > 0) {
+      log('LAN: закрыто ' + lanIdleClosed + ' сокетов без обмена (проба/резолвер) — построчно не пишем');
+      lanIdleClosed = 0;
+    }
+  } catch (err) { hookError('lan sweep', err); }
+}
+
+function lanAttach(mod, name, handlers) {
+  const addr = exportAddr(mod, name);
+  if (!addr) return false;
+  try { attachHook(addr, handlers); return true; } catch (e) { hookError('lan ' + name, e); return false; }
+}
+
+function hookLanModule(mod) {
+  if (PAUSED || !mod || lanHooked) return;
+  lanHooked = true;
+  lanSeen = true;
+  if (!lanPeerFn) {
+    const p = exportAddr(mod, 'getpeername');
+    if (p) { try { lanPeerFn = new NativeFunction(p, 'int', ['pointer', 'pointer', 'pointer']); } catch (e) {} }
+  }
+  if (!lanLocalFn) {
+    const p = exportAddr(mod, 'getsockname');
+    if (p) { try { lanLocalFn = new NativeFunction(p, 'int', ['pointer', 'pointer', 'pointer']); } catch (e) {} }
+  }
+  if (!lanSweepTimer) {
+    try { lanSweepTimer = setInterval(lanSweep, LAN_SWEEP_MS); } catch (e) { lanSweepTimer = null; }
+  }
+  let n = 0;
+
+  if (lanAttach(mod, 'socket', {
+    onEnter: enterSafe(function (args) { this.type = args[1].toInt32(); }),
+    onLeave: leaveSafe(function (ret) {
+      if (ret.toInt32() === -1) return;
+      lanSock(ret, this.type === 2 ? 'udp' : 'tcp');
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'connect', {
+    onEnter: enterSafe(function (args) { this.ent = lanSock(args[0]); this.name = args[1]; }),
+    onLeave: leaveSafe(function (ret) {
+      const rc = ret.toInt32();
+      const addr = lanSaString(this.name);
+      if (addr) this.ent.remote = addr;
+      lanResolve(this.ent);
+      log('LAN CONNECT ' + this.ent.l4 + ' fd=' + this.ent.key + ' local=' + (this.ent.local || '?') +
+        ' remote=' + (this.ent.remote || '?') + ' rc=' + rc);
+    })
+  })) n++;
+
+  // WSASocketW/A не проходят через `socket` (сразу к провайдеру), поэтому сокеты,
+  // созданные ими, раньше попадали в лог как `local=? remote=?`.
+  for (const wsName of ['WSASocketW', 'WSASocketA']) {
+    if (lanAttach(mod, wsName, {
+      onEnter: enterSafe(function (args) { this.type = args[1].toInt32(); }),
+      onLeave: leaveSafe(function (ret) {
+        if (ret.toInt32() === -1) return;
+        lanSock(ret, this.type === 2 ? 'udp' : 'tcp');
+      })
+    })) n++;
+  }
+
+  // WSAConnect — второй путь установки соединения (Delphi/Indy, часть SDK).
+  if (lanAttach(mod, 'WSAConnect', {
+    onEnter: enterSafe(function (args) { this.ent = lanSock(args[0]); this.name = args[1]; }),
+    onLeave: leaveSafe(function (ret) {
+      const rc = ret.toInt32();
+      const addr = lanSaString(this.name);
+      if (addr) this.ent.remote = addr;
+      lanResolve(this.ent);
+      log('LAN CONNECT ' + this.ent.l4 + ' fd=' + this.ent.key + ' local=' + (this.ent.local || '?') +
+        ' remote=' + (this.ent.remote || '?') + ' rc=' + rc);
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'closesocket', {
+    onEnter: enterSafe(function (args) {
+      const ent = lanSocks[String(args[0])] || null;
+      this.ent = ent;
+      // Адреса спрашиваем ДО закрытия: после возврата closesocket fd уже невалиден.
+      if (ent) lanResolve(ent);
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const ent = this.ent;
+      if (!ent) return;
+      delete lanSocks[ent.key];
+      for (const k in lanOvl) {
+        if (lanOvl[k] && lanOvl[k].ent === ent) delete lanOvl[k];
+      }
+      // Сокет без обмена и без адреса — это проба/резолвер, а не диагностика:
+      // в лог такие закрытия не пишем (иначе десяток строк `local=? bytes=0`).
+      if (!ent.remote && ent.bytesIn + ent.bytesOut === 0) {
+        lanIdleClosed++;
+        return;
+      }
+      log('LAN CLOSE ' + ent.l4 + ' fd=' + ent.key + ' local=' + (ent.local || '?') +
+        ' remote=' + (ent.remote || '?') + ' bytes=' + (ent.bytesIn + ent.bytesOut) +
+        ' reads=' + ent.reads + ' writes=' + ent.writes + ' rc=' + ret.toInt32());
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'send', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0]); this.buf = args[1]; this.len = args[2].toInt32();
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const sent = ret.toInt32();
+      if (sent > 0) lanEmit('TX', this.ent, this.buf, sent);
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'recv', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0]); this.buf = args[1]; this.len = args[2].toInt32();
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const got = ret.toInt32();
+      if (got > 0) lanEmit('RX', this.ent, this.buf, got);
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'sendto', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0], 'udp'); this.buf = args[1]; this.len = args[2].toInt32(); this.to = args[4];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const sent = ret.toInt32();
+      if (sent <= 0) return;
+      const addr = lanSaString(this.to);
+      if (addr) this.ent.remote = addr;
+      lanEmit('TX', this.ent, this.buf, sent);
+    })
+  })) n++;
+
+  if (lanAttach(mod, 'recvfrom', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0], 'udp'); this.buf = args[1]; this.pFrom = args[4];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const got = ret.toInt32();
+      if (got <= 0) return;
+      const addr = lanSaString(this.pFrom);
+      if (addr) this.ent.remote = addr;
+      lanEmit('RX', this.ent, this.buf, got);
+    })
+  })) n++;
+
+  // WSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped, lpCompletionRoutine)
+  if (lanAttach(mod, 'WSASend', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0]);
+      this.bufs = lanBufs(args[1], args[2].toInt32());
+      this.pLen = args[3];
+      this.ovl = args[5];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const rc = ret.toInt32();
+      if (rc === 0) {
+        const sent = u32(this.pLen) || sumBufs(this.bufs);
+        lanEmitBufs('TX', this.ent, this.bufs, sent);
+        return;
+      }
+      if (this.ovl && !this.ovl.isNull()) return;   // WSA_IO_PENDING — штатно
+      log('LAN ERR ' + (this.ent ? this.ent.l4 : 'tcp') + ' fd=' + (this.ent ? this.ent.key : '?') +
+        ' op=WSASend rc=' + rc);
+    })
+  })) n++;
+
+  // WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine)
+  if (lanAttach(mod, 'WSARecv', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0]);
+      this.bufs = lanBufs(args[1], args[2].toInt32());
+      this.pLen = args[3];
+      this.ovl = args[5];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const rc = ret.toInt32();
+      const key = this.ent.key + '|' + String(this.ovl);
+      if (rc === 0) {
+        const got = u32(this.pLen);
+        if (got > 0) lanEmitBufs('RX', this.ent, this.bufs, got);
+        return;
+      }
+      if (this.ovl && !this.ovl.isNull()) {
+        lanOvl[key] = { ent: this.ent, bufs: this.bufs, ovl: this.ovl, t: Date.now() };
+        return;
+      }
+      log('LAN ERR ' + this.ent.l4 + ' fd=' + this.ent.key + ' op=WSARecv rc=' + rc);
+    })
+  })) n++;
+
+  // WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags,
+  //             lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine)
+  if (lanAttach(mod, 'WSARecvFrom', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0], 'udp');
+      this.bufs = lanBufs(args[1], args[2].toInt32());
+      this.pLen = args[3];
+      this.pFrom = args[5];
+      this.ovl = args[7];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      const rc = ret.toInt32();
+      const key = this.ent.key + '|' + String(this.ovl);
+      if (rc === 0) {
+        const got = u32(this.pLen);
+        const addr = lanSaString(this.pFrom);
+        if (addr) this.ent.remote = addr;
+        if (got > 0) lanEmitBufs('RX', this.ent, this.bufs, got);
+        return;
+      }
+      if (this.ovl && !this.ovl.isNull()) {
+        lanOvl[key] = { ent: this.ent, bufs: this.bufs, ovl: this.ovl, t: Date.now() };
+        return;
+      }
+      log('LAN ERR ' + this.ent.l4 + ' fd=' + this.ent.key + ' op=WSARecvFrom rc=' + rc);
+    })
+  })) n++;
+
+  // Завершение overlapped-приёма: WSAGetOverlappedResult(s, ovl, lpcbTransfer, fWait, lpdwFlags)
+  if (lanAttach(mod, 'WSAGetOverlappedResult', {
+    onEnter: enterSafe(function (args) {
+      this.ent = lanSock(args[0]); this.ovl = args[1]; this.pLen = args[2];
+    }),
+    onLeave: leaveSafe(function (ret) {
+      if (ret.toInt32() === 0) return;
+      const key = this.ent.key + '|' + String(this.ovl);
+      const e = lanOvl[key];
+      if (!e) return;
+      delete lanOvl[key];
+      const got = u32(this.pLen) || ovlInternalHigh({ ovl: this.ovl });
+      if (got > 0) lanEmitBufs('RX', e.ent, e.bufs, got);
+    })
+  })) n++;
+
+  log('LAN module: ' + mod.name + ' ' + (mod.path || '') + ' hooks=' + n);
+}
+
+function sumBufs(bufs) {
+  let s = 0;
+  for (let i = 0; i < bufs.length; i++) s += bufs[i].len;
+  return s;
 }
 
 // ── WinUSB (winusb.dll) ────────────────────────────────────────────────────
@@ -1459,10 +1974,21 @@ function emitUsbTransfer(dir, kind, buf, len, reportFirst) {
   // внутренняя реализация драйвера, и мы их не дублируем (иначе tx/rx байты ×2).
   if (ftMod && !PAUSED) return;
   if (!buf || len <= 0) return;
-  const hex = hx(buf, len);
-  if (kind === 'hid') log('HID ' + dir + ' report=' + hex2(reportFirst ? u8(buf) : 0) + ' len=' + len + ' : ' + hex);
-  else if (kind === 'winusb') log('WINUSB ' + dir + ' len=' + len + ' : ' + hex);
-  else log('USB ' + dir + ' len=' + len + ' : ' + hex);
+  // Крупный bulk-пакет (4 МБ флеша читаются кусками по 64 КБ) режем на части:
+  // одна строка = не больше MAXDUMP байт, иначе хвост молча терялся.
+  let parts = Math.ceil(len / MAXDUMP);
+  if (parts < 1) parts = 1;
+  if (parts > 64) parts = 64;                 // предохранитель от мусорного len
+  for (let i = 0; i < parts; i++) {
+    const off = i * MAXDUMP;
+    const take = Math.min(len - off, MAXDUMP);
+    if (take <= 0) break;
+    const hex = hx(buf.add(off), take);
+    const suffix = parts > 1 ? (' part=' + (i + 1) + '/' + parts) : '';
+    if (kind === 'hid') log('HID ' + dir + ' report=' + hex2(reportFirst ? u8(buf.add(off)) : 0) + ' len=' + take + suffix + ' : ' + hex);
+    else if (kind === 'winusb') log('WINUSB ' + dir + ' len=' + take + suffix + ' : ' + hex);
+    else log('USB ' + dir + ' len=' + take + suffix + ' : ' + hex);
+  }
 }
 function installUsbPathHooks() {
   if (PAUSED || usbPathHooked) return;
@@ -1481,6 +2007,8 @@ function installUsbPathHooks() {
       const kind = usbPathKind(this.path);
       if (!kind || ret.toString() === '-1') return;
       const key = ret.toString();
+      // CreateFileA вызывает CreateFileW: одну и ту же ручку логируем один раз.
+      if (usbHandles[key] && usbHandles[key].path === this.path) return;
       usbHandles[key] = { path: this.path, kind: kind, bytes: 0, writes: 0 };
       log('USB open path="' + quote(this.path) + '" kind=' + kind + ' handle=' + key);
     })
@@ -1491,6 +2019,7 @@ function installUsbPathHooks() {
       const kind = usbPathKind(this.path);
       if (!kind || ret.toString() === '-1') return;
       const key = ret.toString();
+      if (usbHandles[key] && usbHandles[key].path === this.path) return;
       usbHandles[key] = { path: this.path, kind: kind, bytes: 0, writes: 0 };
       log('USB open path="' + quote(this.path) + '" kind=' + kind + ' handle=' + key);
     })
@@ -1503,7 +2032,8 @@ function installUsbPathHooks() {
       const key = args[0].toString();
       const ent = usbHandles[key];
       if (!ent) return;
-      log('USB close path="' + quote(ent.path) + '" bytes=' + ent.bytes + ' writes=' + ent.writes);
+      log('USB close path="' + quote(ent.path) + '" bytes=' + ent.bytes + ' writes=' + ent.writes +
+        ' reads=' + (ent.reads || 0) + (ent.ioctls ? ' ioctls=' + ent.ioctls : ''));
       delete usbHandles[key];
     })
   });
@@ -1517,16 +2047,28 @@ function installUsbPathHooks() {
       this.code = args[1].toInt32();
       this.inBuf = args[2];
       this.inLen = args[3].toInt32();
+      this.outBuf = args[4];
       this.outLen = args[5].toInt32();
       this.pBytes = args[6];
     }),
     onLeave: leaveSafe(function (ret) {
       if (!this.ent) return;
+      const rc = ret.toInt32();
       const n = u32(this.pBytes);
       const outLen = n > 0 ? n : this.outLen;
+      // Драйверный обмен идёт ЧЕРЕЗ DeviceIoControl, а не ReadFile/WriteFile:
+      // без этого `USB close` показывал bytes=0 при реальном трафике (лог PCMflash).
+      this.ent.bytes += this.inLen + (rc !== 0 ? outLen : 0);
+      this.ent.ioctls = (this.ent.ioctls || 0) + 1;
       const prefix = this.ent.kind === 'hid' ? 'HID' : (this.ent.kind === 'winusb' ? 'WINUSB' : 'USB');
-      log(prefix + ' ioctl code=' + hexLow(this.code) + ' rc=' + ret.toInt32() +
+      log(prefix + ' ioctl code=' + hexLow(this.code) + ' rc=' + rc +
           ' in=' + this.inLen + ' out=' + outLen + ' : ' + hx(this.inBuf, this.inLen));
+      // Ioctl совсем без входного буфера — это чистое чтение из драйвера: ответ
+      // лежит в out, и без него такой обмен в логе выглядит пустым.
+      if (this.inLen === 0 && outLen > 0 && rc !== 0) {
+        log(prefix + ' RX ioctl code=' + hexLow(this.code) + ' len=' + outLen + ' : ' +
+            hx(this.outBuf, outLen));
+      }
     })
   });
 }
@@ -1536,6 +2078,7 @@ function dispatchUniversalModule(mod) {
   if (!mod || !mod.name) return;
   try {
     if (J2534_MODULE_RE.test(mod.name)) hookJ2534Module(mod);
+    else if (LAN_MODULE_RE.test(mod.name)) hookLanModule(mod);
     else if (/^winusb\.dll$/i.test(mod.name)) hookWinUsbModule(mod);
     else if (/^hid\.dll$/i.test(mod.name)) hookHidModule(mod);
     else if (/^libusb-1\.0/i.test(mod.name)) hookLibusbModule(mod);
@@ -1565,6 +2108,7 @@ function installUniversalHooks() {
     } catch (e) { hookError('module observer', e); }
   }
   log('universal hooks: ftdi2xx=' + (ftMod ? 1 : 0) + ' j2534=' + j2534ModulesHooked +
+      ' lan=' + (lanSeen ? 1 : 0) +
       ' winusb=' + (winusbSeen ? 1 : 0) + ' hid=' + (hidSeen ? 1 : 0) + ' libusb=' + (libusbSeen ? 1 : 0) +
       ' usb_paths=' + Object.keys(usbHandles).length + ' listeners=' + listeners.length);
 }
@@ -1573,6 +2117,7 @@ function installUniversalHooks() {
 function resumeUniversalHooks() {
   j2534Hooked = {};
   j2534ModulesHooked = 0;
+  lanHooked = false; lanPeerFn = null; lanLocalFn = null;
   winusbHooked = false; hidHooked = false; libusbHooked = false; usbPathHooked = false;
   installUniversalHooks();
 }
@@ -1583,6 +2128,7 @@ function universalStatus() {
   return {
     ftdi: ftdi,
     j2534: j2534ModulesHooked > 0,
+    lan: lanSeen,
     usb: !!(winusbSeen || hidSeen || libusbSeen || Object.keys(usbHandles).length > 0),
     hooks: listeners.length,
     paused: PAUSED,

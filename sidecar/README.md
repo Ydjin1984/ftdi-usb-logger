@@ -131,16 +131,24 @@ sequenceDiagram
 [+1.300s] J2534 connect dev=1 ch=1 proto=ISO15765 flags=0x0 baud=500000 rc=0
 [+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : 02 10 03 00 00 00 00 00
 [+2.150s] J2534 RX ch=1 proto=ISO15765 id=0x7E8 rxs=0x0 len=8 : 06 50 03 00 00 00 00 00
+[+2.200s] J2534 RX ch=1 proto=0x8003 rxs=0x2 len=0 :
+[+2.250s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x27 len=4 : 00 02 27 7f
+[+2.300s] J2534 voltage dev=1 pin=12 5000 mV rc=0
 [+3.000s] J2534 ioctl ch=1 id=0x0701 rc=0
 [+3.100s] J2534 disconnect ch=1 rc=0
 [+4.000s] USB open path="\\?\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4
-[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3
+[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3 reads=1
 [+4.200s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b
 [+4.250s] WINUSB RX pipe=0x81 len=64 : 12 04 4d 1b
 [+4.300s] HID TX report=0x02 len=9 : 02 12 04 0d 1b 00 00 00 00
 [+4.350s] HID RX report=0x01 len=9 : 01 12 04 4d 1b 00 00 00 00
 [+4.400s] LIBUSB TX ep=0x01 len=8 : 12 04 0d 1b
 [+4.450s] LIBUSB RX ep=0x81 len=8 : 12 04 4d 1b
+[+7.000s] LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 rc=0
+[+7.050s] LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=16 : 02 fd 80 01 …
+[+7.090s] LAN RX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=11 : 02 fd 80 01 …
+[+7.400s] LAN TX udp local=192.168.1.5:50124 remote=192.168.1.255:13400 len=8 : 02 fd 00 01 …
+[+7.500s] LAN CLOSE tcp fd=0x1a4 local=… remote=… bytes=27 reads=1 writes=1 rc=0
 ```
 
 Детали J2534:
@@ -149,8 +157,19 @@ sequenceDiagram
   — по 4 байта, `Data[4128]` с офсета 24; структура не копируется, читается `readU32`;
 * для `ISO15765` (proto=6) и `CAN` (proto=5) `Data[0..3]` — CAN ID **big-endian**; в строке
   `id=0x…` — он, а `len`/hex — payload после 4 байт (ISO-TP с PCI);
+* вендорные протоколы (PCMflash/Scanmatik `proto=0x8003`) не имеют CAN-id, но несут
+  2-байтовый BE-префикс длины: `svc=0xNN` — сервисный байт, payload в hex остаётся
+  байт-в-байт (префикс не срезается);
 * `TX` дампится на входе `PassThruWriteMsgs` (до 16 сообщений), `RX` — на выходе
-  `PassThruReadMsgs` при `rc=0` (до 32 сообщений), дамп ≤ 16 КиБ на сообщение.
+  `PassThruReadMsgs` при `rc=0` (до 64 сообщений), дамп ≤ 16 КиБ на сообщение;
+* хукаются **все** экспорты `PassThru*` (обход `enumerateExports`), неизвестные —
+  generic-строкой `J2534 PassThruXxx args=[…] rc=…`.
+
+Детали LAN (Winsock): адреса берутся из `connect`/`sendto`, а локальный — из
+`getsockname`, поэтому `local`/`remote` есть даже у сокетов, открытых до attach.
+Блокирующий обмен пишется на выходе из вызова, overlapped — по
+`WSAGetOverlappedResult` или подметанием `WSAOVERLAPPED.Internal` (раз в 200 мс).
+
 
 Дополнительные строки (расширения, в §11.3 их нет — разбор в `decode.rs` должен их
 игнорировать/помечать `sys`, пока ded их не поддержит):

@@ -17,7 +17,7 @@ export type EventKind =
   | "error"
   | "raw";
 
-export type Transport = "ftd2xx" | "vcp" | "usb" | "j2534" | "file" | "app" | "none";
+export type Transport = "ftd2xx" | "vcp" | "usb" | "j2534" | "lan" | "file" | "app" | "none";
 export type Direction = "tx" | "rx";
 
 export interface Event {

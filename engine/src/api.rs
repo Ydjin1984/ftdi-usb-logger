@@ -954,6 +954,14 @@ async fn session_export(
     Path(id): Path<String>,
     Json(req): Json<ExportReq>,
 ) -> ApiResult<Json<Value>> {
+    // Живая сессия: перед упаковкой снимаем согласованный снимок (flush + сводка
+    // открытого шага + session.json/counts). Иначе в архив уходит состояние на
+    // момент старта: нулевые счётчики и ни одного файла незакрытого шага.
+    if st.capture.status().session.as_deref() == Some(id.as_str()) {
+        if let Err(err) = st.capture.snapshot().await {
+            tracing::warn!(session = %id, "снимок перед экспортом: {err:#}");
+        }
+    }
     let reader = reader_or_404(&st, &id)?;
     let dir = reader.dir().to_path_buf();
     let out_dir = export_dir(&st, &id);

@@ -10,7 +10,7 @@ USB/COM/J2534-устройств, а не только FTDI.
 ![engine](https://img.shields.io/badge/engine-Rust%202021-orange?logo=rust)
 ![ui](https://img.shields.io/badge/UI-TypeScript%20%2B%20Vite-blue?logo=typescript)
 ![bridge](https://img.shields.io/badge/bridge-Frida%2017-red)
-![tests](https://img.shields.io/badge/tests-104%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-120%20passed-brightgreen)
 
 Проект вырос из консольного `logger.py` + Frida-агента: хуки перенесены и расширены,
 разбор и интерфейс написаны заново. Цель — «одна кнопка» вместо ввода команд в консоль:
@@ -130,7 +130,8 @@ flowchart LR
 | WinUSB (`winusb.dll`) | `WinUsb_ReadPipe/WritePipe/ControlTransfer` | ✅ |
 | HID (`hid.dll`, `\\?\hid#…`) | `HidD_*`, `ReadFile/WriteFile/DeviceIoControl` по HID-путям | ✅ |
 | libusb-1.0 | `libusb_bulk/interrupt/control_transfer` | ✅ |
-| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + `PassThruOpen/Connect/ReadMsgs/WriteMsgs/Ioctl/…` | ✅ на уровне сообщений: протокол, CAN ID, payload, ISOTP-PCI |
+| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + **все** экспорты `PassThru*` (open/connect/read/write/ioctl/filter/voltage/version) | ✅ на уровне сообщений: протокол, CAN ID, payload, ISOTP-PCI, сервис KWP/UDS; вендорные протоколы без CAN-id (PCMflash `0x8003`) разбираются по префиксу длины |
+| **LAN** (J2534-по-IP, DoIP/ISO 13400, BMW ICOM/HSFZ, сетевые адаптеры) | хуки Winsock `ws2_32`: `connect/accept`, `send/recv`, `WSASend/WSARecv`, `sendto/recvfrom`, `WSAGetOverlappedResult` | ✅ обмен TCP/UDP целиком, включая overlapped; DoIP-заголовки, source/target address, UDS-сервис и NRC в инспекторе |
 | Любой USB с проприетарным драйвером | сырой захват USBPcap → `USBRAW bus/dev/ep/transfer/…` | ⚠️ нужен установленный [USBPcap](https://desowin.org/usbpcap/) + права администратора |
 
 В панели **USB-УСТРОЙСТВА** — все USB-устройства системы и зарегистрированные J2534-драйверы;
@@ -496,10 +497,13 @@ sessions/20261109-154706-bmw-scanner-e2e/
 | Сводка шага считается сразу, без «settle»-паузы 1.6 с как в старом логере | хвостовые RX в последние миллисекунды могут не попасть в сводку шага; полный разбор — `raw.log` старым `parse_family.py` |
 | `report.txt` — сводка шагов, а не полный разбор `parse_family` | полный анализ: `python tools/legacy/parse_family.py --log sessions/<id>/raw.log --gap 2.0` |
 | Дублирование FT_* и внутренних USB-ioctl | подавлено на уровне агента, когда активны хуки `ftd2xx.dll`; при работе через WinUSB/HID видно USB-уровень |
-| Сырой USB через USBPcap требует установленного драйвера и прав администратора | без него доступны API-хуки (FTDI/COM/WinUSB/HID/libusb/J2534); установка USBPcap требует перезагрузки |
+| Сырой USB через USBPcap требует установленного драйвера и прав администратора | без него доступны API-хуки (FTDI/COM/WinUSB/HID/libusb/J2534/LAN); установка USBPcap требует перезагрузки |
 | J2534 ловится на уровне сообщений PassThru (протокол/ID/payload), без разбора URB драйвера | если адаптер не открывается через `PassThru*`, нужен USBPcap |
+| I/O напрямую через `ntdll!NtReadFile/NtDeviceIoControlFile` (минуя kernel32) не хукается | такие устройства — только сырой USBPcap; остальные пути (включая overlapped-`ReadFile` на USB-хендле и `DeviceIoControl`) покрыты |
+| Поверх TCP/UDP известны только DoIP (ISO 13400) и порты-подсказки | HSFZ (ICOM, 6801) и J2534-по-IP видны как байтовый поток с адресами; разбор кадров — в инспекторе/экспорте |
 | ISOTP: классификация PCI (SF/FF/CF/FC) и service id одиночного кадра | многокадровая сборка не выполняется — собирайте по кадрам в экспорте |
-| J2534/TX-RX не сопоставляются в пары запрос-ответ автоматически | в сводке шага `cmd_hist`/`resp_hist` по CAN ID, полный обмен — в потоке |
+| J2534/TX-RX не сопоставляются в пары запрос-ответ автоматически | в сводке шага `cmd_hist`/`resp_hist` по протоколу/ID/сервису, полный обмен — в потоке |
+| Один кадр в строке — не больше 16 КБ payload | крупные bulk-пакеты режутся на строки `part=i/n`; лимит события в движке — 64 КБ
 | Захват «побайтовый» для D2XX-приложений вроде BMW Scanner | приложение вызывает `FT_Read/FT_Write` по 1 байту; логгер faithfully пишет каждый вызов; сборка кадров — через `parse_family`/будущий assembler |
 | Глобальных горячих клавиш нет | F2/F5/F6/F8 работают в фокусе окна логера |
 | Слушает только `127.0.0.1`, CORS — точный localhost-origin | удалённый доступ закрыт осознанно |
@@ -516,6 +520,7 @@ sessions/20261109-154706-bmw-scanner-e2e/
 | устройство не видно | драйвер FTDI (D2XX/VCP); в логе ждать `MODULE + FTD2XX.DLL` / `FT_GetDeviceInfoDetail` |
 | программа не в списке | переключить режим «окна»/«все» или ввести PID вручную; проверить `GET /api/tools?mode=all` |
 | WinKFP/EDIABAS не логируется | инструмент запущен от админа → логер тоже от админа |
+| адаптер по LAN не виден в потоке | в начале сессии должна быть строка `LAN module: ws2_32.dll … hooks=N`; если её нет — цель не загружала Winsock (или логер не от админа), проверьте `universal hooks: … lan=1` |
 | UI показывает «Движок не отвечает» | движок остановлен/перезапускается; запустить `logger.cmd`, страница переподключится |
 | «уже запущено» при повторном клике | штатно: `logger.cmd` открывает окно работающего экземпляра |
 | продукт не поднялся | `dist\FTDI_USB_Logger\logger.err.log` + `netstat` по порту; полный разбор — runbook |

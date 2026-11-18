@@ -396,6 +396,22 @@ impl SessionStore {
         }
         Ok(())
     }
+
+    /// То же, что `update_meta`, но без перезаписи `SESSION_INDEX.md`.
+    ///
+    /// Нужно для живой записи `session.json` каждые пару секунд: индекс по всем
+    /// сессиям — это рендер markdown всего каталога, для периодического тика дорого.
+    pub fn touch_meta(&self, meta: &SessionMeta) -> anyhow::Result<()> {
+        let id = sanitize_id(&meta.id)?;
+        let _g = self.index_lock.lock();
+        let dir = self.dir_for(&id);
+        if !dir.is_dir() {
+            anyhow::bail!("сессия {id} не найдена");
+        }
+        write_json_atomic(&dir.join("session.json"), meta)?;
+        write_state(&dir, meta)?;
+        Ok(())
+    }
 }
 
 pub type SharedStore = Arc<SessionStore>;

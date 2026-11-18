@@ -55,6 +55,8 @@ pub enum Transport {
     Usb,
     /// J2534 PassThru (Scanmatik, CHIPSOFT, Tactrix, OpenPort, VXDIAG …).
     J2534,
+    /// LAN: TCP/UDP через Winsock — J2534-по-IP, DoIP (ISO 13400), ICOM/HSFZ, сетевые адаптеры.
+    Lan,
     File,
     App,
     None,

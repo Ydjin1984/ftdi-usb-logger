@@ -36,6 +36,9 @@ const BATCH_MAX_EVENTS: usize = 256;
 const BATCH_MAX_BYTES: usize = 32 * 1024;
 /// Коалесценция батчей: 50 мс → не чаще ~20 рассылок в секунду.
 const BATCH_INTERVAL: Duration = Duration::from_millis(50);
+/// Как часто переписывать `session.json` во время записи (счётчики, число шагов).
+/// Без этого экспорт посреди записи отдавал нули, а `steps` не отражал открытый шаг.
+const META_SAVE_EVERY: Duration = Duration::from_secs(2);
 /// Очередь команд писателю (строки моста + управление сессией).
 const CMD_QUEUE: usize = 8192;
 /// Сколько событий шага держим в памяти для сводки; при переполнении режем самую старую часть.
@@ -320,6 +323,13 @@ enum Cmd {
     },
     /// Завершить сессию штатно (`finished`).
     Detach {
+        reply: oneshot::Sender<anyhow::Result<Option<SessionMeta>>>,
+    },
+    /// Снять согласованный снимок идущей сессии для экспорта: сбросить буферы,
+    /// дописать сводку открытого шага в `steps/NN.json`, отчёты и `session.json`.
+    /// Захват при этом НЕ останавливается — шаг продолжает копиться и при `F2`
+    /// перезапишет свой файл полной сводкой.
+    Snapshot {
         reply: oneshot::Sender<anyhow::Result<Option<SessionMeta>>>,
     },
     /// Завершить сессию аварийно (`aborted`) с причиной в `meta.facts`.
@@ -848,6 +858,17 @@ impl CaptureManager {
         self.request(|reply| Cmd::EndStep { reply }).await
     }
 
+    /// Согласованный снимок идущей сессии — перед экспортом/шарингом.
+    ///
+    /// Возвращает `Ok(None)`, если запись не идёт: экспорт тогда берёт уже
+    /// финализированные файлы сессии.
+    pub async fn snapshot(&self) -> anyhow::Result<Option<SessionMeta>> {
+        if self.shared.cmd_tx.lock().is_none() {
+            return Ok(None);
+        }
+        self.request(|reply| Cmd::Snapshot { reply }).await
+    }
+
     /// Поставить метку в поток (событие `Mark`).
     pub async fn mark(&self, title: String) -> anyhow::Result<Event> {
         self.request(|reply| Cmd::Mark { title, reply }).await
@@ -1066,6 +1087,8 @@ struct SessionWriterTask {
     raw_t0_epoch: f64,
     /// Резервное относительное время, если pcap отдал подозрительно маленький ts.
     raw_fallback_t: f64,
+    /// Когда `session.json` последний раз писали «на живую» (см. `persist_meta`).
+    last_meta_save: Instant,
 }
 
 impl SessionWriterTask {
@@ -1103,6 +1126,7 @@ impl SessionWriterTask {
             raw_bytes: 0,
             raw_t0_epoch,
             raw_fallback_t: 0.0,
+            last_meta_save: Instant::now(),
         }
     }
 
@@ -1132,6 +1156,12 @@ impl SessionWriterTask {
                     }
                     if let Err(err) = self.writer.flush() {
                         tracing::warn!("flush сессии: {err}");
+                    }
+                    // Живой session.json: при экспорте/падении посреди записи счётчики
+                    // и счётчик шагов должны быть настоящими, а не нулями с момента старта.
+                    if self.last_meta_save.elapsed() >= META_SAVE_EVERY {
+                        self.last_meta_save = Instant::now();
+                        self.persist_meta();
                     }
                 }
             }
@@ -1250,6 +1280,11 @@ impl SessionWriterTask {
                 let meta = self.finalize("finished").await;
                 let _ = reply.send(Ok(meta));
                 true
+            }
+            Cmd::Snapshot { reply } => {
+                let meta = self.snapshot().await;
+                let _ = reply.send(meta);
+                false
             }
             Cmd::Abort { reason, reply } => {
                 if !reason.trim().is_empty() {
@@ -1642,6 +1677,88 @@ impl SessionWriterTask {
         ev.meta = serde_json::json!({"author": "user"});
         self.append_event(ev).await?;
         Ok(())
+    }
+
+    /// Снимок идущей сессии для экспорта и живого `session.json`.
+    ///
+    /// Проблема, которую это лечит: `session.json` писался только в `finalize`, поэтому
+    /// экспорт посреди записи отдавал `counts` c нулями, а шаг, начатый и не закрытый
+    /// (`F2` нажат один раз, чтение флеша ещё идёт) вообще не попадал в `steps/` и в
+    /// отчёт — в логе PCMflash так потерялась вся вторая половина обмена.
+    async fn snapshot(&mut self) -> anyhow::Result<Option<SessionMeta>> {
+        self.flush_batches();
+        if let Err(err) = self.writer.flush() {
+            tracing::warn!("flush при снимке сессии: {err}");
+        }
+        // Сводка открытого шага по накопленному буферу: сохраняем файл шага и
+        // отчёт, но сам шаг оставляем открытым (захват продолжается).
+        let mut steps = self.steps.clone();
+        if let Some(open) = self.open.as_ref() {
+            let idx = open.event.idx;
+            let title = open.event.title.clone();
+            let dur = open.started.elapsed().as_secs_f64();
+            let slice = open.buffer.clone();
+            let mut summary = crate::decode::summarize_step(&slice, idx, &title, dur, None);
+            if summary.started_at.is_empty() {
+                summary.started_at = open.started_wall.clone();
+            }
+            if summary.ended_at.is_empty() {
+                summary.ended_at = now_rfc3339();
+            }
+            if summary.dur <= 0.0 {
+                summary.dur = dur;
+            }
+            if let Err(err) = self.writer.save_step(&summary) {
+                tracing::warn!("снимок шага {idx}: {err}");
+            }
+            if !steps.iter().any(|s| s.idx == idx) {
+                steps.push(summary);
+            }
+        }
+        self.meta.counts = self.writer.meta.counts.clone();
+        // Шаг, который ещё не закрыт, тоже считается: иначе в экспорте `steps: 0`
+        // при живом `steps/01.json` (именно так терялся шаг «Чтение фулл флеш»).
+        self.meta.counts.steps = self.meta.counts.steps.max(steps.len() as u64);
+        if self.meta.dir.is_empty() {
+            self.meta.dir = self.writer.dir().to_string_lossy().to_string();
+        }
+        // Транспорт сессии по фактическим событиям: стартовая догадка (vcp/ftd2xx)
+        // часто неверна — у PCMflash J2534, у сетевых адаптеров LAN.
+        if let Ok(reader) = self.store.reader(&self.meta.id) {
+            let transport = crate::decode::transport_summary(&reader.all_events());
+            if !transport.is_empty() {
+                self.meta.transport = transport;
+            }
+        }
+        if let Err(err) = crate::report::write_session_reports(self.writer.dir(), &self.meta, &steps)
+        {
+            tracing::warn!("снимок отчётов {}: {err}", self.meta.id);
+        }
+        if let Err(err) = self.store.update_meta(&self.meta) {
+            tracing::warn!("снимок session.json {}: {err}", self.meta.id);
+        }
+        *self.shared.counts.lock() = self.meta.counts.clone();
+        Ok(Some(self.meta.clone()))
+    }
+
+    /// Лёгкая запись `session.json`/`state.json` во время записи (без индекса).
+    fn persist_meta(&mut self) {
+        self.meta.counts = self.writer.meta.counts.clone();
+        // Открытый шаг ещё не попал в счётчики писателя, поэтому живой
+        // `session.json` показывал `steps: 0`, хотя `steps/NN.json` и отчёт шаг
+        // уже содержали (экспорт во время записи — ровно этот случай).
+        self.meta.counts.steps = self.meta.counts.steps.max(self.live_steps() as u64);
+        if self.meta.dir.is_empty() {
+            self.meta.dir = self.writer.dir().to_string_lossy().to_string();
+        }
+        if let Err(err) = self.store.touch_meta(&self.meta) {
+            tracing::warn!("session.json (живой) {}: {err}", self.meta.id);
+        }
+    }
+
+    /// Сколько шагов видно в сессии прямо сейчас: закрытые + открытый.
+    fn live_steps(&self) -> usize {
+        self.steps.len() + if self.open.is_some() { 1 } else { 0 }
     }
 
     /// Финализация сессии: дозакрыть шаг, сбросить буферы, отчёты, `session.json`.
@@ -2908,8 +3025,130 @@ for line in sys.stdin:
         assert!(steps >= 2, "UI не получил Step start/end, получено {steps}");
     }
 
-    // ───────────────────────── EDIABAS/WinKFP ────────────────────────────
+    /// Экспорт посреди записи: снимок должен отдать настоящие счётчики, файл
+    /// открытого шага и отчёт, не закрывая сессию (регресс на лог PCMflash, где
+    /// шаг «Чтение фулл флеш» не попал ни в `steps/`, ни в `counts`).
+    #[test]
+    fn snapshot_of_running_session_writes_open_step_and_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
+        let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
+        let (bus, _bus_rx) = broadcast::channel::<ServerMsg>(512);
+        let shared = Arc::new(Shared {
+            active: Mutex::new(None),
+            hooks: Mutex::new("off".into()),
+            counts: Mutex::new(SessionCounts::default()),
+            current_step: Mutex::new(None),
+            target: Mutex::new(None),
+            started_at: Mutex::new(None),
+            pid: Mutex::new(None),
+            cmd_tx: Mutex::new(None),
+            pump: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+            bridge_ready: AtomicBool::new(false),
+            raw_usb: AtomicBool::new(false),
+        });
+        let writer = store.create(SessionMeta::new("snapshot-test", "pcmflash")).unwrap();
+        let meta = writer.meta.clone();
+        let session_dir = PathBuf::from(&meta.dir);
+        *shared.active.lock() = Some(meta.clone());
+        let task = SessionWriterTask::new(
+            cfg.clone(),
+            bus.clone(),
+            shared.clone(),
+            store.clone(),
+            writer,
+            meta.clone(),
+            0xFFFF_FFF0,
+            None,
+            false,
+        );
+        let (tx, rx) = mpsc::channel::<Cmd>(64);
+        *shared.cmd_tx.lock() = Some(tx.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mid_dir = session_dir.clone();
+        let worker = rt.spawn(task.run(rx));
 
+        let (snap, mid) = rt.block_on(async move {
+            // Обмен вендорным протоколом (как PCMflash через Scanmatik).
+            tx.send(Cmd::Line {
+                line: "[+1.000s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x27 len=4 : 00 02 27 7f"
+                    .into(),
+                wall: now_rfc3339(),
+            })
+            .await
+            .unwrap();
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::StartStep {
+                title: "Чтение фулл флеш".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+            wait.await.unwrap().unwrap();
+            tx.send(Cmd::Line {
+                line: "[+2.000s] J2534 RX ch=1 proto=0x8003 rxs=0x0 svc=0x67 len=5 : 00 03 67 7f 34"
+                    .into(),
+                wall: now_rfc3339(),
+            })
+            .await
+            .unwrap();
+            // Снимок ДО закрытия шага — именно это делает экспорт во время записи.
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::Snapshot { reply }).await.unwrap();
+            let snap = wait.await.unwrap().unwrap().expect("мета снимка");
+            // Тик «живого» session.json при ещё открытом шаге: счётчик шагов не должен
+            // откатиться в 0 (регресс: экспорт отдавал `steps: 0` при живом steps/01.json).
+            tokio::time::sleep(META_SAVE_EVERY + Duration::from_millis(400)).await;
+            let mid: SessionMeta = serde_json::from_str(
+                &std::fs::read_to_string(mid_dir.join("session.json")).unwrap(),
+            )
+            .unwrap();
+            // Захват продолжается: закрываем шаг и сессию как обычно.
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::EndStep { reply }).await.unwrap();
+            wait.await.unwrap().unwrap();
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::Detach { reply }).await.unwrap();
+            wait.await.unwrap().unwrap();
+            (snap, mid)
+        });
+        rt.block_on(worker).expect("писатель завершился");
+
+        // Снимок увидел незакрытый шаг и настоящие счётчики.
+        assert_eq!(snap.status, "recording", "снимок не должен завершать сессию");
+        assert_eq!(snap.counts.tx, 1);
+        assert_eq!(snap.counts.rx, 1);
+        assert_eq!(snap.counts.steps, 1, "открытый шаг посчитан");
+        assert!(snap.counts.events >= 3, "событий: {}", snap.counts.events);
+        assert_eq!(snap.transport, "j2534", "транспорт по фактическим событиям");
+
+        // Файл шага и отчёты легли на диск ещё до закрытия шага.
+        assert!(
+            session_dir.join("steps").join("01.json").is_file(),
+            "снимок не сохранил steps/01.json"
+        );
+        let report = std::fs::read_to_string(session_dir.join("report.txt")).unwrap();
+        assert!(
+            report.contains("Чтение фулл флеш"),
+            "в отчёте нет открытого шага:\n{report}"
+        );
+        // session.json во время записи — с настоящими счётчиками, а не нулями.
+        let live: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(session_dir.join("session.json")).unwrap())
+                .unwrap();
+        assert!(live.counts.events >= 3, "counts.events={}", live.counts.events);
+        assert_eq!(live.counts.steps, 1, "counts.steps={}", live.counts.steps);
+
+        // Следующий тик «живого» session.json (он прошёл ДО закрытия шага) не обнулил
+        // счётчик шагов и не сбросил статус.
+        assert_eq!(mid.status, "recording", "тик завершил сессию: {}", mid.status);
+        assert_eq!(mid.counts.steps, 1, "counts.steps после тика: {}", mid.counts.steps);
+        assert!(mid.counts.events >= 3, "counts.events после тика: {}", mid.counts.events);
+    }
+
+    // ───────────────────────── EDIABAS/WinKFP ────────────────────────────
     /// Кусок реального формата api.trc (как reference/logs/ediabas/api.trc).
     const API_TRC_HEAD: &str = "#'Mon Oct 12 02:00:00 2026;!Xh;V7.3.0;#\n\
 Initialization\nJob\n\t\"bms46ds0\"\n\t\"ident\"\n\t\"\"\n\t0\n\t\"\"\n\t0\n\t0\n\

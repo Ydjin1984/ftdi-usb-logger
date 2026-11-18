@@ -68,12 +68,13 @@ fn event_dir(ev: &Event) -> &'static str {
     }
 }
 
-/// Факт относится к USB/J2534-окружению (для отдельной группы в шапке отчёта).
+/// Факт относится к USB/J2534/LAN-окружению (для отдельной группы в шапке отчёта).
 fn is_usb_or_j2534_fact(fact: &str) -> bool {
     let lower = fact.to_ascii_lowercase();
     [
         "usb", "j2534", "passthru", "pass-thru", "winusb", "hid", "libusb", "usbpcap",
         "scanmatik", "chipsoft", "openport", "tactrix", "vxdiag",
+        "lan", "doip", "winsock", "ws2_32", "tcp", "udp",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

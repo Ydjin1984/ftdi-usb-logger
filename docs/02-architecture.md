@@ -366,10 +366,14 @@ Bosch MDI, UCDS и т.д.).
 [+1.300s] J2534 connect dev=1 ch=1 proto=ISO15765 flags=0x0 baud=500000 rc=0
 [+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : 02 10 03 00 00 00 00 00
 [+2.150s] J2534 RX ch=1 proto=ISO15765 id=0x7E8 rxs=0x0 len=8 : 06 50 03 00 00 00 00 00
+[+2.200s] J2534 RX ch=1 proto=0x8003 rxs=0x2 len=0 :
+[+2.250s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x27 len=4 : 00 02 27 7f
+[+2.300s] J2534 voltage dev=1 pin=12 5000 mV rc=0
+[+2.310s] J2534 version fw="FW:1060 HW:02 SN:A62122" dll="1.0.0.120" api="04.04" rc=0
 [+3.000s] J2534 ioctl ch=1 id=0x0701 rc=0
 [+3.100s] J2534 disconnect ch=1 rc=0
 [+4.000s] USB open path="\\?\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4
-[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3
+[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3 reads=1
 [+4.200s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b
 [+4.250s] WINUSB RX pipe=0x81 len=64 : ...
 [+4.300s] HID TX report=0x02 len=9 : ...
@@ -378,13 +382,30 @@ Bosch MDI, UCDS и т.д.).
 [+4.450s] LIBUSB RX ep=0x81 len=8 : ...
 ```
 
-Маппинг `transport`: `FT_*`→`ftd2xx`, `VCP`→`vcp`, `J2534`→`j2534`, `USB/WINUSB/HID/LIBUSB`→`usb`.
+Маппинг `transport`: `FT_*`→`ftd2xx`, `VCP`→`vcp`, `J2534`→`j2534`,
+`USB/WINUSB/HID/LIBUSB`→`usb`, `LAN`→`lan` (§11.6).
 `EventKind`: `tx`/`rx` для обмена, `usb` для open/close, `sys` для open/connect/disconnect.
+
+Особенности J2534 (после разбора лога PCMflash):
+
+* Хукаются **все** экспорты `PassThru*` (не фиксированный список): у вендоров разный
+  набор, а пропущенная функция — дырка в логе (`PassThruConnect`, `PassThruStopMsgFilter`,
+  `PassThruSetConfig`). Неизвестные пишутся generic-строкой
+  `J2534 PassThruXxx args=[…] rc=…`.
+* Вендорные протоколы (`proto=0x8003` у PCMflash/Scanmatik) не имеют CAN-id, зато
+  несут 2-байтовый BE-префикс длины: агент находит сервисный байт и добавляет `svc=0xNN`.
+  Payload при этом остаётся байт-в-байт.
+* `RX … rxs=0x2 len=0` — это `RX_STATUS`/`START_OF_MESSAGE`, а не ответ: в сводку шага
+  такие строки не идут, иначе один ответ считался дважды.
+* `PassThruReadMsgs`/`WriteMsgs` с ошибкой дают `J2534 rx-error|tx-error … rc=0x…`
+  (штатные `ERR_BUFFER_EMPTY 0x10` / `ERR_TIMEOUT 0x11` не пишутся — это опрос).
 
 ### 11.4 Разбор
 
 `decode::parse_capture_line` понимает новые префиксы; для J2534 кладёт в `meta`:
-`{channel, protocol, can_id, flags, rxs}` и `text` вида `ISO15765 0x7E0: 02 10 03`.
+`{channel, protocol, can_id, flags, rxs, svc, svc_resp}` и `text` вида `ISO15765 0x7E0`.
+Ключ гистограммы шага — `{proto} {can_id} {cmd|resp} 0xNN {ServiceName}`; если сервис
+не читается (многофреймовый ISO-TP), остаётся `{proto} {can_id}`.
 Инспектор дополнительно декодирует CAN/ISOTP: длина кадра, PCI-тип (SF/FF/CF/FC),
 service id для KWP/UDS. Для USB open/close `meta`: `{path, kind, device}`.
 
@@ -397,6 +418,46 @@ service id для KWP/UDS. Для USB open/close `meta`: `{path, kind, device}`.
 и установленного драйвера; при отсутствии — UI показывает подсказку и режим недоступен.
 Эта функция не заменяет хуки: она нужна для устройств, которые приложение открывает
 через собственный драйвер (без WinUSB/HID/FTDI/J2534 API).
+
+### 11.6 LAN: J2534-по-IP, DoIP, ICOM/HSFZ
+
+Сетевые адаптеры и диагностика «по воздуху»: агент хукает Winsock (`ws2_32.dll`) —
+`socket`, `connect`, `closesocket`, `send`/`recv`, `sendto`/`recvfrom`,
+`WSASend`/`WSARecv`, `WSARecvFrom`, `WSAGetOverlappedResult`.
+
+```
+[+7.000s] LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 rc=0
+[+7.050s] LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=16 : 02 fd 80 01 …
+[+7.090s] LAN RX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=11 : 02 fd 80 01 …
+[+7.400s] LAN TX udp local=192.168.1.5:50124 remote=192.168.1.255:13400 len=8 : 02 fd 00 01 …
+[+7.500s] LAN CLOSE tcp fd=0x1a4 local=… remote=… bytes=27 reads=1 writes=1 rc=0
+[+7.600s] LAN ERR tcp fd=0x1a4 op=WSARecv rc=-1 wsa=10054
+```
+
+* `meta` события: `{l4, local, remote, protocol}`; `protocol` — подсказка
+  (`DoIP` по заголовку `02 FD` или порту 13400, `HSFZ` по 6801, `J2534-IP` по 7777/7778,
+  иначе `TCP`/`UDP`).
+* Блокирующий обмен пишется на выходе из вызова (там известно реальное число байт),
+  overlapped — по `WSAGetOverlappedResult` либо подметанием `WSAOVERLAPPED.Internal`
+  (клиенты на completion-routine, как .NET `Socket`).
+* DoIP (ISO 13400-2) разбирается в инспекторе: тип сообщения, source/target address,
+  UDS-сервис и NRC внутри `0x8001 diagnostic message`; в сводке шага — ключи
+  `DoIP UDS cmd 0x22 ReadDataByIdentifier`.
+* Ограничение: если приложение читает данные через overlapped-`WSARecv` с APC и вообще
+  не вызывает `WSAGetOverlappedResult`, байты забирает подметание раз в 200 мс —
+  граница кадра в этом случае определяется по следующему вызову, а не по завершению.
+
+### 11.7 Слепые зоны драйверов и что с ними сделано
+
+| Слепая зона | Симптом в живом логе | Решение |
+|---|---|---|
+| overlapped-`ReadFile` на USB-хендле | `USB close … bytes=0` при реальном трафике; 4 МБ чтения флеша PCMflash не попали в лог | `ovlEmit` отдаёт RX для `kind=usb`, `ovlSweep` добирает APC-завершения, `USB close` считает `reads` |
+| крупный bulk-пакет > 16 КБ | хвост пакета молча терялся (`MAXDUMP` на строку) | `emitUsbTransfer` режет пакет на части `part=i/n` |
+| `CreateFileA` поверх `CreateFileW` | одно открытие писало 2–3 строки `USB open`/`FILE open` | дедуп по (handle, path) |
+| фиксированный список `PassThru*` | `J2534 connect` отсутствовал, хотя канал работал | обход всех экспортов `PassThru*` |
+
+Остаётся известная зона: I/O через `ntdll!NtDeviceIoControlFile`/`NtReadFile` напрямую
+(минуя kernel32) хуками не покрыт — для таких устройств используйте сырой USBPcap (§11.5).
 
 
 ### Скорости и тайминги в логе

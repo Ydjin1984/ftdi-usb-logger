@@ -169,16 +169,29 @@ fn summarize_j2534_histograms_and_no_reads() {
     assert_eq!(summary.exchanges, 2, "две J2534-посылки");
     assert_eq!(summary.tx_bytes, 8 + 2);
     assert_eq!(summary.rx_bytes, 8 + 2);
-    assert_eq!(
-        summary.cmd_hist.get("ISO15765 0x7E0"),
-        Some(&2),
-        "команды J2534 по can_id"
+    // Ключ гистограммы — протокол + CAN-id (+ сервис, если он читается из ISO-TP SF).
+    let cmd_total: u64 = summary
+        .cmd_hist
+        .iter()
+        .filter(|(k, _)| k.starts_with("ISO15765 0x7E0"))
+        .map(|(_, v)| *v)
+        .sum();
+    assert_eq!(cmd_total, 2, "команды J2534 по can_id: {:?}", summary.cmd_hist);
+    assert!(
+        summary
+            .cmd_hist
+            .keys()
+            .any(|k| k.contains("StartDiagnosticSession")),
+        "сервис 0x10 распознан: {:?}",
+        summary.cmd_hist
     );
-    assert_eq!(
-        summary.resp_hist.get("ISO15765 0x7E8"),
-        Some(&2),
-        "ответы J2534 по can_id"
-    );
+    let resp_total: u64 = summary
+        .resp_hist
+        .iter()
+        .filter(|(k, _)| k.starts_with("ISO15765 0x7E8"))
+        .map(|(_, v)| *v)
+        .sum();
+    assert_eq!(resp_total, 2, "ответы J2534 по can_id: {:?}", summary.resp_hist);
     assert!(summary.reads.is_empty(), "J2534 не даёт K-line чтений");
 }
 
@@ -275,9 +288,23 @@ fn mixed_step_keeps_serial_reads_and_j2534_hist() {
     assert_eq!(summary.reads[0].start, 0x0003_FD60);
     assert_eq!(summary.reads[0].len, 46);
     assert_eq!(summary.cmd_hist.get("READ(0x06)"), Some(&1));
-    assert_eq!(summary.cmd_hist.get("ISO15765 0x7E0"), Some(&1));
+    assert!(
+        summary
+            .cmd_hist
+            .iter()
+            .any(|(k, v)| k.starts_with("ISO15765 0x7E0") && *v == 1),
+        "команда J2534: {:?}",
+        summary.cmd_hist
+    );
     assert_eq!(summary.resp_hist.get("A0"), Some(&1));
-    assert_eq!(summary.resp_hist.get("ISO15765 0x7E8"), Some(&1));
+    assert!(
+        summary
+            .resp_hist
+            .iter()
+            .any(|(k, v)| k.starts_with("ISO15765 0x7E8") && *v == 1),
+        "ответ J2534: {:?}",
+        summary.resp_hist
+    );
 }
 
 #[test]

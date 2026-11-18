@@ -95,5 +95,7 @@ jobs:
           files: |
             dist/FTDI_USB_Logger_Setup.exe
             build/FTDI_USB_Logger_portable.zip
-          generate_release_notes: true
+          # Тело релиза — docs/release-notes.md (обновляется под каждую версию:
+          # человекочитаемый список изменений вместо простыни коммитов).
+          body_path: docs/release-notes.md
           fail_on_unmatched_files: true

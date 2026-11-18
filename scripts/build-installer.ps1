@@ -1,4 +1,4 @@
-﻿# Сборка установщика FTDI/USB Logger (per-user, без администратора).
+# Сборка установщика FTDI/USB Logger (per-user, без администратора).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1 -ForceSfx
@@ -27,7 +27,7 @@ $SetupOut = Join-Path $Root "dist\FTDI_USB_Logger_Setup.exe"
 
 # Версия приложения для AppVersion/VersionInfo установщика.
 $engineToml = Join-Path $Root "engine\Cargo.toml"
-$appVersion = "0.1.0"
+$appVersion = "0.2.0"
 if (Test-Path -LiteralPath $engineToml) {
     $toml = Get-Content -LiteralPath $engineToml -Raw
     if ($toml -match '(?m)^version\s*=\s*"([^"]+)"') { $appVersion = $Matches[1] }

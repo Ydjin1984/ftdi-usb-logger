@@ -455,6 +455,17 @@ OVL_TEST_LINES = [
     "[+6.400s] VCP TX WriteFileEx(COM1) len=4 ovl=1 : 12 04 0d 1b",
 ]
 
+# 6 строк LAN-захвата (docs/02 §11.4): J2534-по-IP/DoIP поверх TCP и UDP.
+# Формат — ровно тот, что пишет universal_capture.js `hookLanModule`.
+LAN_TEST_LINES = [
+    "[+7.000s] LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 rc=0",
+    "[+7.050s] LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=16 : 02 fd 80 01 00 00 00 08 0e 80 10 01 22 f1 90 00",
+    "[+7.090s] LAN RX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=11 : 02 fd 80 01 00 00 00 03 0e 80 62",
+    "[+7.400s] LAN TX udp local=192.168.1.5:50124 remote=192.168.1.255:13400 len=8 : 02 fd 00 01 00 00 00 00",
+    "[+7.500s] LAN CLOSE tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 bytes=27 reads=1 writes=1 rc=0",
+    "[+7.600s] LAN ERR tcp fd=0x1a4 op=WSARecv rc=-1 wsa=10054",
+]
+
 
 def self_test(out=None) -> int:
     out = out if out is not None else sys.stdout
@@ -472,9 +483,13 @@ def self_test(out=None) -> int:
         }
     )
     write({"type": "ready", "pid": 4321, "arch": "x64", "modules": 31, "script": "universal_capture.js"})
-    for line in SELF_TEST_LINES + UNIVERSAL_TEST_LINES + OVL_TEST_LINES:
+    for line in SELF_TEST_LINES + UNIVERSAL_TEST_LINES + OVL_TEST_LINES + LAN_TEST_LINES:
         write({"type": "event", "line": line, "wall": rfc3339_now()})
-    write({"type": "bye", "code": 0, "events": len(SELF_TEST_LINES) + len(UNIVERSAL_TEST_LINES) + len(OVL_TEST_LINES)})
+    write({
+        "type": "bye",
+        "code": 0,
+        "events": len(SELF_TEST_LINES) + len(UNIVERSAL_TEST_LINES) + len(OVL_TEST_LINES) + len(LAN_TEST_LINES),
+    })
     return 0
 
 

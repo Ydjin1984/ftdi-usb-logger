@@ -482,6 +482,9 @@ fn parse_body(rest: &str, t: f64, raw: &str) -> Event {
     if rest == "J2534" || rest.starts_with("J2534 ") {
         return parse_j2534_line(rest, t, raw);
     }
+    if rest == "LAN" || rest.starts_with("LAN ") {
+        return parse_lan_line(rest, t, raw);
+    }
     if rest == "USBRAW" || rest.starts_with("USBRAW ") {
         return parse_usbraw_line(rest, t, raw);
     }
@@ -825,13 +828,26 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "can_id", can_id.clone());
             set_meta_str(&mut ev, "flags", tag_quoted(kv, "flags"));
             set_meta_str(&mut ev, "rxs", tag_quoted(kv, "rxs"));
+            // Сервисный байт кадра: агент вытаскивает его из вендорной обёртки
+            // (PCMflash/Scanmatik `0x8003`) или из ISO-TP SF, чтобы сводка шага
+            // показывала `0x27 SecurityAccess`, а не `0x8003 ?`.
+            let svc = tag_quoted(kv, "svc");
+            set_meta_str(&mut ev, "svc", svc.clone());
+            if let Some(v) = svc.as_deref().and_then(parse_hex_byte) {
+                set_meta(&mut ev, "svc_resp", json!((v & 0x40) != 0));
+            }
             if let Some(rc) = tag_i32(kv, "rc") {
                 ev.rc = Some(rc);
             }
+            let label = match (&can_id, &svc) {
+                (Some(id), _) => id.clone(),
+                (None, Some(s)) => s.clone(),
+                _ => "?".into(),
+            };
             ev.text = Some(format!(
                 "{} {}",
                 protocol.unwrap_or_else(|| "ISO15765".into()),
-                can_id.unwrap_or_else(|| "?".into())
+                label
             ));
             set_payload(&mut ev, hex, tag_u64(kv, "len"));
             ev
@@ -916,13 +932,38 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             ev.text = Some(format!("disconnect ch={}", channel.unwrap_or_else(|| "?".into())));
             ev
         }
-        "err" | "error" => {
+        "err" | "error" | "rx-error" | "tx-error" => {
             let mut ev = make_event(EventKind::Error, Transport::J2534, t, raw);
-            ev.api = "J2534 err".into();
+            ev.api = format!(
+                "J2534 {}",
+                if op_raw.is_empty() { "err" } else { op_raw }
+            );
             if let Some(rc) = tag_i32(body, "rc") {
                 ev.rc = Some(rc);
             }
             set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
+            set_meta_str(&mut ev, "op", tag_quoted(body, "op"));
+            ev.text = Some(body.to_string());
+            ev
+        }
+        // PassThruSetProgrammingVoltage: питание на пине (BitBox/Scanmatik включают 12 В им),
+        // PassThruReadVersion: версии FW/DLL/API. Оба — SYS, к обмену не относятся,
+        // но без них в логе слепые зоны (почему адаптер молчит 5 секунд и т.п.).
+        "voltage" | "version" | "filter" | "close" | "config-get" | "select" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = format!(
+                "J2534 {}",
+                if op_raw.is_empty() { "?" } else { op_raw }
+            );
+            set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
+            set_meta_str(&mut ev, "pin", tag_quoted(body, "pin"));
+            set_meta_str(&mut ev, "voltage", tag_quoted(body, "mv"));
+            set_meta_str(&mut ev, "fw", tag_quoted(body, "fw"));
+            set_meta_str(&mut ev, "dll", tag_quoted(body, "dll"));
+            set_meta_str(&mut ev, "api", tag_quoted(body, "api"));
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
             ev.text = Some(body.to_string());
             ev
         }
@@ -939,6 +980,98 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             ev.text = Some(body.to_string());
             ev
         }
+    }
+}
+
+/// LAN/Winsock — сетевой обмен (docs/02 §11.4): J2534-по-IP, DoIP (ISO 13400),
+/// BMW ICOM/HSFZ, любые диагностические адаптеры с Ethernet/Wi-Fi.
+///
+/// ```text
+/// LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 remote=192.168.1.10:13400 rc=0
+/// LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=32 : 02 fd 00 01 …
+/// LAN RX tcp local=192.168.1.10:13400 remote=192.168.1.5:50123 len=40 : 02 fd 80 01 …
+/// LAN CLOSE tcp fd=0x1a4 local=… remote=… bytes=1234 reads=9 writes=7
+/// LAN ERR tcp fd=0x1a4 op=WSARecv rc=-1 wsa=10054
+/// ```
+///
+/// TX/RX несут payload и попадают в сводку шага; connect/close/err — служебные `sys`,
+/// чтобы в потоке было видно установку, обрыв и ошибки сокета.
+fn parse_lan_line(rest: &str, t: f64, raw: &str) -> Event {
+    let after = rest.strip_prefix("LAN").unwrap_or(rest).trim_start();
+    let op_raw = after.split_whitespace().next().unwrap_or("");
+    let op = op_raw.to_ascii_lowercase();
+    let body = after[op_raw.len()..].trim_start();
+    let (kv, hex) = split_payload(body);
+
+    // Первый токен после операции — протокол L4 (`tcp`/`udp`), как его пишет агент.
+    let l4 = kv
+        .split_whitespace()
+        .next()
+        .filter(|s| s.eq_ignore_ascii_case("tcp") || s.eq_ignore_ascii_case("udp"))
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "tcp".to_string());
+    let local = tag_quoted(kv, "local");
+    let remote = tag_quoted(kv, "remote");
+
+    if op == "tx" || op == "rx" {
+        let (dir, kind) = if op == "tx" {
+            (Direction::Tx, EventKind::Tx)
+        } else {
+            (Direction::Rx, EventKind::Rx)
+        };
+        let mut ev = make_event(kind, Transport::Lan, t, raw);
+        ev.api = format!("LAN {}", if dir == Direction::Tx { "TX" } else { "RX" });
+        ev.direction = Some(dir);
+        set_meta_str(&mut ev, "l4", Some(l4.clone()));
+        set_meta_str(&mut ev, "local", local.clone());
+        set_meta_str(&mut ev, "remote", remote.clone());
+        if let Some(rc) = tag_i32(kv, "rc") {
+            ev.rc = Some(rc);
+        }
+        let payload = hex.map(hex_to_bytes).unwrap_or_default();
+        let proto = lan_proto_hint(&l4, remote.as_deref(), &payload);
+        set_meta_str(&mut ev, "protocol", Some(proto.clone()));
+        ev.text = Some(format!(
+            "{proto} {}",
+            remote.clone().unwrap_or_else(|| l4.to_ascii_uppercase())
+        ));
+        set_payload(&mut ev, hex, tag_u64(kv, "len"));
+        return ev;
+    }
+
+    let mut ev = make_event(EventKind::Sys, Transport::Lan, t, raw);
+    // `LAN module: ws2_32.dll …` — двоеточие в имени операции не часть api.
+    let op_name = op_raw.trim_end_matches(':');
+    ev.api = format!("LAN {}", if op_name.is_empty() { "?" } else { op_name });
+    set_meta_str(&mut ev, "l4", Some(l4));
+    set_meta_str(&mut ev, "local", local);
+    set_meta_str(&mut ev, "remote", remote);
+    set_meta_str(&mut ev, "fd", tag_quoted(kv, "fd"));
+    set_meta_str(&mut ev, "op", tag_quoted(kv, "op"));
+    if let Some(bytes) = tag_u64(kv, "bytes") {
+        set_meta(&mut ev, "bytes", json!(bytes));
+    }
+    if let Some(rc) = tag_i32(kv, "rc") {
+        ev.rc = Some(rc);
+    }
+    ev.text = Some(body.to_string());
+    ev
+}
+
+/// Подсказка «что за протокол поверх TCP/UDP»: DoIP по заголовку, дальше — по порту.
+/// Это именно подсказка: неизвестный порт остаётся `TCP`/`UDP`.
+fn lan_proto_hint(l4: &str, remote: Option<&str>, payload: &[u8]) -> String {
+    if payload.len() >= 2 && payload[0] == 0x02 && payload[1] == 0xFD {
+        return "DoIP".to_string();
+    }
+    let port = remote
+        .and_then(|r| r.rsplit(':').next())
+        .and_then(|p| p.parse::<u16>().ok());
+    match port {
+        Some(13400) => "DoIP".to_string(),
+        Some(6801) => "HSFZ".to_string(),
+        Some(7777) | Some(7778) => "J2534-IP".to_string(),
+        _ => l4.to_ascii_uppercase(),
     }
 }
 
@@ -1415,30 +1548,188 @@ fn read_file_hashes(events: &[&Event]) -> Vec<FileHash> {
     out
 }
 
-/// Транспорт(ы) сессии по событиям: один транспорт как есть, несколько — `mixed`.
-/// Используется при закрытии сессии, чтобы `session.json` отражал универсальный захват.
-pub fn transport_summary(events: &[Event]) -> String {
-    let mut kinds: Vec<&'static str> = Vec::new();
-    for ev in events {
-        let name = match ev.transport {
-            Transport::Ftd2xx => "ftd2xx",
-            Transport::Vcp => "vcp",
-            Transport::Usb => "usb",
-            Transport::J2534 => "j2534",
-            _ => continue,
-        };
-        if !kinds.contains(&name) {
-            kinds.push(name);
+/// Ключ гистограммы LAN: для DoIP — тип сообщения (и UDS-сервис внутри diagnostic
+/// message), иначе протокол + удалённый адрес (`TCP 192.168.1.10:7777`).
+fn lan_hist_key(ev: &Event) -> String {
+    if let Some(f) = doip_frame(&ev.payload()) {
+        if let Some(uds) = f.uds {
+            let name = service_name(uds & !0x40).unwrap_or("");
+            let arrow = if uds & 0x40 != 0 { "resp" } else { "cmd" };
+            return if name.is_empty() {
+                format!("DoIP UDS {arrow} 0x{uds:02X}")
+            } else {
+                format!("DoIP UDS {arrow} 0x{uds:02X} {name}")
+            };
         }
+        return format!("DoIP 0x{:04X} {}", f.ptype, doip_type_name(f.ptype));
     }
-    match kinds.len() {
-        0 => String::new(),
-        1 => kinds[0].to_string(),
-        _ => "mixed".to_string(),
+    let proto = ev
+        .meta
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("LAN");
+    let remote = ev
+        .meta
+        .get("remote")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    format!("{proto} {remote}")
+}
+
+/// Заголовок DoIP (ISO 13400-2): `02 FD <type:u16> <length:u32> <payload…>`.
+struct DoipFrame {
+    ptype: u16,
+    len: u32,
+    src: Option<u16>,
+    dst: Option<u16>,
+    /// Первый байт UDS внутри diagnostic message (0x8001).
+    uds: Option<u8>,
+}
+
+fn doip_frame(bytes: &[u8]) -> Option<DoipFrame> {
+    if bytes.len() < 8 || bytes[0] != 0x02 || bytes[1] != 0xFD {
+        return None;
+    }
+    let ptype = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let mut f = DoipFrame {
+        ptype,
+        len,
+        src: None,
+        dst: None,
+        uds: None,
+    };
+    if ptype == 0x8001 && bytes.len() >= 12 {
+        f.src = Some(u16::from_be_bytes([bytes[8], bytes[9]]));
+        f.dst = Some(u16::from_be_bytes([bytes[10], bytes[11]]));
+        f.uds = bytes.get(12).copied();
+    }
+    Some(f)
+}
+
+fn doip_type_name(ptype: u16) -> &'static str {
+    match ptype {
+        0x0000 => "generic nack",
+        0x0001 => "vehicle identification request",
+        0x0002 => "vehicle identification request EID",
+        0x0003 => "vehicle identification request VIN",
+        0x0004 => "vehicle announcement",
+        0x0005 => "routing activation request",
+        0x0006 => "routing activation response",
+        0x0007 => "alive check request",
+        0x0008 => "alive check response",
+        0x4001 => "entity status request",
+        0x4002 => "entity status response",
+        0x4003 => "power mode request",
+        0x4004 => "power mode response",
+        0x8001 => "diagnostic message",
+        0x8002 => "diagnostic message ack",
+        0x8003 => "diagnostic message nack",
+        _ => "unknown",
     }
 }
 
-/// Ключ гистограммы J2534: протокол + CAN-id (например `ISO15765 0x7E0`).
+/// Разбор DoIP-сообщения для инспектора: тип, адреса, UDS-сервис и NRC.
+fn decode_doip(bytes: &[u8]) -> Option<PayloadDecode> {
+    let f = doip_frame(bytes)?;
+    let mut out = PayloadDecode {
+        len: bytes.len(),
+        hex: bytes_to_hex(bytes),
+        ascii: ascii_preview(bytes),
+        ..Default::default()
+    };
+    out.cmd = Some(format!("DoIP 0x{:04X} {}", f.ptype, doip_type_name(f.ptype)));
+    out.notes.push(format!("заявленная длина {}", f.len));
+    if (f.len as usize) + 8 != bytes.len() {
+        out.notes.push(format!(
+            "длина в заголовке {} не совпадает с принятыми {}",
+            f.len,
+            bytes.len().saturating_sub(8)
+        ));
+    }
+    if let (Some(src), Some(dst)) = (f.src, f.dst) {
+        out.notes.push(format!("source 0x{src:04X} → target 0x{dst:04X}"));
+    }
+    if let Some(uds) = f.uds {
+        let body = &bytes[12..];
+        out.payload_hex = bytes_to_hex(body);
+        if uds == 0x7F && body.len() >= 3 {
+            let svc = body[1];
+            let nrc = body[2];
+            let name = kwp_nrc_name(nrc).unwrap_or("");
+            out.cmd = Some(format!("DoIP UDS 7F ({svc:02X},{nrc:02X})"));
+            if !name.is_empty() {
+                out.notes.push(format!("NRC: {name}"));
+            }
+        } else {
+            let base = uds & !0x40;
+            let name = service_name(base).unwrap_or("");
+            let arrow = if uds & 0x40 != 0 { "ответ" } else { "запрос" };
+            out.notes.push(if name.is_empty() {
+                format!("UDS 0x{uds:02X} ({arrow})")
+            } else {
+                format!("UDS 0x{uds:02X} {name} ({arrow})")
+            });
+        }
+    }
+    Some(out)
+}
+
+/// Транспорт(ы) сессии по событиям.
+///
+/// Раньше любой второй транспорт давал `mixed`, и у PCMflash через Scanmatik
+/// выходило `mixed` только потому, что драйвер адаптера попутно светил свои
+/// USB-ioctl, а обмен шёл через J2534. Теперь считаем вклад каждого транспорта
+/// в обмен (TX/RX) и пишем `mixed` только если второй сопоставим с первым.
+pub fn transport_summary(events: &[Event]) -> String {
+    use std::collections::BTreeMap;
+    let name = |t: Transport| match t {
+        Transport::Ftd2xx => Some("ftd2xx"),
+        Transport::Vcp => Some("vcp"),
+        Transport::Usb => Some("usb"),
+        Transport::J2534 => Some("j2534"),
+        Transport::Lan => Some("lan"),
+        _ => None,
+    };
+    let mut traffic: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut seen: Vec<&'static str> = Vec::new();
+    for ev in events {
+        let Some(n) = name(ev.transport) else { continue };
+        if !seen.contains(&n) {
+            seen.push(n);
+        }
+        if matches!(ev.kind, EventKind::Tx | EventKind::Rx) {
+            *traffic.entry(n).or_insert(0) += 1;
+        }
+    }
+    if traffic.len() > 1 {
+        let mut ranked: Vec<(&str, u64)> = traffic.iter().map(|(k, v)| (*k, *v)).collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let (top, top_n) = ranked[0];
+        let (second, second_n) = ranked[1];
+        // Второй транспорт — не «шум драйвера», а реальный второй канал?
+        if top_n > 0 && second_n * 5 >= top_n {
+            return "mixed".to_string();
+        }
+        let _ = second;
+        return top.to_string();
+    }
+    if let Some((only, _)) = traffic.iter().next() {
+        return (*only).to_string();
+    }
+    // Ни одного TX/RX не было (сессия-«пустышка»): выводить `mixed` не из чего —
+    // пусть остаётся стартовая догадка вызывающего.
+    let _ = seen;
+    String::new()
+}
+
+/// Ключ гистограммы J2534: протокол + CAN-id/сервис.
+///
+/// Раньше ключ был строго `{proto} {can_id}`, поэтому для vendor-протоколов без
+/// CAN-id (например `0x8003` у PCMflash/Scanmatik) вся сводка шага схлопывалась
+/// в бесполезное `0x8003 ?`. Теперь:
+///   * CAN/ISO15765 (proto 5/6) — `ISO15765 0x7E0` и сервис, если он читается;
+///   * прочие протоколы — сервис из payload (`svc=0x27`), иначе первые два байта.
 fn j2534_hist_key(ev: &Event) -> String {
     let proto = ev
         .meta
@@ -1449,8 +1740,92 @@ fn j2534_hist_key(ev: &Event) -> String {
         .meta
         .get("can_id")
         .and_then(Value::as_str)
-        .unwrap_or("?");
-    format!("{proto} {id}")
+        .unwrap_or("");
+    let base = if id.is_empty() {
+        proto.to_string()
+    } else {
+        format!("{proto} {id}")
+    };
+    match j2534_service(ev) {
+        Some((svc, resp)) => {
+            let name = service_name(svc & !0x40).unwrap_or("");
+            let arrow = if resp { "resp" } else { "cmd" };
+            if name.is_empty() {
+                format!("{base} {arrow} 0x{svc:02X}")
+            } else {
+                format!("{base} {arrow} 0x{svc:02X} {name}")
+            }
+        }
+        None => base,
+    }
+}
+
+/// Сервисный байт кадра J2534 (с учётом вендорной обёртки) и признак ответа.
+///
+/// Агент кладёт `svc=0xNN` в строку, когда сервис читается однозначно; если меты нет,
+/// пробуем вытащить сервис из payload сами (ISO-TP SF для CAN, иначе первый байт
+/// после 2-байтового BE-префикса длины — так устроены кадры PCMflash/Scanmatik).
+fn j2534_service(ev: &Event) -> Option<(u8, bool)> {
+    if let Some(svc) = ev.meta.get("svc").and_then(Value::as_str) {
+        if let Some(v) = parse_hex_byte(svc) {
+            let resp = ev
+                .meta
+                .get("svc_resp")
+                .and_then(Value::as_u64)
+                .map(|x| x != 0)
+                .unwrap_or(v & 0x40 != 0);
+            return Some((v, resp));
+        }
+    }
+    let bytes = ev.payload();
+    if bytes.is_empty() {
+        return None;
+    }
+    let proto = ev
+        .meta
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let is_can = proto.contains("CAN") || proto.contains("ISO15765");
+    if is_can {
+        // ISO-TP одиночный кадр: старшая тетрада PCI == 0, сервис — следующий байт.
+        if bytes[0] & 0xF0 == 0x00 && bytes.len() >= 2 {
+            return Some((bytes[1], bytes[1] & 0x40 != 0));
+        }
+        return None;
+    }
+    // ISO 14230-2 / ISO 9141: сначала заголовок, сервис идёт после него.
+    //   FMT & 0xC0 == 0x00 — без адреса, заголовок 1 байт;
+    //   FMT & 0xC0 == 0x80 — с адресом (TGT, SRC), заголовок 3 байта;
+    //   FMT & 0xC0 == 0xC0 — с адресом и байтом длины, заголовок 4 байта.
+    if proto.contains("ISO14230") || proto.contains("ISO9141") || proto.contains("KWP") {
+        let fmt = bytes[0];
+        let off = match fmt & 0xC0 {
+            0x80 => 3,
+            0xC0 => 4,
+            _ => 1,
+        };
+        return bytes
+            .get(off)
+            .map(|v| (*v, (*v & 0x40) != 0));
+    }
+    // Вендорная обёртка: 2 байта BE-длины, затем сервис.
+    let off = if bytes.len() >= 3
+        && u16::from_be_bytes([bytes[0], bytes[1]]) as usize == bytes.len() - 2
+    {
+        2
+    } else {
+        0
+    };
+    bytes
+        .get(off)
+        .map(|v| (*v, (*v & 0x40) != 0))
+}
+
+fn parse_hex_byte(text: &str) -> Option<u8> {
+    let t = text.trim();
+    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    u8::from_str_radix(t, 16).ok()
 }
 
 /// Ключ гистограммы USB-обмена: текст события (`WINUSB pipe=0x01`) или api.
@@ -1563,8 +1938,11 @@ pub fn summarize_step(
         *summary.cmd_hist.entry(tx_summary(&ex.tx)).or_insert(0) += 1;
     }
 
-    // Универсальный захват: гистограммы J2534 по протоколу/can_id, USB — по pipe/report.
-    // Чтения (READ 0x06) собираем только из K-line — J2534/USB сюда не попадают.
+    // Универсальный захват: гистограммы J2534 по протоколу/сервису, USB — по pipe/report,
+    // LAN — по протоколу/адресу. Пустые RX-сообщения J2534 (`rxs=0x02 START_OF_MESSAGE`,
+    // `len=0`) — это статус драйвера, а не ответ: в гистограмму и байты они не идут,
+    // иначе один ответ считался дважды (в логе PCMflash было 112 «ответов» на 56 TX).
+    let mut status_msgs = 0u64;
     for ev in &slice {
         match (ev.transport, ev.kind) {
             (Transport::J2534, EventKind::Tx) => {
@@ -1573,7 +1951,12 @@ pub fn summarize_step(
                 *summary.cmd_hist.entry(j2534_hist_key(ev)).or_insert(0) += 1;
             }
             (Transport::J2534, EventKind::Rx) => {
-                rx_bytes += ev.payload().len() as u64;
+                let bytes = ev.payload();
+                if bytes.is_empty() {
+                    status_msgs += 1;
+                    continue;
+                }
+                rx_bytes += bytes.len() as u64;
                 *summary.resp_hist.entry(j2534_hist_key(ev)).or_insert(0) += 1;
             }
             (Transport::Usb, EventKind::Tx) => {
@@ -1585,9 +1968,19 @@ pub fn summarize_step(
                 rx_bytes += ev.payload().len() as u64;
                 *summary.resp_hist.entry(usb_hist_key(ev)).or_insert(0) += 1;
             }
+            (Transport::Lan, EventKind::Tx) => {
+                exchanges += 1;
+                tx_bytes += ev.payload().len() as u64;
+                *summary.cmd_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
+            }
+            (Transport::Lan, EventKind::Rx) => {
+                rx_bytes += ev.payload().len() as u64;
+                *summary.resp_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
+            }
             _ => {}
         }
     }
+    let _ = status_msgs;   // статусные RX учтены только для того, чтобы не попасть в hist
 
     summary.exchanges = exchanges;
     summary.tx_bytes = tx_bytes;
@@ -1642,6 +2035,10 @@ pub fn decode_payload(hex: &str) -> PayloadDecode {
     if bytes.is_empty() {
         out.notes.push("пустой payload".into());
         return out;
+    }
+    // DoIP (ISO 13400-2): `02 FD …` — сетевой обмен, разбираем до KWP-эвристик.
+    if let Some(doip) = decode_doip(&bytes) {
+        return doip;
     }
     out.echo = Some(bytes[0]);
     out.payload_hex = bytes_to_hex(&bytes[1..]);
@@ -1731,7 +2128,8 @@ pub fn decode_payload(hex: &str) -> PayloadDecode {
     out
 }
 
-/// Разбор payload события с учётом транспорта: для J2534 с `can_id` — ISOTP/CAN.
+/// Разбор payload события с учётом транспорта: J2534 с `can_id` — ISOTP/CAN,
+/// LAN — DoIP (если заголовок `02 FD`), иначе общий KWP-разбор.
 pub fn decode_payload_event(ev: &Event) -> PayloadDecode {
     if ev.transport == Transport::J2534 {
         if let Some(can_id) = ev.meta.get("can_id").and_then(Value::as_str) {
@@ -1957,6 +2355,177 @@ mod tests {
         assert!(meta_bool(&ev, "truncated"));
         assert!(ev.hex.len() <= MAX_EVENT_BYTES);
         assert_eq!(ev.len, 40_000);
+    }
+
+    // ── LAN / DoIP ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn lan_tx_parses_peers_and_doip() {
+        let ev = parse_capture_line(
+            "[+3.100s] LAN TX tcp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=8 : \
+             02 fd 80 01 00 00 00 02",
+        )
+        .unwrap();
+        assert_eq!(ev.kind, EventKind::Tx);
+        assert_eq!(ev.transport, Transport::Lan);
+        assert_eq!(ev.api, "LAN TX");
+        assert_eq!(ev.direction, Some(Direction::Tx));
+        assert_eq!(ev.len, 8);
+        assert_eq!(ev.meta.get("l4").and_then(Value::as_str), Some("tcp"));
+        assert_eq!(
+            ev.meta.get("remote").and_then(Value::as_str),
+            Some("192.168.1.10:13400")
+        );
+        assert_eq!(ev.meta.get("protocol").and_then(Value::as_str), Some("DoIP"));
+        assert_eq!(ev.payload(), vec![0x02, 0xfd, 0x80, 0x01, 0x00, 0x00, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn lan_connect_and_close_are_sys() {
+        let ev = parse_capture_line(
+            "[+1.000s] LAN CONNECT tcp fd=0x1a4 local=192.168.1.5:50123 \
+             remote=192.168.1.10:6801 rc=0",
+        )
+        .unwrap();
+        assert_eq!(ev.kind, EventKind::Sys);
+        assert_eq!(ev.transport, Transport::Lan);
+        assert_eq!(ev.rc, Some(0));
+        assert_eq!(
+            ev.meta.get("remote").and_then(Value::as_str),
+            Some("192.168.1.10:6801")
+        );
+        let ev = parse_capture_line("[+9.000s] LAN CLOSE tcp fd=0x1a4 bytes=1234 reads=9 writes=7")
+            .unwrap();
+        assert_eq!(ev.kind, EventKind::Sys);
+        assert_eq!(ev.meta.get("bytes").and_then(Value::as_u64), Some(1234));
+    }
+
+    #[test]
+    fn doip_diagnostic_message_decodes_uds() {
+        // DoIP diagnostic message: source 0x0E80 → target 0x1001, UDS ReadDataByIdentifier.
+        let ev = parse_capture_line(
+            "[+3.100s] LAN RX tcp local=192.168.1.10:13400 remote=192.168.1.5:50123 \
+             len=16 : 02 fd 80 01 00 00 00 08 0e 80 10 01 22 f1 90 00",
+        )
+        .unwrap();
+        let d = decode_payload_event(&ev);
+        assert_eq!(d.cmd.as_deref(), Some("DoIP 0x8001 diagnostic message"));
+        assert!(d
+            .notes
+            .iter()
+            .any(|n| n.contains("UDS 0x22 ReadDataByIdentifier")));
+        assert!(d.notes.iter().any(|n| n.contains("0x0E80")));
+    }
+
+    #[test]
+    fn doip_length_mismatch_is_reported() {
+        // Заголовок обещает 4 байта тела, пришло 3.
+        let bytes = vec![0x02, 0xfd, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03];
+        let d = decode_payload(&bytes_to_hex(&bytes));
+        assert_eq!(
+            d.cmd.as_deref(),
+            Some("DoIP 0x0005 routing activation request")
+        );
+        assert!(d.notes.iter().any(|n| n.contains("не совпадает")));
+    }
+
+    // ── J2534: вендорный протокол PCMflash/Scanmatik ────────────────────────
+
+    #[test]
+    fn j2534_vendor_proto_yields_service_in_hist() {
+        // Ровно то, что писал PCMflash через smj2534.dll: proto=0x8003, без CAN-id,
+        // плюс пустой RX_STATUS (rxs=0x2, len=0) перед каждым ответом.
+        let lines = [
+            "# MARK wall=2026-11-18 16:00:07 START 1: Идентификация",
+            "[+10.000s] J2534 TX ch=1 proto=0x8003 flags=0x0 len=4 : 00 02 27 7f",
+            "[+10.010s] J2534 RX ch=1 proto=0x8003 rxs=0x2 len=0 : ",
+            "[+10.011s] J2534 RX ch=1 proto=0x8003 rxs=0x0 len=5 : 00 03 67 7f 34",
+        ];
+        let events: Vec<Event> = lines
+            .iter()
+            .filter_map(|l| parse_capture_line(l))
+            .collect();
+        let summary = summarize_step(&events, 1, "Идентификация", 0.02, None);
+        assert_eq!(summary.exchanges, 1, "одна посылка TX");
+        assert_eq!(summary.tx_bytes, 4);
+        assert_eq!(summary.rx_bytes, 5, "пустой RX_STATUS не идёт в байты");
+        assert!(
+            summary
+                .cmd_hist
+                .keys()
+                .any(|k| k.contains("0x8003") && k.contains("SecurityAccess")),
+            "cmd_hist={:?}",
+            summary.cmd_hist
+        );
+        assert!(
+            summary
+                .resp_hist
+                .keys()
+                .any(|k| k.contains("resp") && k.contains("SecurityAccess")),
+            "resp_hist={:?}",
+            summary.resp_hist
+        );
+        assert_eq!(
+            summary.resp_hist.values().sum::<u64>(),
+            1,
+            "ответ посчитан один раз, а не дважды: {:?}",
+            summary.resp_hist
+        );
+    }
+
+    #[test]
+    fn j2534_iso14230_header_is_skipped_before_service() {
+        // ISO 14230-2: сервис идёт после заголовка, а не первым байтом.
+        // 1) без адреса: FMT=0x02, дальше SID 0x10.
+        let e = parse_capture_line(
+            "[+1.000s] J2534 TX ch=1 proto=ISO14230 len=3 : 02 10 03",
+        )
+        .unwrap();
+        assert_eq!(j2534_service(&e), Some((0x10, false)));
+        // 2) с адресом (FMT=0x81): FMT TGT SRC SID.
+        let e = parse_capture_line(
+            "[+1.100s] J2534 TX ch=1 proto=ISO14230 len=4 : 81 f1 10 3e",
+        )
+        .unwrap();
+        assert_eq!(j2534_service(&e), Some((0x3E, false)));
+        // 3) с адресом и байтом длины (FMT=0xC1): FMT TGT SRC LEN SID.
+        let e = parse_capture_line(
+            "[+1.200s] J2534 RX ch=1 proto=ISO14230 len=5 : c1 f1 10 02 7e",
+        )
+        .unwrap();
+        assert_eq!(j2534_service(&e), Some((0x7E, true)), "0x7E = ответ на 0x3E");
+    }
+
+    #[test]
+    fn j2534_svc_meta_from_agent_wins() {
+        let ev = parse_capture_line(
+            "[+1.000s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x10 len=3 : 00 01 10",
+        )
+        .unwrap();
+        assert_eq!(ev.text.as_deref(), Some("0x8003 0x10"));
+        let key = j2534_hist_key(&ev);
+        assert!(key.contains("0x10") && key.contains("StartDiagnosticSession"), "{key}");
+    }
+
+    #[test]
+    fn j2534_can_hist_keeps_can_id() {
+        let ev = parse_capture_line(
+            "[+2.000s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : \
+             02 10 03 00 00 00 00 00",
+        )
+        .unwrap();
+        let key = j2534_hist_key(&ev);
+        assert!(key.starts_with("ISO15765 0x7E0"), "{key}");
+        assert!(key.contains("StartDiagnosticSession"), "{key}");
+    }
+
+    #[test]
+    fn transport_summary_recognizes_lan() {
+        let lan = parse_capture_line(
+            "[+1.000s] LAN TX udp local=192.168.1.5:50123 remote=192.168.1.10:13400 len=1 : 02",
+        )
+        .unwrap();
+        assert_eq!(transport_summary(&[lan]), "lan");
     }
 }
 
