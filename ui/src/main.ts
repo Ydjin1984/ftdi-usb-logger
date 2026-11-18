@@ -24,6 +24,28 @@ import {
   openStopConfirm,
 } from "./components/dialogs";
 import { isDemoMode } from "./api";
+import { errText, localizeDom, msg, t } from "./i18n";
+
+msg({
+  "Разделы рабочего пространства": "Workspace sections",
+  "Сессии и USB": "Sessions and USB",
+  "Поток": "Stream",
+  "Инспектор": "Inspector",
+  "ИМПОРТ ЛОГА": "IMPORT LOG",
+  "Отпустите файл ": "Drop the file ",
+  " — он будет разобран и добавлен как сессия.": " — it will be parsed and added as a session.",
+  "Движок не отвечает: логер остановлен или перезапускается. Предыдущая сессия уже не пишется.":
+    "The engine is not responding: the logger is stopped or restarting. The previous session is no longer being recorded.",
+  "Запустите ярлык logger.cmd заново — эта страница переподключится сама, как только движок поднимется.":
+    "Run the logger.cmd shortcut again — this page will reconnect by itself as soon as the engine is up.",
+  "переподключиться": "reconnect",
+  "повторить подключение": "retry connection",
+  "открыть демо-режим": "open demo mode",
+  "демо-режим не загрузился: {msg}": "demo mode failed to load: {msg}",
+  "Движок не ответил: {msg}. Запустите ftdi-logger.exe (или scripts\\run.ps1) и нажмите «повторить».":
+    "The engine did not respond: {msg}. Start ftdi-logger.exe (or scripts\\run.ps1) and press retry.",
+  "подключение к движку…": "connecting to the engine…",
+});
 
 const app = document.getElementById("app") as HTMLElement;
 const boot = document.getElementById("boot") as HTMLElement;
@@ -45,12 +67,12 @@ function build(): void {
 
   // Навигация по разделам — нужна на узком экране (CSS показывает её до 1040px).
   const workspaceNav = el("nav", "workspace-nav");
-  workspaceNav.setAttribute("aria-label", "Разделы рабочего пространства");
+  workspaceNav.setAttribute("aria-label", t("Разделы рабочего пространства"));
   app.dataset.view = "stream";
   const sections: Array<[string, string]> = [
-    ["rail", "Сессии и USB"],
-    ["stream", "Поток"],
-    ["inspect", "Инспектор"],
+    ["rail", t("Сессии и USB")],
+    ["stream", t("Поток")],
+    ["inspect", t("Инспектор")],
   ];
   for (const [id, label] of sections) {
     const tab = el("button", "btn", label);
@@ -196,13 +218,13 @@ function installDropzone(): void {
   // и ломает их (первый .modal-backdrop в DOM оказывался этим скрытым слоем).
   const overlay = el("div", "dropzone");
   const box = el("div", "dropzone__box");
-  const title = el("div", "sec__title", "ИМПОРТ ЛОГА");
+  const title = el("div", "sec__title", t("ИМПОРТ ЛОГА"));
   title.style.marginBottom = "10px";
   const body = el("div", "sec__empty");
   body.append(
-    document.createTextNode("Отпустите файл "),
+    document.createTextNode(t("Отпустите файл ")),
     el("b", "", ".log / .out / .txt"),
-    document.createTextNode(" — он будет разобран и добавлен как сессия."),
+    document.createTextNode(t(" — он будет разобран и добавлен как сессия.")),
   );
   box.append(title, body);
   overlay.append(box);
@@ -242,13 +264,13 @@ function showOffline(): void {
   bootText.textContent = "";
   const wrap = el("div");
   wrap.append(
-    el("div", "boot__text", "Движок не отвечает: логер остановлен или перезапускается. Предыдущая сессия уже не пишется."),
-    el("div", "boot__hint", "Запустите ярлык logger.cmd заново — эта страница переподключится сама, как только движок поднимется."),
+    el("div", "boot__text", t("Движок не отвечает: логер остановлен или перезапускается. Предыдущая сессия уже не пишется.")),
+    el("div", "boot__hint", t("Запустите ярлык logger.cmd заново — эта страница переподключится сама, как только движок поднимется.")),
   );
   const actions = el("div", "row-actions");
   actions.style.justifyContent = "center";
   actions.style.marginTop = "14px";
-  const retry = el("button", "btn btn--primary", "переподключиться");
+  const retry = el("button", "btn btn--primary", t("переподключиться"));
   retry.type = "button";
   retry.addEventListener("click", () => location.reload());
   actions.append(retry);
@@ -267,10 +289,10 @@ function showBootError(message: string): void {
   const actions = el("div", "row-actions");
   actions.style.justifyContent = "center";
   actions.style.marginTop = "14px";
-  const retry = el("button", "btn btn--primary", "повторить подключение");
+  const retry = el("button", "btn btn--primary", t("повторить подключение"));
   retry.type = "button";
   retry.addEventListener("click", () => location.reload());
-  const demo = el("button", "btn", "открыть демо-режим");
+  const demo = el("button", "btn", t("открыть демо-режим"));
   demo.type = "button";
   demo.addEventListener("click", () => {
     const u = new URL(location.href);
@@ -283,14 +305,17 @@ function showBootError(message: string): void {
 }
 
 async function main(): Promise<void> {
+  localizeDom();
   build();
   installDropzone();
   await store.init();
   if (store.state.bootError) {
     showBootError(
       isDemoMode()
-        ? `демо-режим не загрузился: ${store.state.bootError}`
-        : `Движок не ответил: ${store.state.bootError}. Запустите ftdi-logger.exe (или scripts\\run.ps1) и нажмите «повторить».`,
+        ? t("демо-режим не загрузился: {msg}", { msg: errText(store.state.bootError) })
+        : t("Движок не ответил: {msg}. Запустите ftdi-logger.exe (или scripts\\run.ps1) и нажмите «повторить».", {
+            msg: errText(store.state.bootError),
+          }),
     );
     return;
   }
@@ -298,8 +323,3 @@ async function main(): Promise<void> {
 }
 
 void main();
-
-
-
-
-

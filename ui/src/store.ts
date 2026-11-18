@@ -1,6 +1,7 @@
 /** Состояние приложения и действия. Компоненты читают state и вызывают методы. */
 
 import { api, ApiError, isDemoMode, WsClient } from "./api";
+import { errText, msg, t } from "./i18n";
 import { demoCounts, demoEvents, demoJ2534Drivers, demoSession, demoSteps, demoUsbDevices } from "./demo";
 import { sound } from "./sound";
 import type {
@@ -85,16 +86,31 @@ const ALL_KINDS: EventKind[] = [
   "error",
 ];
 
-const DEFAULT_TITLES = [
-  "Идентификация",
-  "Чтение калибровок",
-  "Чтение фулл флеш",
-  "Запись калибровок",
-  "Запись фулл флеш",
-  "Сброс ошибок",
-  "Сброс адаптаций",
-  "Верификация",
-];
+msg({
+  "Идентификация": "Identification",
+  "Чтение калибровок": "Read calibrations",
+  "Чтение фулл флеш": "Read full flash",
+  "Запись калибровок": "Write calibrations",
+  "Запись фулл флеш": "Write full flash",
+  "Сброс ошибок": "Clear fault codes",
+  "Сброс адаптаций": "Reset adaptations",
+  "Верификация": "Verification",
+  "запись тюна": "tune write",
+});
+
+/** Пресеты действий по умолчанию — на текущем языке интерфейса. */
+function defaultTitles(): string[] {
+  return [
+    t("Идентификация"),
+    t("Чтение калибровок"),
+    t("Чтение фулл флеш"),
+    t("Запись калибровок"),
+    t("Запись фулл флеш"),
+    t("Сброс ошибок"),
+    t("Сброс адаптаций"),
+    t("Верификация"),
+  ];
+}
 
 function loadTitles(): string[] {
   try {
@@ -106,7 +122,7 @@ function loadTitles(): string[] {
   } catch {
     /* ignore */
   }
-  return [...DEFAULT_TITLES];
+  return defaultTitles();
 }
 
 function emptyCounts(): SessionCounts {
@@ -216,7 +232,7 @@ class Store {
       if (preferred) await this.selectSession(preferred);
       this.startPolling();
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : (e as Error).message;
+      const msg = e instanceof ApiError ? e.message : errText(e);
       this.state.bootError = msg;
       this.emit();
     }
@@ -296,11 +312,11 @@ class Store {
     this.state.total = events.length;
     this.state.wsState = "open";
     this.state.booted = true;
-    this.state.currentStep = { action: "start", idx: 3, title: "запись тюна", t: 108, wall: session.started_at };
+    this.state.currentStep = { action: "start", idx: 3, title: t("запись тюна"), t: 108, wall: session.started_at };
     this.state.stepStartEpoch = Date.now() - 132_000;
     this.startTicking();
     this.emit();
-    this.toast("info", "демо-режим: данные синтетические, устройство не требуется");
+    this.toast("info", t("демо-режим: данные синтетические, устройство не требуется"));
   }
 
   /** Только устройства (USB/COM/J2534) — дешёвый опрос, работает и во время записи. */
@@ -412,7 +428,7 @@ class Store {
             this.state.steps = this.state.steps.map((s) => (s.idx === summary.idx ? summary : s));
           }
           sound.stepEnd();
-          this.toast("ok", `шаг ${summary.idx} закрыт: ${summary.exchanges} обменов, ${summary.dur.toFixed(1)} с`);
+          this.toast("ok", t("шаг {n} закрыт: {exchanges} обменов, {dur} с", { n: summary.idx, exchanges: summary.exchanges, dur: summary.dur.toFixed(1) }));
         }
         this.emit();
         break;
@@ -433,7 +449,7 @@ class Store {
       this.state.sessions = await api.sessions();
       this.emit();
     } catch (e) {
-      this.toast("warn", `не удалось обновить список сессий: ${(e as Error).message}`);
+      this.toast("warn", t("не удалось обновить список сессий: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -468,7 +484,7 @@ class Store {
       this.ws?.subscribe(id, this.state.lastSeq + 1);
       this.emit();
     } catch (e) {
-      this.toast("error", `сессия не открылась: ${(e as Error).message}`);
+      this.toast("error", t("сессия не открылась: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -489,7 +505,7 @@ class Store {
       s.hasMoreBefore = from > 0;
       this.emit();
     } catch (e) {
-      this.toast("warn", `не удалось догрузить историю: ${(e as Error).message}`);
+      this.toast("warn", t("не удалось догрузить историю: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -569,14 +585,14 @@ class Store {
       this.state.tools = await api.tools(mode);
       this.emit();
     } catch (e) {
-      this.toast("warn", `список программ: ${(e as Error).message}`);
+      this.toast("warn", t("список программ: {msg}", { msg: errText(e) }));
     }
   }
 
   /** Прицепиться к PID вручную — универсальный путь, если драйвер не виден. */
   async attachPid(pid: number, label?: string): Promise<void> {
     if (!Number.isFinite(pid) || pid <= 0) {
-      this.toast("warn", "нужен корректный PID");
+      this.toast("warn", t("нужен корректный PID"));
       return;
     }
     const name = label?.trim() || `pid ${pid}`;
@@ -599,7 +615,7 @@ class Store {
       this.state.usbDevices = usb;
       this.state.j2534Drivers = j2534;
     } catch (e) {
-      this.toast("warn", `не удалось обновить устройства: ${(e as Error).message}`);
+      this.toast("warn", t("не удалось обновить устройства: {msg}", { msg: errText(e) }));
     } finally {
       this.state.loadingTargets = false;
       this.emit();
@@ -609,7 +625,7 @@ class Store {
   /** Сырой захват USB-шины через USBPcap (нужен драйвер + права администратора). */
   async startUsbpcap(device: string): Promise<void> {
     if (this.state.mode === "demo") {
-      this.toast("info", "демо-режим: USBPcap недоступен");
+      this.toast("info", t("демо-режим: USBPcap недоступен"));
       return;
     }
     try {
@@ -623,17 +639,17 @@ class Store {
       this.state.total = 0;
       this.state.currentStep = null;
       this.ws?.subscribe(meta.id, 0);
-      this.toast("ok", `сырой USB-захват: ${device}`);
+      this.toast("ok", t("сырой USB-захват: {device}", { device }));
       this.emit();
     } catch (e) {
-      this.toast("error", `USBPcap не запустился: ${(e as Error).message}`);
+      this.toast("error", t("USBPcap не запустился: {msg}", { msg: errText(e) }));
     }
   }
 
   /** «Новая сессия»: остановить текущую (если идёт), пересканировать всё окружение. */
   async newSession(): Promise<import("./types").NewSessionResult | null> {
     if (this.state.mode === "demo") {
-      this.toast("info", "демо-режим: новая сессия недоступна");
+      this.toast("info", t("демо-режим: новая сессия недоступна"));
       return null;
     }
     try {
@@ -646,7 +662,7 @@ class Store {
       if (res.stopped) {
         const st = res.stopped;
         this.state.sessions = this.state.sessions.map((s) => (s.id === st.id ? st : s));
-        this.toast("ok", `сессия ${st.id} завершена`);
+        this.toast("ok", t("сессия {id} завершена", { id: st.id }));
       }
       this.state.active = null;
       this.state.events = [];
@@ -664,14 +680,14 @@ class Store {
       this.emit();
       return res;
     } catch (e) {
-      this.toast("error", `новая сессия: ${(e as Error).message}`);
+      this.toast("error", t("новая сессия: {msg}", { msg: errText(e) }));
       return null;
     }
   }
 
   async attach(pid: number, label?: string, adapter?: string): Promise<void> {
     if (this.state.mode === "demo") {
-      this.toast("info", "демо-режим: attach недоступен");
+      this.toast("info", t("демо-режим: attach недоступен"));
       return;
     }
     try {
@@ -685,16 +701,16 @@ class Store {
       this.state.total = 0;
       this.state.currentStep = null;
       this.ws?.subscribe(meta.id, 0);
-      this.toast("ok", `захват запущен: ${meta.label}`);
+      this.toast("ok", t("захват запущен: {label}", { label: meta.label }));
       this.emit();
     } catch (e) {
-      this.toast("error", `attach не удался: ${(e as Error).message}`);
+      this.toast("error", t("attach не удался: {msg}", { msg: errText(e) }));
     }
   }
 
   async detach(): Promise<void> {
     if (this.state.mode === "demo") {
-      this.toast("info", "демо-режим: detach недоступен");
+      this.toast("info", t("демо-режим: detach недоступен"));
       return;
     }
     try {
@@ -704,27 +720,27 @@ class Store {
         if (this.state.active?.id === meta.id) this.state.active = meta;
       }
       this.state.currentStep = null;
-      this.toast("ok", "сессия остановлена, отчёт собран");
+      this.toast("ok", t("сессия остановлена, отчёт собран"));
       await this.refreshSessions();
     } catch (e) {
-      this.toast("error", `detach не удался: ${(e as Error).message}`);
+      this.toast("error", t("detach не удался: {msg}", { msg: errText(e) }));
     }
   }
 
   async hookctl(value: "pause" | "resume"): Promise<void> {
     if (this.state.mode === "demo") {
       if (this.state.status) this.state.status.hooks = value === "pause" ? "paused" : "on";
-      this.toast("info", value === "pause" ? "хуки сняты (демо)" : "хуки возвращены (демо)");
+      this.toast("info", value === "pause" ? t("хуки сняты (демо)") : t("хуки возвращены (демо)"));
       this.emit();
       return;
     }
     try {
       await api.hookctl(value);
       if (this.state.status) this.state.status.hooks = value === "pause" ? "paused" : "on";
-      this.toast(value === "pause" ? "warn" : "ok", value === "pause" ? "хуки сняты: повторите операцию" : "хуки возвращены");
+      this.toast(value === "pause" ? "warn" : "ok", value === "pause" ? t("хуки сняты: повторите операцию") : t("хуки возвращены"));
       this.emit();
     } catch (e) {
-      this.toast("error", `hookctl: ${(e as Error).message}`);
+      this.toast("error", t("hookctl: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -733,13 +749,13 @@ class Store {
   private defaultTitle(): string {
     const n = (this.state.steps.length || 0) + 1;
     const last = this.state.steps[this.state.steps.length - 1]?.title;
-    return last ? last : `шаг ${n}`;
+    return last ? last : t("шаг {n}", { n });
   }
 
   async startStep(title?: string): Promise<void> {
     const s = this.state;
     if (!s.active) {
-      this.toast("warn", "нет активной сессии — сначала подключитесь к программе");
+      this.toast("warn", t("нет активной сессии — сначала подключитесь к программе"));
       return;
     }
     const name = (title ?? "").trim() || this.defaultTitle();
@@ -764,7 +780,7 @@ class Store {
       s.currentStep = { action: "start", idx, title: name, t: 0, wall: ev.wall };
       s.stepStartEpoch = Date.now();
       sound.stepStart();
-      this.toast("ok", `шаг ${idx} открыт: ${name}`);
+      this.toast("ok", t("шаг {n} открыт: {title}", { n: idx, title: name }));
       this.emit();
       return;
     }
@@ -773,10 +789,10 @@ class Store {
       s.currentStep = st;
       s.stepStartEpoch = Date.now();
       sound.stepStart();
-      this.toast("ok", `шаг ${st.idx} открыт: ${name}`);
+      this.toast("ok", t("шаг {n} открыт: {title}", { n: st.idx, title: name }));
       this.emit();
     } catch (e) {
-      this.toast("error", `шаг не открылся: ${(e as Error).message}`);
+      this.toast("error", t("шаг не открылся: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -784,7 +800,7 @@ class Store {
     const s = this.state;
     if (!s.active) return;
     if (!s.currentStep) {
-      this.toast("warn", "нет открытого шага");
+      this.toast("warn", t("нет открытого шага"));
       return;
     }
     if (s.mode === "demo") {
@@ -818,7 +834,7 @@ class Store {
           api: "STEP",
           len: 0,
           hex: "",
-          text: `${cur.title} · ${summary.dur.toFixed(1)} с`,
+          text: t("{title} · {dur} с", { title: cur.title, dur: summary.dur.toFixed(1) }),
           step: cur.idx,
           raw: "",
           meta: null,
@@ -827,7 +843,7 @@ class Store {
       s.currentStep = null;
       s.stepStartEpoch = 0;
       sound.stepEnd();
-      this.toast("ok", `шаг ${cur.idx} закрыт`);
+      this.toast("ok", t("шаг {n} закрыт", { n: cur.idx }));
       this.emit();
       return;
     }
@@ -837,10 +853,10 @@ class Store {
       s.currentStep = null;
       s.stepStartEpoch = 0;
       sound.stepEnd();
-      this.toast("ok", `шаг ${summary.idx} закрыт: ${summary.exchanges} обменов`);
+      this.toast("ok", t("шаг {n} закрыт: {exchanges} обменов", { n: summary.idx, exchanges: summary.exchanges }));
       this.emit();
     } catch (e) {
-      this.toast("error", `шаг не закрылся: ${(e as Error).message}`);
+      this.toast("error", t("шаг не закрылся: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -868,35 +884,35 @@ class Store {
           meta: null,
         },
       ];
-      this.toast("ok", `метка: ${text}`);
+      this.toast("ok", t("метка: {text}", { text }));
       this.emit();
       return;
     }
     try {
       await api.mark(s.active.id, text);
-      this.toast("ok", `метка: ${text}`);
+      this.toast("ok", t("метка: {text}", { text }));
     } catch (e) {
-      this.toast("error", `метка не записалась: ${(e as Error).message}`);
+      this.toast("error", t("метка не записалась: {msg}", { msg: errText(e) }));
     }
   }
 
   async addNote(text: string): Promise<void> {
     const s = this.state;
     if (!s.active) return;
-    const t = text.trim();
-    if (!t) return;
+    const note = text.trim();
+    if (!note) return;
     if (s.mode === "demo") {
-      s.notes = [...s.notes, { t: 0, wall: new Date().toISOString(), text: t, author: "user" }];
+      s.notes = [...s.notes, { t: 0, wall: new Date().toISOString(), text: note, author: "user" }];
       this.emit();
       return;
     }
     try {
-      await api.note(s.active.id, t);
-      s.notes = [...s.notes, { t: 0, wall: new Date().toISOString(), text: t, author: "user" }];
-      this.toast("ok", "заметка сохранена");
+      await api.note(s.active.id, note);
+      s.notes = [...s.notes, { t: 0, wall: new Date().toISOString(), text: note, author: "user" }];
+      this.toast("ok", t("заметка сохранена"));
       this.emit();
     } catch (e) {
-      this.toast("error", `заметка не сохранилась: ${(e as Error).message}`);
+      this.toast("error", t("заметка не сохранилась: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -904,14 +920,14 @@ class Store {
     const s = this.state;
     if (!s.active) return;
     if (s.mode === "demo") {
-      this.toast("info", "демо-режим: скриншот недоступен");
+      this.toast("info", t("демо-режим: скриншот недоступен"));
       return;
     }
     try {
       const r = await api.shot(s.active.id);
-      this.toast("ok", `скриншот: ${r.path}`);
+      this.toast("ok", t("скриншот: {path}", { path: r.path }));
     } catch (e) {
-      this.toast("error", `скриншот не снят: ${(e as Error).message}`);
+      this.toast("error", t("скриншот не снят: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -926,7 +942,7 @@ class Store {
       seen.add(key);
       clean.push(t);
     }
-    this.state.quickTitles = clean.length ? clean.slice(0, 40) : [...DEFAULT_TITLES];
+    this.state.quickTitles = clean.length ? clean.slice(0, 40) : defaultTitles();
     try {
       localStorage.setItem("ftdi.quickTitles", JSON.stringify(this.state.quickTitles));
     } catch {
@@ -945,7 +961,7 @@ class Store {
 
   /** Вернуть стандартный набор пресетов. */
   resetQuickTitles(): void {
-    this.state.quickTitles = [...DEFAULT_TITLES];
+    this.state.quickTitles = defaultTitles();
     try {
       localStorage.setItem("ftdi.quickTitles", JSON.stringify(this.state.quickTitles));
     } catch {
@@ -960,15 +976,15 @@ class Store {
     const s = this.state;
     if (!s.active) return null;
     if (s.mode === "demo") {
-      this.toast("info", "демо-режим: экспорт недоступен");
+      this.toast("info", t("демо-режим: экспорт недоступен"));
       return null;
     }
     try {
       const r = await api.exportSession(s.active.id, format);
-      this.toast("ok", `готово: ${r.path}`);
+      this.toast("ok", t("готово: {path}", { path: r.path }));
       return r.path;
     } catch (e) {
-      this.toast("error", `экспорт не удался: ${(e as Error).message}`);
+      this.toast("error", t("экспорт не удался: {msg}", { msg: errText(e) }));
       return null;
     }
   }
@@ -978,9 +994,9 @@ class Store {
     if (!s.active || !url.trim()) return;
     try {
       await api.share(s.active.id, url.trim());
-      this.toast("ok", "лог отправлен на сервер");
+      this.toast("ok", t("лог отправлен на сервер"));
     } catch (e) {
-      this.toast("error", `отправка не удалась: ${(e as Error).message}`);
+      this.toast("error", t("отправка не удалась: {msg}", { msg: errText(e) }));
     }
   }
 
@@ -1002,18 +1018,18 @@ class Store {
   /** Импорт файла, выбранного или перетащенного в окно (путь браузер не отдаёт). */
   async importUpload(file: File): Promise<void> {
     if (this.state.mode === "demo") {
-      this.toast("info", "демо-режим: импорт недоступен");
+      this.toast("info", t("демо-режим: импорт недоступен"));
       return;
     }
     try {
-      this.toast("info", `импортирую ${file.name}…`);
+      this.toast("info", t("импортирую {name}…", { name: file.name }));
       const bytes = await file.arrayBuffer();
       const r = await api.importUpload(file.name, bytes);
-      this.toast("ok", "лог импортирован, переразбор готов");
+      this.toast("ok", t("лог импортирован, переразбор готов"));
       await this.refreshSessions();
       await this.selectSession(r.session_id);
     } catch (e) {
-      this.toast("error", `импорт не удался: ${(e as Error).message}`);
+      this.toast("error", t("импорт не удался: {msg}", { msg: errText(e) }));
     }
   }
 }

@@ -1,5 +1,12 @@
 /** Форматирование значений для ленты и инспектора. */
 
+import { getLang } from "./i18n";
+
+/** Локаль чисел и дат — по языку интерфейса. */
+function loc(): string {
+  return getLang() === "en" ? "en-GB" : "ru-RU";
+}
+
 export function fmtTime(t: number): string {
   const sign = t < 0 ? "-" : "+";
   const v = Math.abs(t);
@@ -11,10 +18,10 @@ export function fmtTime(t: number): string {
 
 export function fmtDurationSeconds(s: number): string {
   if (!isFinite(s) || s < 0) return "—";
-  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)} с`;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)} s`;
   const m = Math.floor(s / 60);
   const rest = s - m * 60;
-  return `${m} мин ${rest.toFixed(0).padStart(2, "0")} с`;
+  return `${m} min ${rest.toFixed(0).padStart(2, "0")} s`;
 }
 
 export function fmtClock(seconds: number): string {
@@ -41,14 +48,14 @@ export function fmtBytesShort(n: number): string {
 }
 
 export function fmtNum(n: number): string {
-  return n.toLocaleString("ru-RU");
+  return n.toLocaleString(loc());
 }
 
 export function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleString("ru-RU", {
+  return d.toLocaleString(loc(), {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -60,7 +67,7 @@ export function fmtTimeOnly(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString(loc(), { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 export function wallToEpoch(iso: string | null | undefined): number {

@@ -12,6 +12,36 @@ import { eventPreview, fmtBytes, fmtTime, kindClass, kindLabel } from "../format
 import { store } from "../store";
 import { emptyDeltaState, extendDeltaMap, type DeltaState } from "../traffic-core";
 import type { Event, EventKind } from "../types";
+import { msg, t } from "../i18n";
+
+msg({
+  "Интервал между записями обмена в загруженном логе":
+    "Interval between exchange records in the loaded log",
+  "показать/скрыть {label}": "show/hide {label}",
+  "фильтр по hex, api, тексту…": "filter by hex, api, text…",
+  "сбросить поиск": "reset search",
+  "МОНИТОР ОБМЕНА": "EXCHANGE MONITOR",
+  "Поток событий": "Event stream",
+  "Поиск по событиям": "Search events",
+  "Время": "Time",
+  "Тип": "Type",
+  "Вызов / данные": "Call / data",
+  "Байт": "Bytes",
+  "Δ обмена": "Δ interval",
+  "↓ {n} новых": "↓ {n} new",
+  "{shown} · всего {total}": "{shown} · total {total}",
+  "Поток пуст": "The stream is empty",
+  "Выберите программу на FTDI в левой колонке и нажмите «подключить». Поток обмена появится здесь.":
+    "Pick an FTDI program in the left column and press \"attach\". The exchange stream will appear here.",
+  "Ничего не найдено": "Nothing found",
+  "Под фильтры и поиск не подходит ни одно событие.": "No event matches the filters and the search.",
+  "Ожидание обмена": "Waiting for traffic",
+  "Захват поднят, хуки на месте. Сделайте действие в программе — строки появятся автоматически.":
+    "Capture is up and hooks are in place. Do an action in the tool — rows will appear automatically.",
+  "ШАГ {n} · ": "STEP {n} · ",
+  "мс": "ms",
+  "с": "s",
+});
 
 /** Высота строки и запас виртуализации — как в референсе. */
 const ROW_H = 34;
@@ -33,12 +63,12 @@ const GROUPS: FilterGroup[] = [
   { id: "err", label: "ERR", kinds: ["error"] },
 ];
 
-const DELTA_HINT = "Интервал между записями обмена в загруженном логе";
+const DELTA_HINT = t("Интервал между записями обмена в загруженном логе");
 
 /** Мс → «50 мс» / «1.25 с»; хвостовые нули не показываем. */
 function fmtDelta(ms: number): string {
-  if (ms < 1000) return `${trimZeros(ms.toFixed(2))} мс`;
-  return `${trimZeros((ms / 1000).toFixed(3))} с`;
+  if (ms < 1000) return `${trimZeros(ms.toFixed(2))} ${t("мс")}`;
+  return `${trimZeros((ms / 1000).toFixed(3))} ${t("с")}`;
 }
 
 function trimZeros(s: string): string {
@@ -86,16 +116,16 @@ export class Stream {
       chip.dataset.group = g.id;
       chip.append(el("span", "chip__dot"), document.createTextNode(g.label));
       chip.addEventListener("click", () => this.toggleGroup(g));
-      chip.title = `показать/скрыть ${g.label}`;
+      chip.title = t("показать/скрыть {label}", { label: g.label });
       this.chips.append(chip);
     }
 
     const search = el("div", "search");
     this.search = el("input");
     this.search.type = "search";
-    this.search.placeholder = "фильтр по hex, api, тексту…";
+    this.search.placeholder = t("фильтр по hex, api, тексту…");
     this.search.spellcheck = false;
-    const clear = iconButton("close", "сбросить поиск", () => {
+    const clear = iconButton("close", t("сбросить поиск"), () => {
       this.search.value = "";
       store.setQuery("");
     }, "search__clear");
@@ -121,11 +151,11 @@ export class Stream {
 
     this.viewport.append(this.canvas, this.empty, this.pill);
     this.heading = el("header", "stream-heading");
-    this.heading.append(el("span", "eyebrow", "МОНИТОР ОБМЕНА"), el("h1", "", "Поток событий"));
-    this.search.setAttribute("aria-label", "Поиск по событиям");
+    this.heading.append(el("span", "eyebrow", t("МОНИТОР ОБМЕНА")), el("h1", "", t("Поток событий")));
+    this.search.setAttribute("aria-label", t("Поиск по событиям"));
 
     const columns = el("div", "stream-columns");
-    const columnLabels = ["Время", "Тип", "Вызов / данные", "Байт", "Δ обмена"];
+    const columnLabels = [t("Время"), t("Тип"), t("Вызов / данные"), t("Байт"), t("Δ обмена")];
     for (let i = 0; i < columnLabels.length; i++) {
       const span = el("span", "", columnLabels[i]);
       // Подсказка у нового заголовка: Δ — интервал в логе, а не время ответа ЭБУ.
@@ -166,7 +196,7 @@ export class Stream {
 
     this.pill.hidden = s.pendingNew === 0 || s.follow;
     if (!this.pill.hidden) {
-      this.pill.textContent = `↓ ${s.pendingNew} новых`;
+      this.pill.textContent = t("↓ {n} новых", { n: s.pendingNew });
     }
 
     if (!changed) {
@@ -185,7 +215,7 @@ export class Stream {
     this.canvas.style.height = `${this.vis.length * ROW_H}px`;
     void this.canvas.offsetHeight; // сброс layout: дальше scrollTop считается по новой высоте
     this.stat.textContent = s.active
-      ? `${this.vis.length === s.events.length ? s.events.length : `${this.vis.length} из ${s.events.length}`} · всего ${s.total}`
+      ? t("{shown} · всего {total}", { shown: this.vis.length === s.events.length ? s.events.length : `${this.vis.length} из ${s.events.length}`, total: s.total })
       : "";
     this.updateChips();
     this.renderEmpty();
@@ -234,18 +264,18 @@ export class Stream {
     this.empty.replaceChildren();
     if (!s.active) {
       this.empty.append(
-        title("Поток пуст"),
-        p("Выберите программу на FTDI в левой колонке и нажмите «подключить». Поток обмена появится здесь."),
+        title(t("Поток пуст")),
+        p(t("Выберите программу на FTDI в левой колонке и нажмите «подключить». Поток обмена появится здесь.")),
       );
       return;
     }
     if (s.events.length > 0) {
-      this.empty.append(title("Ничего не найдено"), p("Под фильтры и поиск не подходит ни одно событие."));
+      this.empty.append(title(t("Ничего не найдено")), p(t("Под фильтры и поиск не подходит ни одно событие.")));
       return;
     }
     this.empty.append(
-      title("Ожидание обмена"),
-      p("Захват поднят, хуки на месте. Сделайте действие в программе — строки появятся автоматически."),
+      title(t("Ожидание обмена")),
+      p(t("Захват поднят, хуки на месте. Сделайте действие в программе — строки появятся автоматически.")),
     );
   }
 
@@ -318,7 +348,7 @@ export class Stream {
       "span",
       "row__text",
       ev.kind === "step_start" || ev.kind === "step_end"
-        ? `${ev.step ? `ШАГ ${ev.step} · ` : ""}${eventPreview(ev)}`
+        ? `${ev.step ? t("ШАГ {n} · ", { n: ev.step }) : ""}${eventPreview(ev)}`
         : eventPreview(ev),
     );
     main.append(api, text);

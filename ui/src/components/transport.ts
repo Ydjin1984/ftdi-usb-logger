@@ -12,6 +12,44 @@ import { el, icon } from "../dom";
 import { fmtBytes, fmtClock, fmtNum } from "../format";
 import { store } from "../store";
 import { openExportDialog, openMarkPrompt, openStopConfirm, openTemplatesDialog } from "./dialogs";
+import { msg, t } from "../i18n";
+
+msg({
+  "сессия": "session",
+  "пресеты действий: добавить, удалить, вернуть стандартные":
+    "action presets: add, remove, restore defaults",
+  "Настроить быстрые действия": "Configure quick actions",
+  "пресеты действий: выберите — шаг откроется (предыдущий закроется). Шестерёнка — редактировать список":
+    "action presets: pick one to open a step (the previous one closes). The gear edits the list",
+  "Пауза": "Pause",
+  "Продолжить": "Resume",
+  "пауза хуков": "hooks paused",
+  "Экспорт": "Export",
+  "экспорт сессии": "export session",
+  "Метка": "Mark",
+  "метка в потоке": "mark in the stream",
+  "Снимок": "Shot",
+  "скриншот окна": "window screenshot",
+  "Стоп": "Stop",
+  "остановить сессию": "stop the session",
+  "Импорт": "Import",
+  "импорт старого лога": "import an old log",
+  "шаг {n} · {title}": "step {n} · {title}",
+  "сессия идёт": "recording",
+  "ожидание": "idle",
+  "Завершить шаг": "End step",
+  "Новый шаг": "New step",
+  "закрыть шаг и собрать сводку (F2)": "close the step and collect a summary (F2)",
+  "открыть шаг с автоназванием (F2); Shift+F2 — с названием":
+    "open a step with an automatic name (F2); Shift+F2 for a manual name",
+  "следующее действие…": "next action…",
+  "быстрое действие…": "quick action…",
+  "нет сессии": "no session",
+  "вернуть хуки (F6)": "restore hooks (F6)",
+  "снять хуки на время операции (F6)": "remove hooks for the operation (F6)",
+  "Продолжить запись": "Resume recording",
+  "Пауза записи": "Pause recording",
+});
 
 export class Transport {
   el: HTMLElement;
@@ -32,7 +70,7 @@ export class Transport {
     const timer = el("div", "transport__group transport__timer");
     this.rec = el("div", "rec");
     const timerText = el("div");
-    this.timerLabel = el("div", "transport__timer-label", "сессия");
+    this.timerLabel = el("div", "transport__timer-label", t("сессия"));
     this.timerValue = el("div", "transport__timer-value", "00:00");
     timerText.append(this.timerLabel, this.timerValue);
     timer.append(this.rec, timerText);
@@ -46,8 +84,8 @@ export class Transport {
     // Шестерёнка — редактор списка быстрых действий (была справа от комбо).
     const presetEdit = el("button", "btn btn--icon");
     presetEdit.type = "button";
-    presetEdit.title = "пресеты действий: добавить, удалить, вернуть стандартные";
-    presetEdit.setAttribute("aria-label", "Настроить быстрые действия");
+    presetEdit.title = t("пресеты действий: добавить, удалить, вернуть стандартные");
+    presetEdit.setAttribute("aria-label", t("Настроить быстрые действия"));
     presetEdit.append(icon("settings"));
     presetEdit.addEventListener("click", () => openTemplatesDialog());
 
@@ -57,8 +95,9 @@ export class Transport {
     this.stepBtn.replaceChildren(icon("step"));
 
     this.presetSel = el("select", "transport__preset");
-    this.presetSel.title =
-      "пресеты действий: выберите — шаг откроется (предыдущий закроется). Шестерёнка — редактировать список";
+    this.presetSel.title = t(
+      "пресеты действий: выберите — шаг откроется (предыдущий закроется). Шестерёнка — редактировать список",
+    );
     this.presetSel.addEventListener("change", () => void this.applyPreset());
 
     steps.append(presetEdit, this.stepBtn, this.presetSel);
@@ -67,21 +106,21 @@ export class Transport {
     /* ── 3. Действия — ровно в порядке ТЗ, с видимым текстом ─────────────── */
     const actions = el("div", "transport__actions");
 
-    this.pauseBtn = this.action("Пауза", "пауза хуков", "F6", "pause", () => {
+    this.pauseBtn = this.action(t("Пауза"), t("пауза хуков"), "F6", "pause", () => {
       const paused = store.state.status?.hooks === "paused";
       void store.hookctl(paused ? "resume" : "pause");
     });
 
-    const exportBtn = this.action("Экспорт", "экспорт сессии", "Ctrl+E", "download", () => openExportDialog());
+    const exportBtn = this.action(t("Экспорт"), t("экспорт сессии"), "Ctrl+E", "download", () => openExportDialog());
     exportBtn.classList.add("btn--primary");
 
     actions.append(
-      this.action("Метка", "метка в потоке", "F5", "mark", () => openMarkPrompt()),
+      this.action(t("Метка"), t("метка в потоке"), "F5", "mark", () => openMarkPrompt()),
       this.pauseBtn,
-      this.action("Снимок", "скриншот окна", "F8", "camera", () => void store.shot()),
-      this.action("Стоп", "остановить сессию", "Esc", "stop", () => openStopConfirm()),
+      this.action(t("Снимок"), t("скриншот окна"), "F8", "camera", () => void store.shot()),
+      this.action(t("Стоп"), t("остановить сессию"), "Esc", "stop", () => openStopConfirm()),
       exportBtn,
-      this.action("Импорт", "импорт старого лога", "Ctrl+O", "upload", () => void store.importLog()),
+      this.action(t("Импорт"), t("импорт старого лога"), "Ctrl+O", "upload", () => void store.importLog()),
     );
     this.el.append(actions);
 
@@ -110,7 +149,7 @@ export class Transport {
     this.presetSel.value = "";
     if (!value) return;
     if (!store.state.active) {
-      store.toast("warn", "нет активной сессии — сначала подключитесь к программе");
+      store.toast("warn", t("нет активной сессии — сначала подключитесь к программе"));
       return;
     }
     if (store.state.currentStep) await store.endStep();
@@ -127,10 +166,10 @@ export class Transport {
     const seconds = base ? (s.tick - base) / 1000 : 0;
     this.timerValue.textContent = base ? fmtClock(seconds) : "00:00";
     this.timerLabel.textContent = stepOpen
-      ? `шаг ${s.currentStep?.idx} · ${s.currentStep?.title ?? ""}`.slice(0, 42)
+      ? t("шаг {n} · {title}", { n: s.currentStep?.idx ?? 0, title: s.currentStep?.title ?? "" }).slice(0, 42)
       : recording
-        ? "сессия идёт"
-        : "ожидание";
+        ? t("сессия идёт")
+        : t("ожидание");
     this.rec.classList.toggle("rec--on", recording && !stepOpen);
     this.rec.classList.toggle("rec--step", stepOpen);
     if (stepOpen) {
@@ -163,13 +202,13 @@ export class Transport {
 
       this.stepBtn.replaceChildren(
         icon(stepOpen ? "stepStop" : "step"),
-        document.createTextNode(stepOpen ? "Завершить шаг" : "Новый шаг"),
+        document.createTextNode(stepOpen ? t("Завершить шаг") : t("Новый шаг")),
       );
       this.stepBtn.classList.toggle("is-open", stepOpen);
       this.stepBtn.disabled = !s.active;
       this.stepBtn.title = stepOpen
-        ? "закрыть шаг и собрать сводку (F2)"
-        : "открыть шаг с автоназванием (F2); Shift+F2 — с названием";
+        ? t("закрыть шаг и собрать сводку (F2)")
+        : t("открыть шаг с автоназванием (F2); Shift+F2 — с названием");
 
       // Комбо пресетов: строится из сохранённого списка.
       const current = this.presetSel.value;
@@ -178,9 +217,9 @@ export class Transport {
       placeholder.value = "";
       placeholder.textContent = s.active
         ? stepOpen
-          ? "следующее действие…"
-          : "быстрое действие…"
-        : "нет сессии";
+          ? t("следующее действие…")
+          : t("быстрое действие…")
+        : t("нет сессии");
       this.presetSel.append(placeholder);
       for (const title of s.quickTitles) {
         const o = el("option");
@@ -194,10 +233,10 @@ export class Transport {
       const paused = s.status?.hooks === "paused";
       this.pauseBtn.replaceChildren(
         icon(paused ? "play" : "pause"),
-        document.createTextNode(paused ? "Продолжить" : "Пауза"),
+        document.createTextNode(paused ? t("Продолжить") : t("Пауза")),
       );
-      this.pauseBtn.title = paused ? "вернуть хуки (F6)" : "снять хуки на время операции (F6)";
-      this.pauseBtn.setAttribute("aria-label", paused ? "Продолжить запись" : "Пауза записи");
+      this.pauseBtn.title = paused ? t("вернуть хуки (F6)") : t("снять хуки на время операции (F6)");
+      this.pauseBtn.setAttribute("aria-label", paused ? t("Продолжить запись") : t("Пауза записи"));
       this.pauseBtn.classList.toggle("is-open", paused);
       this.pauseBtn.disabled = !recording || !s.status?.bridge;
     }

@@ -18,6 +18,12 @@ import type {
   StepSummary,
   ToolProcess,
 } from "./types";
+import { msg, t } from "./i18n";
+
+msg({
+  "движок недоступен: {msg}": "engine is unavailable: {msg}",
+  "отчёт: HTTP {status}": "report: HTTP {status}",
+});
 
 export class ApiError extends Error {
   status: number;
@@ -44,7 +50,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
     });
   } catch (e) {
-    throw new ApiError(`движок недоступен: ${(e as Error).message}`);
+    throw new ApiError(t("движок недоступен: {msg}", { msg: (e as Error).message }));
   }
   const text = await res.text();
   let body: unknown = null;
@@ -93,7 +99,7 @@ export const api = {
     const res = await fetch(
       ENGINE_OVERRIDE + `/api/sessions/${encodeURIComponent(id)}/report?format=${format}`,
     );
-    if (!res.ok) throw new ApiError(`отчёт: HTTP ${res.status}`, res.status);
+    if (!res.ok) throw new ApiError(t("отчёт: HTTP {status}", { status: res.status }), res.status);
     return res.text();
   },
   decode: (id: string, seq: number) =>
@@ -143,7 +149,7 @@ export const api = {
         body: bytes,
       });
     } catch (e) {
-      throw new ApiError(`движок недоступен: ${(e as Error).message}`);
+      throw new ApiError(t("движок недоступен: {msg}", { msg: (e as Error).message }));
     }
     if (!res.ok) {
       let msg = `HTTP ${res.status}`;

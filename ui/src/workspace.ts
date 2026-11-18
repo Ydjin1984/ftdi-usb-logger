@@ -11,6 +11,15 @@
  */
 
 import { el } from "./dom";
+import { msg, t } from "./i18n";
+
+msg({
+  "ширина левой панели": "left panel width",
+  "потяните или используйте стрелки ←/→, Home/End": "drag it or use ←/→, Home/End",
+  "скрыть или показать левую панель": "hide or show the left panel",
+  "› Показать панель": "› Show panel",
+  "‹ Скрыть панель": "‹ Hide panel",
+});
 
 const STORAGE_KEY = "ftdi.rail.v1";
 const RAIL_ID = "session-rail";
@@ -57,13 +66,13 @@ export class Workspace {
     this.el.setAttribute("role", "separator");
     this.el.setAttribute("aria-orientation", "vertical");
     this.el.setAttribute("aria-controls", RAIL_ID);
-    this.el.setAttribute("aria-label", "ширина левой панели");
-    this.el.title = "потяните или используйте стрелки ←/→, Home/End";
+    this.el.setAttribute("aria-label", t("ширина левой панели"));
+    this.el.title = t("потяните или используйте стрелки ←/→, Home/End");
 
     this.toggle = el("button", "btn rail-toggle");
     this.toggle.type = "button";
     this.toggle.setAttribute("aria-controls", RAIL_ID);
-    this.toggle.title = "скрыть или показать левую панель";
+    this.toggle.title = t("скрыть или показать левую панель");
     this.toggle.addEventListener("click", () => this.setHidden(!this.hidden));
     const brand = topbar.querySelector(".brand");
     if (brand) brand.after(this.toggle);
@@ -165,7 +174,7 @@ export class Workspace {
   }
 
   private syncToggle(): void {
-    this.toggle.textContent = this.hidden ? "› Показать панель" : "‹ Скрыть панель";
+    this.toggle.textContent = this.hidden ? t("› Показать панель") : t("‹ Скрыть панель");
     this.toggle.setAttribute("aria-expanded", String(!this.hidden));
   }
 
