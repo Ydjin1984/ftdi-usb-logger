@@ -115,6 +115,12 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     if let Some(proto) = protocol_summary(meta) {
         out.push_str(&format!("  протокол: {proto}\n"));
     }
+    if meta.counts.net_bytes > 0 {
+        out.push_str(&format!(
+            "  сеть (не шина): {} B, TX {} / RX {} событий\n",
+            meta.counts.net_bytes, meta.counts.net_tx, meta.counts.net_rx
+        ));
+    }
     if meta.counts.untracked_channels > 0 {
         out.push_str(&format!(
             "  каналов без PassThruConnect: {} (не ошибка — см. docs/12 §10)\n",
@@ -197,7 +203,9 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     }
 
     if steps.is_empty() {
-        out.push_str(&format!("{DASH}\n  шагов нет: сессия без размеченных обменов\n"));
+        out.push_str(&format!(
+            "{DASH}\n  шагов нет: границы обмена не размечены (отрезки — в фактах `# обмен …`)\n"
+        ));
     }
 
     for step in steps {
@@ -452,6 +460,17 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         if let Some(proto) = protocol_summary(meta) {
             rows.push(("Протокол".into(), proto));
         }
+        // Сеть — отдельной строкой: в `TX/RX` она не входит, но и молчать о ней
+        // нельзя — иначе непонятно, куда делись 922 байта из общего числа событий.
+        if meta.counts.net_bytes > 0 {
+            rows.push((
+                "Сеть (не шина), байт".into(),
+                format!(
+                    "{} (TX {} / RX {})",
+                    meta.counts.net_bytes, meta.counts.net_tx, meta.counts.net_rx
+                ),
+            ));
+        }
         if meta.counts.untracked_channels > 0 {
             rows.push((
                 "Каналов без Connect".into(),
@@ -490,22 +509,34 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         out.push('\n');
     }
 
-    out.push_str("## Сводная схема шагов\n\n```mermaid\nflowchart TD\n");
-    out.push_str("    Start([Старт сессии])\n");
-    let mut prev = "Start".to_string();
-    for step in steps {
-        let node = format!("S{}", step.idx);
-        let label = format!(
-            "Шаг {}: {}<br/>{:.1} с · TX {} / {} B",
-            step.idx, step.title, step.dur, step.exchanges, step.tx_bytes
+    if steps.is_empty() {
+        // Пустая схема `Start --> End` — не «нет данных», а мусор: в логе
+        // 20261119-181253 она ничего не говорила про две попытки обмена с
+        // паузой 22.5 с. Отрезки считаются по фактам (`# обмен …`).
+        out.push_str("## Обмен\n\n");
+        out.push_str(
+            "Шагов приложение не размечает — схема не строится. Границы обмена видны \
+             по паузам: факты `# обмен …` в разделе «Факты окружения» (сколько было \
+             отрезков, их время и объём, паузы между ними).\n\n",
         );
-        out.push_str(&format!("    {node}[\"{}\"]\n", mermaid_label(&label)));
-        out.push_str(&format!("    {prev} --> {node}\n"));
-        prev = node;
+    } else {
+        out.push_str("## Сводная схема шагов\n\n```mermaid\nflowchart TD\n");
+        out.push_str("    Start([Старт сессии])\n");
+        let mut prev = "Start".to_string();
+        for step in steps {
+            let node = format!("S{}", step.idx);
+            let label = format!(
+                "Шаг {}: {}<br/>{:.1} с · TX {} / {} B",
+                step.idx, step.title, step.dur, step.exchanges, step.tx_bytes
+            );
+            out.push_str(&format!("    {node}[\"{}\"]\n", mermaid_label(&label)));
+            out.push_str(&format!("    {prev} --> {node}\n"));
+            prev = node;
+        }
+        out.push_str("    End([Финиш])\n");
+        out.push_str(&format!("    {prev} --> End\n"));
+        out.push_str("```\n\n");
     }
-    out.push_str("    End([Финиш])\n");
-    out.push_str(&format!("    {prev} --> End\n"));
-    out.push_str("```\n\n");
 
     out.push_str("## Итоги\n\n| Метрика | Значение |\n|---|---|\n");
     // См. render_text: без шагов объём считаем по счётчикам сессии, иначе
@@ -559,9 +590,8 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     }
     out.push('\n');
 
-    if steps.is_empty() {
-        out.push_str("## Шаги\n\nШагов нет.\n");
-    }
+    // Пустой раздел «## Шаги / Шагов нет» дублировал «## Обмен» выше: если
+    // шагов нет, о них уже сказано там.
 
     for step in steps {
         out.push_str(&format!("## Шаг {} — {}\n\n", step.idx, step.title));

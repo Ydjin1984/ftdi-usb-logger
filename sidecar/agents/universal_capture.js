@@ -2258,6 +2258,7 @@ const LAN_MODULE_RE = /^ws2_32\.dll$/i;
 const LAN_SWEEP_MS = 200;
 let lanHooked = false, lanSeen = false, lanPeerFn = null, lanLocalFn = null, lanSweepTimer = null;
 let lanIdleClosed = 0;   // сокеты, закрытые без обмена: считаем, но не логируем построчно
+let lanBogusCounts = 0;  // счётчики байт, которым нельзя верить (см. lanEmitBufs)
 const lanSocks = {};   // fd -> { key, fd, l4, local, remote, bytesIn, bytesOut, reads, writes }
 const lanOvl = {};     // "fd|overlapped" -> { ent, bufs, t, ovl }
 
@@ -2340,6 +2341,22 @@ function lanBufs(arr, count) {
 }
 
 function lanEmitBufs(dir, ent, bufs, total) {
+  // Счётчик от драйвера больше самого буфера — это не «принятые байты», а мусор
+  // в OVERLAPPED.InternalHigh (операция завершилась ошибкой/отменой, а поле
+  // осталось от прошлой передачи). В логе 20261119-181253 так «принялось»
+  // 841 B неинициализированной памяти, из которых полезных было 2 байта — и
+  // эти 841 B ушли в RX сессии. Лучше не записать событие, чем записать чужую
+  // память под видом данных с шины.
+  const cap = sumBufs(bufs);
+  if (cap > 0 && total > cap) {
+    lanBogusCounts++;
+    if (lanBogusCounts === 1 || lanBogusCounts % 32 === 0) {
+      log('LAN WARN ' + (ent ? ent.l4 : '?') + ' ' + dir + ' len=' + total + ' > буфер ' + cap +
+        ' — не принятые байты (операция без успешного статуса), событие пропущено; всего таких ' +
+        lanBogusCounts);
+    }
+    return;
+  }
   let left = total;
   for (let i = 0; i < bufs.length && left > 0; i++) {
     const take = Math.min(left, bufs[i].len);
@@ -2360,9 +2377,14 @@ function lanSweep() {
       const e = lanOvl[key];
       if (!e) continue;
       if (ovlInternal({ ovl: e.ovl }) !== OVL_STATUS_PENDING) {
+        // InternalHigh — счётчик байт только при успешном статусе. У отменённой
+        // или упавшей операции там остаётся значение прошлой передачи, и именно
+        // оттуда в лог ушли 841 B «RX» из чужой памяти.
+        const status = ovlInternal({ ovl: e.ovl });
         const n = ovlInternalHigh({ ovl: e.ovl });
         delete lanOvl[key];
-        if (n > 0) lanEmitBufs('RX', e.ent, e.bufs, n);
+        const ok = typeof status === 'number' && (status & 0xC0000000) === 0;
+        if (ok && n > 0) lanEmitBufs('RX', e.ent, e.bufs, n);
         continue;
       }
       if (now - e.t > 30000) delete lanOvl[key];
@@ -2602,7 +2624,9 @@ function hookLanModule(mod) {
       const e = lanOvl[key];
       if (!e) return;
       delete lanOvl[key];
-      const got = u32(this.pLen) || ovlInternalHigh({ ovl: this.ovl });
+      // Только `*lpcbTransfer`: winsock заполняет его при успехе. Фолбэк на
+      // InternalHigh давал «байты» из старого OVERLAPPED (см. lanEmitBufs).
+      const got = u32(this.pLen);
       if (got > 0) lanEmitBufs('RX', e.ent, e.bufs, got);
     })
   })) n++;

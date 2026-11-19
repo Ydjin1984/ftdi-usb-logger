@@ -27,6 +27,7 @@ fn sample_meta() -> SessionMeta {
         empty_polls: 0,
         untracked_channels: 0,
         protocols: Default::default(),
+        ..Default::default()
     };
     meta
 }
@@ -179,8 +180,10 @@ fn empty_session_report_has_no_phase_but_valid_header() {
     assert!(txt.contains("СЕССИЯ пустая"));
     assert!(txt.contains("шагов нет"));
     let md = report::render_markdown(&meta, &[]);
-    assert!(md.contains("flowchart TD"));
-    assert!(md.contains("Шагов нет"));
+    // Схема из «Старт → Финиш» без шагов — не информация, а заглушка.
+    assert!(!md.contains("```mermaid"), "{md}");
+    assert!(md.contains("## Обмен"), "{md}");
+    assert!(md.contains("схема не строится"), "{md}");
 }
 
 #[test]
@@ -203,6 +206,7 @@ fn bulk_session_without_steps_reports_counts_not_zeros() {
         empty_polls: 0,
         untracked_channels: 3,
         protocols: [("0x8003".to_string(), 11096u64)].into_iter().collect(),
+        ..Default::default()
     };
 
     let txt = report::render_text(&meta, &[]);
@@ -219,4 +223,37 @@ fn bulk_session_without_steps_reports_counts_not_zeros() {
     assert!(md.contains("| Каналов без Connect | 3 |"), "{md}");
     // Ошибок нет — chan-miss в них не попадает.
     assert!(md.contains("| Ошибок | 0 |"), "{md}");
+    // Без шагов пустая Mermaid-схема `Start --> End` только путала.
+    assert!(!md.contains("```mermaid"), "схема без шагов не строится:\n{md}");
+    assert!(md.contains("## Обмен"), "{md}");
+    // Сети не было — строки тоже нет.
+    assert!(!md.contains("Сеть (не шина)"), "{md}");
+}
+
+#[test]
+fn net_traffic_is_reported_separately_from_bus() {
+    // 20261119-181253: 922 B HTTP-пробы в общем счёте RX — больше половины.
+    let mut meta = SessionMeta::new("net-1", "pcmflash");
+    meta.status = "finished".into();
+    meta.transport = "j2534".into();
+    meta.counts = SessionCounts {
+        events: 457,
+        tx: 110,
+        rx: 220,
+        tx_bytes: 8101,
+        rx_bytes: 784,
+        net_rx: 44,
+        net_bytes: 922,
+        ..Default::default()
+    };
+
+    let md = report::render_markdown(&meta, &[]);
+    assert!(md.contains("| RX, байт | 784 |"), "RX шины без сети:\n{md}");
+    assert!(
+        md.contains("| Сеть (не шина), байт | 922 (TX 0 / RX 44) |"),
+        "{md}"
+    );
+
+    let txt = report::render_text(&meta, &[]);
+    assert!(txt.contains("сеть (не шина): 922 B, TX 0 / RX 44"), "{txt}");
 }

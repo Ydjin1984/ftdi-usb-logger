@@ -348,3 +348,36 @@ fn protocols_are_counted_from_tx() {
     assert_eq!(meta.counts.protocols.get("0x8003"), Some(&3));
     assert_eq!(meta.counts.protocols.get("0x8005"), Some(&1));
 }
+
+#[test]
+fn lan_bytes_do_not_count_as_bus_rx() {
+    // Лог 20261119-181253: HTTP-проба лицензии (45.132.18.119:80) шла через тот
+    // же захват, и её 922 B попадали в «RX шины» — больше половины от 1706 B.
+    // Теперь сеть считается отдельно и в TX/RX адаптера не входит.
+    let td = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(td.path()).unwrap();
+    let mut w = store.create(SessionMeta::new("lan-mix", "pcmflash")).unwrap();
+    let mut bus_tx = tx(1.0, "00 03 80 e1 01");
+    bus_tx.transport = Transport::J2534;
+    let mut bus_rx = rx(1.1, "00 03 c0 e1 01");
+    bus_rx.transport = Transport::J2534;
+    let mut net_rx = Event::new(EventKind::Rx, Transport::Lan, 1.2, "");
+    net_rx.api = "LAN RX".into();
+    net_rx.len = 4;
+    net_rx.hex = "3a 72 00 61".into();
+    let mut evs = vec![bus_tx, bus_rx, net_rx];
+    w.append_many(&mut evs).unwrap();
+    let meta = w.meta.clone();
+    w.finish(&meta).unwrap();
+    drop(w);
+
+    let counts = store.get("lan-mix").unwrap().counts;
+    assert_eq!(counts.tx, 1);
+    assert_eq!(counts.rx, 1, "сетевой RX не должен попадать в RX шины");
+    assert_eq!(counts.tx_bytes, 5);
+    assert_eq!(counts.rx_bytes, 5);
+    assert_eq!(counts.net_rx, 1);
+    assert_eq!(counts.net_tx, 0);
+    assert_eq!(counts.net_bytes, 4);
+    assert_eq!(counts.events, 3, "событие всё равно в логе");
+}

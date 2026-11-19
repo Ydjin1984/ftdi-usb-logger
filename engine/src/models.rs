@@ -257,6 +257,17 @@ pub struct SessionCounts {
     /// потому что только они задают протокол явно; в отчёт попадает верхний.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub protocols: BTreeMap<String, u64>,
+    /// Сетевой обмен (Winsock) — отдельно от шины: `tx/rx` и `tx_bytes/rx_bytes`
+    /// считают только адаптер. HTTP-проба лицензии шла через тот же лог, и её
+    /// байты попадали в «RX шины»: в логе 20261119-181253 из 1706 B RX 922 B
+    /// были чужим сокетом (45.132.18.119:80), т.е. больше половины.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub net_tx: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub net_rx: u64,
+    /// Сумма байт сетевого обмена (TX+RX): в отчёте одна строка, а не две.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub net_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

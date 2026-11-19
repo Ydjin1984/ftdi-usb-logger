@@ -361,6 +361,24 @@ pub fn import_legacy_log(
     } else {
         steps
     };
+    // Шагов нет — добавляем отрезки обмена, как в живой сессии: иначе
+    // переимпортированный `raw.log` даёт отчёт без границ попыток, хотя
+    // события для них в файле есть. Транспорт не трогаем: `import` — метка
+    // источника для UI (badge «импорт»), а не шина.
+    let mut meta = meta;
+    if steps_for_report.is_empty() {
+        let events = store::read_events_dir(&dir);
+        for fact in
+            decode::bus_segments_facts(&decode::bus_segments(&events, decode::BUS_SEGMENT_GAP))
+        {
+            if !meta.facts.contains(&fact) {
+                meta.facts.push(fact);
+            }
+        }
+        if let Err(err) = store::write_json_atomic(&dir.join("session.json"), &meta) {
+            tracing::warn!("session.json после импорта: {err}");
+        }
+    }
     report::write_session_reports(&dir, &meta, &steps_for_report)?;
     Ok(meta)
 }

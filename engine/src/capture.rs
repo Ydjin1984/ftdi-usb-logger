@@ -1929,6 +1929,42 @@ impl SessionWriterTask {
         } else {
             self.steps.clone()
         };
+        // Счётчики агента приходят отдельным событием `# agent-counters` при
+        // остановке моста. Их отсутствие — это «неизвестно», а не «потерь нет»:
+        // в логе 20261119-181253 строки `# agent-counters` не было вовсе, а
+        // `# counters` показывала calls=0 при 330 вызовах J2534 — ноль означал
+        // «счётчик не доехал», и отчёт молчал об этом.
+        if self.agent_counters.is_none() && !self.shared.raw_usb.load(Ordering::SeqCst) {
+            let fact = "# потери: счётчики агента не получены — dropped/truncated = 0 \
+                        значит «неизвестно», а не «потерь нет»";
+            if !self.meta.facts.iter().any(|f| f == fact) {
+                self.meta.facts.push(fact.to_string());
+            }
+        }
+        // Транспорт — по фактическим событиям и ДО отчёта. Раньше он пересчитывался
+        // только в `api::detach_finalize`, а сессия, закончившаяся выходом
+        // приложения, отчёт не переписывала: в логе 20261119-181253 захват J2534
+        // (smj2534.dll, 110 обменов), а в отчёте `Транспорт: vcp` — стартовая
+        // догадка «ftd2xx не загружен → vcp».
+        if let Ok(reader) = self.store.reader(&self.meta.id) {
+            let events = reader.all_events();
+            let transport = crate::decode::transport_summary(&events);
+            if !transport.is_empty() {
+                self.meta.transport = transport;
+            }
+            // Шагов нет — показываем отрезки обмена: иначе в отчёте остаётся
+            // пустая Mermaid-схема, по которой не видно пауз и числа попыток.
+            if steps.is_empty() {
+                for fact in crate::decode::bus_segments_facts(&crate::decode::bus_segments(
+                    &events,
+                    crate::decode::BUS_SEGMENT_GAP,
+                )) {
+                    if !self.meta.facts.contains(&fact) {
+                        self.meta.facts.push(fact);
+                    }
+                }
+            }
+        }
         if let Err(err) =
             crate::report::write_session_reports(self.writer.dir(), &self.meta, &steps)
         {
@@ -1956,7 +1992,8 @@ impl SessionWriterTask {
             concat!(
                 "# counters dropped_events={} truncated_payloads={} decode_errors={} ",
                 "evicted_events={} partial_results={} contract_violations={} ",
-                "rx_sof={} calls={} bridge_events={} bridge_batches={} bridge_backlog_max={}"
+                "rx_sof={} calls={} bridge_events={} bridge_batches={} bridge_backlog_max={} ",
+                "agent_counters={}"
             ),
             dropped,
             truncated,
@@ -1968,7 +2005,8 @@ impl SessionWriterTask {
             pick("calls"),
             pick("bridge_events"),
             pick("bridge_batches"),
-            pick("bridge_backlog_max")
+            pick("bridge_backlog_max"),
+            u8::from(self.agent_counters.is_some())
         );
         if let Err(err) = self.writer.write_raw_line(&counters_line) {
             tracing::warn!("raw.log: counters не записаны: {err}");
@@ -3241,6 +3279,101 @@ for line in sys.stdin:
         }
         assert!(batches >= 1, "UI не получил ни одного Batch");
         assert!(steps >= 2, "UI не получил Step start/end, получено {steps}");
+    }
+
+    /// Сессия без шагов (J2534-лог PCMflash): в отчёте должен быть фактический
+    /// транспорт и отрезки обмена, а не стартовая догадка `vcp` и пустая схема.
+    #[test]
+    fn finalize_sets_transport_and_bus_segments_without_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
+        let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
+        let (bus, _bus_rx) = broadcast::channel::<ServerMsg>(64);
+        let shared = Arc::new(Shared {
+            active: Mutex::new(None),
+            hooks: Mutex::new("off".into()),
+            counts: Mutex::new(SessionCounts::default()),
+            current_step: Mutex::new(None),
+            target: Mutex::new(None),
+            started_at: Mutex::new(None),
+            pid: Mutex::new(None),
+            cmd_tx: Mutex::new(None),
+            pump: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+            bridge_ready: AtomicBool::new(false),
+            raw_usb: AtomicBool::new(false),
+        });
+        let mut session_meta = SessionMeta::new("j2534-nosteps", "pcmflash");
+        session_meta.transport = "vcp".into(); // стартовая догадка «ftd2xx не загружен»
+        let writer = store.create(session_meta).unwrap();
+        let meta = writer.meta.clone();
+        *shared.active.lock() = Some(meta.clone());
+        *shared.started_at.lock() = Some(meta.started_at.clone());
+        let task = SessionWriterTask::new(
+            cfg.clone(),
+            bus.clone(),
+            shared.clone(),
+            store.clone(),
+            writer,
+            meta.clone(),
+            0xFFFF_FFF0,
+            None,
+            false,
+        );
+        let (tx, rx) = mpsc::channel::<Cmd>(32);
+        *shared.cmd_tx.lock() = Some(tx.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let worker = rt.spawn(task.run(rx));
+
+        let finished = rt.block_on(async move {
+            let lines = [
+                "[+3.643081s] J2534 TX ch=1 call=3 i=1/1 n_in=1 n_out=1 th=17384 ts=0 flags=0x0 proto=0x8003 svc=0x80 len=5 dur=1320 rc=0 : 00 03 80 e1 01",
+                "[+3.645698s] J2534 RX ch=1 call=6 i=1/1 n_in=1 n_out=1 th=17384 ts=866171408 rxs=0x0 proto=0x8003 svc=0xc0 len=5 dur=2250 rc=0 : 00 03 c0 e1 01",
+                // пауза 2 с — вторая попытка
+                "[+6.100000s] J2534 TX ch=1 call=7 i=1/1 n_in=1 n_out=1 th=17384 ts=0 flags=0x0 proto=0x8003 svc=0x27 len=4 dur=1279 rc=0 : 00 02 27 7f",
+            ];
+            for line in lines {
+                tx.send(Cmd::Line {
+                    line: line.into(),
+                    wall: now_rfc3339(),
+                })
+                .await
+                .unwrap();
+            }
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::Detach { reply }).await.unwrap();
+            wait.await.unwrap().unwrap().expect("мета сессии")
+        });
+        rt.block_on(worker).expect("писатель должен завершиться без паники");
+
+        assert_eq!(
+            finished.transport, "j2534",
+            "транспорт должен считаться по событиям, а не оставаться догадкой"
+        );
+        let session_dir = PathBuf::from(&meta.dir);
+        let stored: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(session_dir.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored.transport, "j2534");
+        assert!(
+            stored.facts.iter().any(|f| f.starts_with("# обмен: 2 ")),
+            "нет факта об отрезках: {:?}",
+            stored.facts
+        );
+        assert!(
+            stored
+                .facts
+                .iter()
+                .any(|f| f.contains("счётчики агента не получены")),
+            "потери без счётчиков агента должны быть названы: {:?}",
+            stored.facts
+        );
+        let md = std::fs::read_to_string(session_dir.join("report.md")).unwrap();
+        assert!(!md.contains("```mermaid"), "схема без шагов не строится:\n{md}");
+        assert!(md.contains("# обмен 1:"), "{md}");
+        assert!(md.contains("# обмен 2:"), "{md}");
+        assert!(md.contains("| Транспорт | j2534 |"), "{md}");
     }
 
     /// Экспорт посреди записи: снимок должен отдать настоящие счётчики, файл

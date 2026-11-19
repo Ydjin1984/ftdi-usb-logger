@@ -2264,6 +2264,155 @@ pub fn transport_summary(events: &[Event]) -> String {
     String::new()
 }
 
+/// Русское склонение по числу: `1 посылка`, `2 посылки`, `11 посылок`.
+pub fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    let n100 = n % 100;
+    let n10 = n % 10;
+    if (11..=14).contains(&n100) {
+        many
+    } else if n10 == 1 {
+        one
+    } else if (2..=4).contains(&n10) {
+        few
+    } else {
+        many
+    }
+}
+
+/// Пауза в обмене, которая делит сессию на отрезки (попытки).
+///
+/// 1 с выбрана по фактам: в логе 20261119-181253 две попытки прошивки шли по
+/// 0.5 с и 2.5 с с паузой 22.5 с между ними, а внутри попытки приложение само
+/// выдерживало до 0.58 с между кадрами — порог 0.5 с рвал попытку на куски.
+pub const BUS_SEGMENT_GAP: f64 = 1.0;
+
+/// Непрерывный отрезок обмена шины: пауза больше `gap` секунд закрывает его.
+#[derive(Debug, Clone, Default)]
+pub struct BusSegment {
+    pub idx: u32,
+    pub t0: f64,
+    pub t1: f64,
+    pub tx: u64,
+    pub rx: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    /// Сервисы запросов в порядке первого появления: `(0x27, 3)`.
+    pub services: Vec<(u8, u64)>,
+    /// Пауза перед этим отрезком (0 у первого).
+    pub gap_before: f64,
+}
+
+impl BusSegment {
+    pub fn dur(&self) -> f64 {
+        (self.t1 - self.t0).max(0.0)
+    }
+
+    /// `0x80×30, 0x27×3` — по первому появлению сервиса.
+    pub fn services_text(&self) -> String {
+        self.services
+            .iter()
+            .map(|(sid, n)| format!("0x{sid:02X}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Разбить обмен шины на отрезки по паузам. Сеть (Winsock) не в счёт: это не
+/// обмен с ЭБУ, и её события шли бы «между» кадрами адаптера.
+pub fn bus_segments(events: &[Event], gap: f64) -> Vec<BusSegment> {
+    let mut out: Vec<BusSegment> = Vec::new();
+    for ev in events {
+        if matches!(ev.transport, Transport::Lan) {
+            continue;
+        }
+        if !matches!(ev.kind, EventKind::Tx | EventKind::Rx) {
+            continue;
+        }
+        let start_new = match out.last() {
+            None => true,
+            Some(seg) => ev.t - seg.t1 > gap,
+        };
+        let gap_before = out.last().map(|s| (ev.t - s.t1).max(0.0)).unwrap_or(0.0);
+        if start_new {
+            out.push(BusSegment {
+                idx: out.len() as u32 + 1,
+                t0: ev.t,
+                t1: ev.t,
+                gap_before: if out.is_empty() { 0.0 } else { gap_before },
+                ..Default::default()
+            });
+        }
+        let Some(seg) = out.last_mut() else { continue };
+        seg.t1 = ev.t;
+        match ev.kind {
+            EventKind::Tx => {
+                seg.tx += 1;
+                seg.tx_bytes += ev.payload().len() as u64;
+                if let Some((sid, _)) = j2534_service(ev) {
+                    match seg.services.iter_mut().find(|(s, _)| *s == sid) {
+                        Some((_, n)) => *n += 1,
+                        None => seg.services.push((sid, 1)),
+                    }
+                }
+            }
+            _ => {
+                seg.rx += 1;
+                seg.rx_bytes += ev.payload().len() as u64;
+            }
+        }
+    }
+    out
+}
+
+/// Факты об отрезках обмена для шапки отчёта.
+///
+/// Сессии без шагов (типичный J2534-лог: приложение не размечает шаги) раньше
+/// давали пустую Mermaid-схему `Start --> End` — по отчёту нельзя было понять,
+/// что обмен шёл двумя попытками с паузой 22 с.
+pub fn bus_segments_facts(segs: &[BusSegment]) -> Vec<String> {
+    if segs.is_empty() {
+        return Vec::new();
+    }
+    if segs.len() == 1 {
+        let s = &segs[0];
+        return vec![format!(
+            "# обмен: непрерывный, {:.2}–{:.2} с ({:.2} с) · {} посылок · TX {} B / RX {} B · {}",
+            s.t0,
+            s.t1,
+            s.dur(),
+            s.tx,
+            s.tx_bytes,
+            s.rx_bytes,
+            s.services_text()
+        )];
+    }
+    let mut out = vec![format!(
+        "# обмен: {} {} (пауза > {BUS_SEGMENT_GAP:.0} с делит сессию на отрезки)",
+        segs.len(),
+        plural(segs.len() as u64, "отрезок", "отрезка", "отрезков")
+    )];
+    for s in segs {
+        let gap = if s.idx > 1 {
+            format!(" · перед ним пауза {:.1} с", s.gap_before)
+        } else {
+            String::new()
+        };
+        out.push(format!(
+            "# обмен {}: {:.2}–{:.2} с ({:.2} с) · {} посылок · TX {} B / RX {} B · {}{}",
+            s.idx,
+            s.t0,
+            s.t1,
+            s.dur(),
+            s.tx,
+            s.tx_bytes,
+            s.rx_bytes,
+            s.services_text(),
+            gap
+        ));
+    }
+    out
+}
+
 /// Ключ гистограммы J2534: протокол + CAN-id/сервис.
 ///
 /// Раньше ключ был строго `{proto} {can_id}`, поэтому для vendor-протоколов без

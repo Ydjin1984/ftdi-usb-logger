@@ -87,6 +87,26 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Прочитать все события каталога сессии без открытия `Store`.
+///
+/// Нужно отчёту: шагов нет → нужно разбить обмен на отрезки, а `render_markdown`
+/// получает только `dir`. Битые строки пропускаются, как в `SessionReader`.
+pub fn read_events_dir(dir: &Path) -> Vec<Event> {
+    let mut out = Vec::new();
+    let Ok(file) = File::open(dir.join("events.jsonl")) else {
+        return out;
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(ev) = serde_json::from_str::<Event>(&line) {
+            out.push(ev);
+        }
+    }
+    out
+}
+
 fn load_index(root: &Path) -> Vec<SessionMeta> {
     read_json::<Vec<SessionMeta>>(&root.join("index.json")).unwrap_or_default()
 }
@@ -500,7 +520,20 @@ impl SessionWriter {
             util::hex_to_bytes(&ev.hex).len() as u64
         };
         self.meta.counts.events += 1;
+        // Сеть — не шина. Winsock-обмен (проба лицензии, DoIP-клиент) идёт через
+        // тот же лог, но в «TX/RX адаптера» ему нельзя: в логе 20261119-181253
+        // 922 из 1706 B RX были HTTP-ответом чужого сокета, и отчёт показывал
+        // объём в 2.2 раза больше фактического обмена ЭБУ.
+        let on_bus = !matches!(ev.transport, crate::models::Transport::Lan);
         match ev.kind {
+            EventKind::Tx if !on_bus => {
+                self.meta.counts.net_tx += 1;
+                self.meta.counts.net_bytes += payload_len;
+            }
+            EventKind::Rx if !on_bus => {
+                self.meta.counts.net_rx += 1;
+                self.meta.counts.net_bytes += payload_len;
+            }
             EventKind::Tx => {
                 self.meta.counts.tx += 1;
                 self.meta.counts.tx_bytes += payload_len;

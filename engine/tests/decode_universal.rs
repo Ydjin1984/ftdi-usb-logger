@@ -2,7 +2,8 @@
 //! гистограммы J2534 в сводке шага. Старые golden-тесты не затронуты.
 
 use ftdi_logger::decode::{
-    decode_isotp, decode_payload_event, parse_capture_line, summarize_step,
+    bus_segments, bus_segments_facts, decode_isotp, decode_payload_event, parse_capture_line,
+    plural, summarize_step, BUS_SEGMENT_GAP,
 };
 use ftdi_logger::models::{Direction, Event, EventKind, Transport};
 use serde_json::Value;
@@ -929,4 +930,68 @@ fn grammar_unknown_operation_and_keys_do_not_break() {
     assert_eq!(e.meta.get("foo").and_then(Value::as_i64), Some(42));
     assert_eq!(e.meta.get("bar").and_then(Value::as_str), Some("baz"));
     assert!(e.text.as_deref().unwrap().contains("foo=42"));
+}
+
+// ── отрезки обмена: сессия без шагов ─────────────────────────────────────────
+
+/// Лог 20261119-181253-pcmflash: две попытки прошивки разной длины с паузой
+/// 22.5 с, между ними — HTTP-проба лицензии (45.132.18.119:80). Шагов нет.
+#[test]
+fn bus_segments_split_on_pause_and_skip_lan() {
+    let lines = [
+        "[+3.643s] J2534 TX ch=1 call=3 proto=0x8003 svc=0x80 len=5 rc=0 : 00 03 80 e1 01",
+        "[+3.645s] J2534 RX ch=1 call=6 proto=0x8003 svc=0xc0 len=14 rc=0 : 00 0c c0 e1 01 91",
+        "[+3.652s] J2534 TX ch=1 call=7 proto=0x8003 svc=0x27 len=4 rc=0 : 00 02 27 7f",
+        "[+4.110s] J2534 TX ch=1 call=60 proto=0x8003 svc=0x82 len=3 rc=0 : 00 01 82",
+        // 22.5 с паузы: перезагрузка DLL и вторая попытка.
+        "[+22.945s] LAN RX tcp local=10.0.0.118:54009 remote=45.132.18.119:80 len=5 : 3a 72 00 61 00",
+        "[+26.630s] J2534 TX ch=1 call=61 proto=0x8003 svc=0x80 len=5 rc=0 : 00 03 80 e1 01",
+        "[+26.640s] J2534 TX ch=1 call=62 proto=0x8003 svc=0x27 len=4 rc=0 : 00 02 27 7f",
+        "[+26.700s] J2534 TX ch=1 call=110 proto=0x8003 svc=0x27 len=4 rc=0 : 00 02 27 7f",
+    ];
+    let events: Vec<Event> = lines.iter().map(|l| ev(l)).collect();
+
+    let segs = bus_segments(&events, BUS_SEGMENT_GAP);
+    assert_eq!(segs.len(), 2, "пауза 22.5 с делит сессию: {segs:#?}");
+    assert!((segs[0].t0 - 3.643).abs() < 1e-6);
+    assert!((segs[0].t1 - 4.110).abs() < 1e-6);
+    assert_eq!(segs[0].tx, 3);
+    assert_eq!(segs[0].rx, 1, "LAN не считается обменом шины");
+    assert_eq!(segs[0].tx_bytes, 12);
+    assert_eq!(segs[0].services_text(), "0x80×1, 0x27×1, 0x82×1");
+    assert!((segs[1].gap_before - 22.52).abs() < 0.1, "пауза видна: {}", segs[1].gap_before);
+    assert_eq!(segs[1].tx, 3);
+    assert_eq!(segs[1].idx, 2);
+
+    let facts = bus_segments_facts(&segs);
+    assert_eq!(facts[0], "# обмен: 2 отрезка (пауза > 1 с делит сессию на отрезки)");
+    assert!(facts[1].contains("# обмен 1: 3.64–4.11 с"), "{:?}", facts);
+    assert!(facts[2].contains("перед ним пауза 22.5 с"), "{:?}", facts);
+}
+
+#[test]
+fn bus_segments_single_burst_has_no_gap_text() {
+    let lines = [
+        "[+1.000s] J2534 TX ch=1 call=1 proto=0x8003 svc=0x80 len=5 rc=0 : 00 03 80 e1 01",
+        "[+1.010s] J2534 RX ch=1 call=2 proto=0x8003 svc=0xc0 len=5 rc=0 : 00 03 c0 e1 01",
+        "[+1.500s] J2534 TX ch=1 call=3 proto=0x8003 svc=0x80 len=5 rc=0 : 00 03 80 e1 01",
+    ];
+    let events: Vec<Event> = lines.iter().map(|l| ev(l)).collect();
+    let segs = bus_segments(&events, BUS_SEGMENT_GAP);
+    assert_eq!(segs.len(), 1, "0.5 с — ещё не пауза");
+    let facts = bus_segments_facts(&segs);
+    assert_eq!(facts.len(), 1);
+    assert!(facts[0].contains("непрерывный"), "{}", facts[0]);
+    assert!(!facts[0].contains("перед ним пауза"));
+}
+
+#[test]
+fn bus_segments_empty_and_plural() {
+    assert!(bus_segments(&[], BUS_SEGMENT_GAP).is_empty());
+    assert!(bus_segments_facts(&[]).is_empty());
+    assert_eq!(plural(1, "отрезок", "отрезка", "отрезков"), "отрезок");
+    assert_eq!(plural(2, "отрезок", "отрезка", "отрезков"), "отрезка");
+    assert_eq!(plural(5, "отрезок", "отрезка", "отрезков"), "отрезков");
+    assert_eq!(plural(11, "отрезок", "отрезка", "отрезков"), "отрезков");
+    assert_eq!(plural(21, "отрезок", "отрезка", "отрезков"), "отрезок");
 }
