@@ -1422,7 +1422,10 @@ function chanTouch(load, ch, op) {
   if (!st) st = chanState[k] = { ch: ch, load: load, gen: 0, open: false, missLogged: false };
   if (!st.open && !st.missLogged) {
     st.missLogged = true;
-    log('J2534 chan-miss ch=' + ch + ' gen=' + (st.gen + 1) + ' first_op=' + op + ' th=' + threadId());
+    // `mod=` — идентификатор загрузки DLL (как в rx-empty): без него нельзя
+    // понять, канал «не открывался» или открылся при другой загрузке модуля.
+    log('J2534 chan-miss ch=' + ch + ' gen=' + (st.gen + 1) + ' first_op=' + op +
+        ' mod=' + load + ' th=' + threadId());
   }
   return st;
 }
@@ -2201,6 +2204,10 @@ function hookJ2534Module(mod) {
   // функция = дырка в логе.
   let exports = [];
   try { exports = mod.enumerateExports(); } catch (e) { hookError('j2534 enumerateExports', e); }
+  // Ограничение, которое здесь не обойти: Frida отдаёт только поименованные
+  // функции, а J2534-2 (LogicalConnect/Select/QueueMsgs) у Scanmatik
+  // экспортируется БЕЗ имени (ординалы 1377-1379 в smj2534.dll). Если
+  // приложение пойдёт через них, строки в логе не будет — docs/12 §11.
   for (let i = 0; i < exports.length; i++) {
     const ex = exports[i];
     if (!ex || ex.type !== 'function' || !/^PassThru/i.test(ex.name)) continue;

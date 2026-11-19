@@ -172,6 +172,20 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     if !meta.tags.is_empty() {
         out.push_str(&format!("  теги: {}\n", meta.tags.join(", ")));
     }
+    if meta.counts.errors > 0 && !meta.counts.error_samples.is_empty() {
+        // Ошибок мало и они важны: показываем, что именно попало в счётчик.
+        out.push_str(&format!("  ошибки ({}):\n", meta.counts.errors));
+        for sample in &meta.counts.error_samples {
+            out.push_str(&format!("    {sample}\n"));
+        }
+        let shown = meta.counts.error_samples.len() as u64;
+        if meta.counts.errors > shown {
+            out.push_str(&format!(
+                "    … ещё {} — полный список в events.jsonl (kind=error)\n",
+                meta.counts.errors - shown
+            ));
+        }
+    }
 
     if steps.is_empty() {
         out.push_str(&format!("{DASH}\n  шагов нет: сессия без размеченных обменов\n"));
@@ -384,6 +398,23 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         out.push_str("## Факты окружения\n\n");
         for fact in &meta.facts {
             out.push_str(&format!("- {fact}\n"));
+        }
+        out.push('\n');
+    }
+
+    if meta.counts.errors > 0 && !meta.counts.error_samples.is_empty() {
+        // «Ошибок: 1» без расшифровки — это вопрос без ответа: в отчёте должно
+        // быть видно, ЧТО попало в счётчик (в этом логе — пропущенный Connect).
+        out.push_str(&format!("## Ошибки ({})\n\n", meta.counts.errors));
+        for sample in &meta.counts.error_samples {
+            out.push_str(&format!("- {}\n", md_cell(sample)));
+        }
+        let shown = meta.counts.error_samples.len() as u64;
+        if meta.counts.errors > shown {
+            out.push_str(&format!(
+                "- … ещё {} (полный список — `events.jsonl`, `kind=error`)\n",
+                meta.counts.errors - shown
+            ));
         }
         out.push('\n');
     }

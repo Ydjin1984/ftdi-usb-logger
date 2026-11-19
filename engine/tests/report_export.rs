@@ -23,6 +23,7 @@ fn sample_meta() -> SessionMeta {
         steps: 1,
         files: 1,
         errors: 0,
+        error_samples: Vec::new(),
         empty_polls: 0,
     };
     meta

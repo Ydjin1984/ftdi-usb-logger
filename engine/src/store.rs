@@ -31,6 +31,10 @@ const BATCH_EVENTS: usize = 256;
 const BATCH_BYTES: usize = 256 * 1024;
 /// Предельный интервал между сбросами.
 const FLUSH_MS: u128 = 50;
+/// Сколько первых ошибок расшифровываем в `session.json`/отчёте. Полный
+/// список всегда остаётся в `events.jsonl` (`kind=error`), здесь — столько,
+/// чтобы отчёт читался без проваливания в события.
+const ERROR_SAMPLES_MAX: usize = 10;
 
 /// Список подкаталогов, которые обязаны существовать в сессии.
 const SESSION_SUBDIRS: &[&str] = &["steps", "shots", "reads", "files", "export", "import"];
@@ -506,7 +510,25 @@ impl SessionWriter {
                 self.meta.counts.rx_bytes += payload_len;
             }
             EventKind::File => self.meta.counts.files += 1,
-            EventKind::Error => self.meta.counts.errors += 1,
+            EventKind::Error => {
+                self.meta.counts.errors += 1;
+                // Счётчик без расшифровки бесполезен: «ошибок=1» в отчёте
+                // заставлял лезть в events.jsonl, чтобы узнать, что это.
+                if self.meta.counts.error_samples.len() < ERROR_SAMPLES_MAX {
+                    let step = match ev.step {
+                        Some(s) => format!("шаг {s} "),
+                        None => String::new(),
+                    };
+                    let api = if ev.api.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} ", ev.api)
+                    };
+                    let text = ev.text.clone().unwrap_or_default();
+                    let line = format!("+{:.3}s {step}{api}{text}", ev.t);
+                    self.meta.counts.error_samples.push(line.trim_end().to_string());
+                }
+            }
             _ => {}
         }
         // Холостые опросы (`J2534 rx-empty`) — не ошибки: это штатные таймауты,

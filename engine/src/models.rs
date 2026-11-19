@@ -237,6 +237,11 @@ pub struct SessionCounts {
     pub files: u64,
     #[serde(default)]
     pub errors: u64,
+    /// Расшифровка первых ошибок: `errors` — счётчик, но в отчёте пользователь
+    /// должен видеть, ЧТО именно в них попало (иначе «Ошибок: 1» не читается).
+    /// Формат строки — как в отчёте: `+6.446s шаг 1 J2534 chan-miss …`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_samples: Vec<String>,
     /// Холостые опросы (`J2534 rx-empty`): штатные таймауты, не ошибки.
     #[serde(default)]
     pub empty_polls: u64,
