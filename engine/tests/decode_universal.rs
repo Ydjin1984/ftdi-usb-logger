@@ -196,6 +196,104 @@ fn summarize_j2534_histograms_and_no_reads() {
 }
 
 #[test]
+fn lan_traffic_goes_to_net_hist_not_answers() {
+    // Лицензионный сервер PCMflash: TCP-обмен процесса к протоколу ЭБУ не
+    // относится и не должен попадать в `resp_hist` шага (docs/12 §10).
+    let events = vec![
+        ev("# MARK wall=2026-11-19 10:46:52 START 1: Идентификация"),
+        ev("[+1.000s] J2534 TX ch=1 proto=0x8003 svc=0x80 len=5 : 00 03 80 e1 01"),
+        ev("[+1.050s] J2534 RX ch=1 proto=0x8003 rxs=0x0 len=4 : 00 03 c0 e1"),
+        ev("[+1.446s] LAN RX tcp local=10.0.0.118:60761 remote=45.132.18.119:80 len=1 : 6e"),
+        ev("[+2.471s] LAN RX tcp local=10.0.0.118:60761 remote=45.132.18.119:80 len=1 : 78"),
+        ev("[+3.000s] LAN TX tcp local=10.0.0.118:60761 remote=45.132.18.119:80 len=2 : 00 01"),
+        ev("# MARK wall=2026-11-19 10:47:13 END 1: Идентификация (21.2 с)"),
+    ];
+    let summary = summarize_step(&events, 1, "", 21.2, None);
+    assert!(
+        !summary.resp_hist.keys().any(|k| k.contains("TCP")),
+        "сеть не в ответах: {:?}",
+        summary.resp_hist
+    );
+    assert!(
+        summary.net_hist.keys().any(|k| k.contains("TCP 45.132.18.119:80")),
+        "сеть отдельной гистограммой: {:?}",
+        summary.net_hist
+    );
+    assert_eq!(summary.net_rx, 2);
+    assert_eq!(summary.net_tx, 2);
+    // Байты сети не подмешиваются в байты шага, обмен считается по шине.
+    assert_eq!(summary.exchanges, 1);
+    assert_eq!(summary.rx_bytes, 4);
+    assert_eq!(summary.tx_bytes, 5);
+}
+
+#[test]
+fn step_filehash_hashes_file_written_by_tool() {
+    // docs/12 §10: `filehash` у шага был пуст, хотя PCMflash сохраняет дамп.
+    // Теперь шаг сам хэширует файл, в который шла запись, — это и есть пара
+    // «файл ↔ сырой поток» для сверки.
+    let td = tempfile::tempdir().unwrap();
+    let path = td.path().join("dump.bin");
+    let data: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&path, &data).unwrap();
+    let events = vec![
+        ev("# MARK wall=2026-11-19 10:47:13 START 2: Чтение"),
+        ev(&format!(
+            "[+324.118254s] FILE close {} bytes={} writes=512",
+            path.display(),
+            data.len()
+        )),
+        ev("# MARK wall=2026-11-19 10:51:42 END 2: Чтение (278.0 с)"),
+    ];
+    let summary = summarize_step(&events, 2, "Чтение", 278.0, None);
+    assert_eq!(summary.filehash.len(), 1, "{:?}", summary.filehash);
+    let fh = &summary.filehash[0];
+    assert_eq!(fh.size, data.len() as u64);
+    assert_eq!(fh.sha256, ftdi_logger::models::util::sha256_hex(&data));
+    assert_eq!(fh.mode, "written");
+}
+
+#[test]
+fn step_without_files_omits_reads_and_filehash_in_json() {
+    // Пустые поля не сериализуются: в steps/NN.json не должно быть «обещаний»,
+    // которые логер не заполняет (docs/12 §10).
+    let events = vec![
+        ev("# MARK wall=2026-11-19 10:46:52 START 1: Идентификация"),
+        ev("[+1.000s] J2534 TX ch=1 proto=0x8003 svc=0x80 len=5 : 00 03 80 e1 01"),
+        ev("# MARK wall=2026-11-19 10:47:13 END 1: Идентификация (21.2 с)"),
+    ];
+    let summary = summarize_step(&events, 1, "Идентификация", 21.2, None);
+    let json = serde_json::to_string(&summary).unwrap();
+    assert!(!json.contains("\"reads\""), "{json}");
+    assert!(!json.contains("\"filehash\""), "{json}");
+    assert!(!json.contains("\"net_hist\""), "{json}");
+}
+
+#[test]
+fn call_line_keeps_timeout_and_contract_flags() {
+    // P1: timeout_ms нужен на строке вызова; P0: partial/contract — признаки
+    // того, что драйвер отдал сообщения при rc!=0 или больше, чем ему дали.
+    let e = ev("[+10.000000s] J2534 call ch=1 call=7 op=ReadMsgs n_in=10 n_out=12 timeout_ms=500 rc=0 partial=1 contract=n_out_gt_n_in th=31624 dur=900");
+    assert_eq!(e.api, "J2534 call");
+    assert_eq!(e.meta.get("timeout_ms").and_then(Value::as_i64), Some(500));
+    assert_eq!(e.meta.get("partial").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("contract").and_then(Value::as_str), Some("n_out_gt_n_in"));
+
+    // ExtraDataIndex и длина CAN-id на строке сообщения: исходные байты в hex,
+    // декодированное представление — отдельными полями.
+    let e = ev("[+11.000000s] J2534 RX ch=1 call=8 i=1/1 n_in=1 n_out=1 th=1 ts=1 rxs=0x0 id=0x7E8 idlen=4 xdi=9 proto=CAN len=13 : 00 00 07 e8 06 50 03 00 00 00 00 00 00");
+    assert_eq!(e.meta.get("idlen").and_then(Value::as_i64), Some(4));
+    assert_eq!(e.meta.get("xdi").and_then(Value::as_i64), Some(9));
+    assert_eq!(e.len, 13, "len == числу байт в hex, включая CAN id");
+    assert_eq!(e.payload().len(), 13);
+
+    // SOF с данными: `sof=1` не отменяет payload.
+    let e = ev("[+12.000000s] J2534 RX ch=1 call=9 i=1/1 n_in=1 n_out=1 th=1 ts=2 rxs=0x2 sof=1 proto=0x8003 len=2 : aa bb");
+    assert_eq!(e.meta.get("sof").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.payload(), vec![0xaa, 0xbb], "данные SOF-кадра сохранены");
+}
+
+#[test]
 fn isotp_pci_decoding() {
     // SF запрос: 02 10 03 — SID 0x10 (StartDiagnosticSession).
     let e = j2534_event(EventKind::Tx, "02 10 03 00 00 00 00 00", "0x7E0", "ISO15765", 1.0);
@@ -800,13 +898,19 @@ fn grammar_channel_diag_and_loss_stats() {
     assert_eq!(e.meta.get("n").and_then(Value::as_i64), Some(33777));
 
     // Агрегаты пустых опросов и ошибок записи (docs/11 §11).
-    let e = ev("[+33.000000s] J2534 rx-empty ch=1 call=1248 n=10 timeout_ms=20000 last_rc=0x11");
-    assert_eq!(e.kind, EventKind::Error);
+    // `rx-empty` — штатный таймаут, а не ошибка: kind=Sys, иначе счётчик
+    // `errors` в session.json врал (docs/12 §10).
+    let e = ev("[+33.000000s] J2534 rx-empty ch=1 gen=2 mod=3 call=1248 n=10 timeout_ms=20000 last_rc=0x11");
+    assert_eq!(e.kind, EventKind::Sys);
     assert_eq!(e.api, "J2534 rx-empty");
     assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1248));
     assert_eq!(e.meta.get("n").and_then(Value::as_i64), Some(10));
     assert_eq!(e.meta.get("timeout_ms").and_then(Value::as_i64), Some(20000));
     assert_eq!(e.meta.get("last_rc").and_then(Value::as_i64), Some(0x11));
+    // Ключ агрегата — загрузка DLL и поколение канала: иначе разные результаты
+    // и таймауты сливались в одну строку.
+    assert_eq!(e.meta.get("mod").and_then(Value::as_i64), Some(3));
+    assert_eq!(e.meta.get("gen").and_then(Value::as_i64), Some(2));
     assert_eq!(e.rc, Some(0x11));
 
     let e = ev("[+33.100000s] J2534 tx-err-stat ch=1 call=1249 n=5 timeout_ms=20000 last_rc=0x10");

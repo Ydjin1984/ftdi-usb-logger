@@ -371,12 +371,18 @@ fn parse_comment(body: &str, t: f64, raw: &str) -> Event {
         return ev;
     }
 
-    // `# counters dropped_events=0 truncated_payloads=0 decode_errors=0 rx_sof=0 calls=0`
-    if let Some(rest) = c.strip_prefix("counters ") {
+    // `# counters …` (итог движка) и `# agent-counters …` (счётчики агента и моста).
+    // Префиксы разные, чтобы в логе нельзя было спутать две разные строки.
+    if let Some(rest) = c
+        .strip_prefix("agent-counters ")
+        .or_else(|| c.strip_prefix("counters "))
+    {
+        let agent = c.starts_with("agent-counters ");
         let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
         ev.api = "COUNTERS".into();
         // Ключи берём как есть: набор счётчиков может расти, meta не должна отставать.
         apply_kv_meta(&mut ev, rest);
+        set_meta(&mut ev, "source", json!(if agent { "agent" } else { "engine" }));
         ev.text = Some(rest.trim().to_string());
         return ev;
     }
@@ -1022,6 +1028,8 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
                     ("ts", "ts"),
                     ("dur", "dur"),
                     ("sof", "sof"),
+                    ("xdi", "xdi"),
+                    ("idlen", "idlen"),
                 ],
             );
             // `i=1/2` — строка как пришла: это не число, а «k из n».
@@ -1058,7 +1066,12 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "vendor", tag_quoted(body, "vendor"));
             set_meta_str(&mut ev, "dll", tag_quoted(body, "dll"));
             // `dev=` — DeviceID из выходного параметра (-1 при ошибке), `th=` — поток.
-            set_num_pairs(&mut ev, body, &[("dev", "dev"), ("th", "thread")]);
+            // `mod=` — идентификатор загрузки DLL: второй Open без выгрузки даёт тот же mod.
+            set_num_pairs(
+                &mut ev,
+                body,
+                &[("dev", "dev"), ("th", "thread"), ("mod", "mod")],
+            );
             if let Some(rc) = tag_i32(body, "rc") {
                 ev.rc = Some(rc);
             }
@@ -1104,8 +1117,13 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
                     ("n_out", "n_out"),
                     ("th", "thread"),
                     ("dur", "dur"),
+                    ("timeout_ms", "timeout_ms"),
                 ],
             );
+            // Признаки нарушения контракта драйвера: `partial=1` — сообщения при
+            // rc!=0, `contract=` — n_out > n_in или пустой ответ с сообщениями.
+            set_meta_str(&mut ev, "partial", tag_quoted(kv, "partial"));
+            set_meta_str(&mut ev, "contract", tag_quoted(kv, "contract"));
             set_rc(&mut ev, kv);
             ev.text = Some(format!(
                 "{} ch={} call={} n_in={} n_out={}",
@@ -1259,9 +1277,15 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             ev
         }
         // Агрегаты компактного режима и диагностика рассинхронизации канала
-        // (docs/11 §3, §5): это индикаторы потерь, а не обмен.
+        // (docs/11 §3, §5). `rx-empty` — штатный таймаут опроса, а не ошибка:
+        // в `errors` он попадал и создавал ложную картину (docs/12 §10).
         "rx-empty" | "tx-err-stat" | "chan-miss" => {
-            let mut ev = make_event(EventKind::Error, Transport::J2534, t, raw);
+            let kind = if op_raw == "rx-empty" {
+                EventKind::Sys
+            } else {
+                EventKind::Error
+            };
+            let mut ev = make_event(kind, Transport::J2534, t, raw);
             ev.api = format!("J2534 {op}");
             set_meta_str(
                 &mut ev,
@@ -1277,6 +1301,7 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
                     ("call", "call"),
                     ("n", "n"),
                     ("gen", "gen"),
+                    ("mod", "mod"),
                     ("th", "thread"),
                     ("timeout_ms", "timeout_ms"),
                     ("timeout", "timeout_ms"),
@@ -1925,6 +1950,59 @@ fn phase_json_for(events: &[Event], idx: u32) -> Option<Value> {
         .map(|e| e.meta.clone())
 }
 
+/// Дополнить сведения об адаптере из события `J2534 open` / `J2534 version`.
+///
+/// Данные адаптера есть только в логе: `open` даёт вендора и имя DLL, `version` —
+/// прошивку (`FW:1060 HW:02 SN:A62122`), версию DLL и ветку API. Раньше
+/// `adapter` заполнялся лишь ручным выбором шнурка и был `null` при захвате
+/// J2534 (docs/12 §10).
+pub fn apply_adapter_event(info: &mut crate::models::AdapterInfo, ev: &Event) {
+    let field = |key: &str| {
+        ev.meta
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    if ev.api == "J2534 open" {
+        // `vendor=` драйвер заполняет сам; если он пуст (драйвера нет в реестре),
+        // берём имя устройства, которое передало приложение (`PassThruOpen(name)`).
+        if let Some(vendor) = field("vendor").or_else(|| field("device")) {
+            if info.description.is_empty() {
+                info.description = vendor.clone();
+            }
+            if info.vendor.is_none() {
+                info.vendor = Some(vendor);
+            }
+        }
+        if let Some(dll) = field("dll") {
+            if info.dll.is_none() {
+                info.dll = Some(dll);
+            }
+        }
+        return;
+    }
+    if let Some(fw) = field("fw") {
+        if info.serial.is_empty() {
+            if let Some(rest) = fw.split("SN:").nth(1) {
+                let sn = rest.split_whitespace().next().unwrap_or("").to_string();
+                if !sn.is_empty() {
+                    info.serial = sn;
+                }
+            }
+        }
+        if info.firmware.is_none() {
+            info.firmware = Some(fw);
+        }
+    }
+    if info.dll_version.is_none() {
+        info.dll_version = field("dll");
+    }
+    if info.api.is_none() {
+        info.api = field("api");
+    }
+}
+
 fn read_file_hashes(events: &[&Event]) -> Vec<FileHash> {
     let mut out = Vec::new();
     for ev in events {
@@ -1950,6 +2028,62 @@ fn read_file_hashes(events: &[&Event]) -> Vec<FileHash> {
                 .unwrap_or("")
                 .to_string(),
             mode: "import".into(),
+        });
+    }
+    out
+}
+
+/// Файлы, в которые инструмент писал во время шага: хэш считается по факту.
+///
+/// Раньше `filehash` у шага был пуст, если в логе нет явной строки `# filehash`,
+/// хотя PCMflash сохраняет прочитанное в `.bin` — и именно эта пара
+/// «файл ↔ сырой поток» нужна для сверки дампа (docs/12 §10).
+/// Файл читается только если он есть, не больше `HASH_MAX_BYTES`; иначе в
+/// `mode` остаётся `too-big`, а размер — фактический.
+fn hash_written_files(events: &[&Event]) -> Vec<FileHash> {
+    const HASH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+    let mut out: Vec<FileHash> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    for ev in events {
+        if ev.kind != EventKind::File {
+            continue;
+        }
+        // Пишем только про закрытые файлы: у `open`/`write` размер ещё не итоговый.
+        if ev.api != "FILE close" {
+            continue;
+        }
+        let path = ev
+            .meta
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if path.is_empty() || seen.contains(&path) {
+            continue;
+        }
+        let bytes = ev.meta.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+        let writes = ev.meta.get("writes").and_then(Value::as_u64).unwrap_or(0);
+        if writes == 0 && bytes == 0 {
+            continue; // открытие/чтение без записи: хэшировать нечего
+        }
+        seen.insert(path.clone());
+        let meta = std::fs::metadata(&path);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(bytes);
+        let (sha256, mode) = match meta {
+            Ok(m) if m.is_file() && size <= HASH_MAX_BYTES => {
+                match std::fs::read(&path) {
+                    Ok(data) => (crate::models::util::sha256_hex(&data), "written".to_string()),
+                    Err(_) => (String::new(), "unreadable".to_string()),
+                }
+            }
+            Ok(_) => (String::new(), "too-big".to_string()),
+            Err(_) => (String::new(), "gone".to_string()),
+        };
+        out.push(FileHash {
+            path,
+            size,
+            sha256,
+            mode,
         });
     }
     out
@@ -2350,6 +2484,8 @@ pub fn summarize_step(
     // `len=0`) — это статус драйвера, а не ответ: в гистограмму и байты они не идут,
     // иначе один ответ считался дважды (в логе PCMflash было 112 «ответов» на 56 TX).
     let mut status_msgs = 0u64;
+    let mut net_tx = 0u64;
+    let mut net_rx = 0u64;
     for ev in &slice {
         match (ev.transport, ev.kind) {
             (Transport::J2534, EventKind::Tx) => {
@@ -2375,14 +2511,15 @@ pub fn summarize_step(
                 rx_bytes += ev.payload().len() as u64;
                 *summary.resp_hist.entry(usb_hist_key(ev)).or_insert(0) += 1;
             }
+            // Сетевой обмен — отдельная гистограмма: лицензионный сервер и
+            // прочий TCP процесса к протоколу ЭБУ не относятся (docs/12 §10).
             (Transport::Lan, EventKind::Tx) => {
-                exchanges += 1;
-                tx_bytes += ev.payload().len() as u64;
-                *summary.cmd_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
+                net_tx = net_tx.saturating_add(ev.payload().len() as u64);
+                *summary.net_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
             }
             (Transport::Lan, EventKind::Rx) => {
-                rx_bytes += ev.payload().len() as u64;
-                *summary.resp_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
+                net_rx = net_rx.saturating_add(ev.payload().len() as u64);
+                *summary.net_hist.entry(lan_hist_key(ev)).or_insert(0) += 1;
             }
             _ => {}
         }
@@ -2392,8 +2529,16 @@ pub fn summarize_step(
     summary.exchanges = exchanges;
     summary.tx_bytes = tx_bytes;
     summary.rx_bytes = rx_bytes;
+    summary.net_tx = net_tx;
+    summary.net_rx = net_rx;
     summary.reads = stream_ranges(&read_events);
     summary.filehash = read_file_hashes(&slice);
+    // Файлы, записанные инструментом в этом шаге: дамп PCMflash и т.п.
+    for fh in hash_written_files(&slice) {
+        if !summary.filehash.iter().any(|f| f.path == fh.path) {
+            summary.filehash.push(fh);
+        }
+    }
     summary.verdict = StepVerdict {
         denied,
         no_answer,

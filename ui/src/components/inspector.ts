@@ -295,7 +295,7 @@ export class Inspector {
           bpair(t("обменов"), fmtNum(st.exchanges)),
           bpair("TX", fmtBytes(st.tx_bytes)),
           bpair("RX", fmtBytes(st.rx_bytes)),
-          bpair(t("чтений"), String(st.reads.length)),
+          bpair(t("чтений"), String((st.reads ?? []).length)),
         );
         if (this.stepOpenIdx === st.idx) row.classList.add("is-active");
         row.append(title, time, meta);
@@ -353,10 +353,11 @@ export class Inspector {
       box.append(subTitle(t("ОТВЕТЫ")));
       box.append(bars(respEntries, "resp"));
     }
-    if (st.reads.length) {
+    const stepReads = st.reads ?? [];
+    if (stepReads.length) {
       box.append(subTitle(t("ЧТЕНИЯ ПАМЯТИ")));
       const list = el("div", "decoded");
-      for (const r of st.reads.slice(0, 8)) {
+      for (const r of stepReads.slice(0, 8)) {
         prop(
           list,
           `0x${r.start.toString(16).toUpperCase().padStart(6, "0")}`,
@@ -365,10 +366,11 @@ export class Inspector {
       }
       box.append(list);
     }
-    if (st.filehash.length) {
+    const stepFiles = st.filehash ?? [];
+    if (stepFiles.length) {
       box.append(subTitle(t("ФАЙЛЫ")));
       const list = el("div", "decoded");
-      for (const f of st.filehash) prop(list, t("файл"), `${f.path} · ${fmtBytes(f.size)} · ${f.sha256.slice(0, 12)}…`);
+      for (const f of stepFiles) prop(list, t("файл"), `${f.path} · ${fmtBytes(f.size)} · ${f.sha256.slice(0, 12)}…`);
       box.append(list);
     }
     if (st.png) {

@@ -319,7 +319,10 @@ fn raw_usbpcap_capture_writes_events_and_finishes() {
         .expect("первый Tx/Rx пакет");
     assert_eq!(first.transport, ftdi_logger::models::Transport::Usb);
     assert_eq!(first.hex, "12 04 0d 1b");
-    assert!(first.raw.contains("USBRAW"));
+    // `raw` в events.jsonl больше не дублируется (docs/12 §10): сырая строка
+    // живёт в raw.log, а событие описывается полями.
+    assert_eq!(first.api, "USBRAW");
+    assert!(first.raw.is_empty(), "raw в JSONL не пишется: {:?}", first.raw);
     assert_eq!(first.meta.get("usbpcap"), Some(&serde_json::Value::Bool(true)));
     assert_eq!(first.meta.get("bus"), Some(&serde_json::json!(1)));
     assert!(first.t >= 0.0 && first.t < 3600.0, "t пакета: {}", first.t);

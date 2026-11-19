@@ -509,6 +509,22 @@ impl SessionWriter {
             EventKind::Error => self.meta.counts.errors += 1,
             _ => {}
         }
+        // Холостые опросы (`J2534 rx-empty`) — не ошибки: это штатные таймауты,
+        // которые иначе попадали в `errors` и портили картину (docs/12 §10).
+        if ev.api == "J2534 rx-empty" {
+            let n = ev.meta.get("n").and_then(serde_json::Value::as_u64).unwrap_or(1);
+            self.meta.counts.empty_polls += n.max(1);
+        }
+
+        // raw.log пишется до сериализации: именно `to_legacy_line()` — источник
+        // строки сессии. После записи `raw` очищается у всех, кроме `kind=raw`:
+        // в JSONL это дубликат строки raw.log, из-за которого файл был в 2.7×
+        // больше сырого лога (docs/12 §10, budget §8).
+        let legacy = ev.to_legacy_line();
+        self.write_legacy(&legacy)?;
+        if ev.kind != EventKind::Raw {
+            ev.raw.clear();
+        }
 
         let line = serde_json::to_string(ev)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -522,9 +538,6 @@ impl SessionWriter {
             .last()
             .map(|l| l.len() + 1)
             .unwrap_or(0);
-
-        let legacy = ev.to_legacy_line();
-        self.write_legacy(&legacy)?;
 
         let due = self.pending.len() >= BATCH_EVENTS
             || self.pending_bytes >= BATCH_BYTES

@@ -68,7 +68,7 @@ pub struct Event {
     pub text: Option<String>,      // короткий предпросмотр/декод
     pub rc: Option<i32>,           // код возврата API, если есть
     pub step: Option<u32>,         // номер открытого шага на момент события
-    pub raw: String,               // исходная строка (для экспорта/совместимости)
+    pub raw: String,               // исходная строка; в JSONL только при kind=raw
     pub meta: serde_json::Value,   // расширения: com, handle, checksum, sgbd, job …
 }
 ```
@@ -116,6 +116,7 @@ pub struct SessionMeta {
  "tx_bytes":22026,"rx_bytes":25523,
  "cmd_hist":{"cmd=0x07":223,"READ(0x06)":12},
  "resp_hist":{"A0":247,"unparsed(12 0a)":1},
+ "net_hist":{"TCP 45.132.18.119:80":21},"net_tx":0,"net_rx":21,
  "reads":[{"start":261472,"len":92,"blocks":2,"sha256":"…"}],
  "filehash":[{"path":"…","size":65536,"sha256":"…"}],
  "png":"shots/03-step-3.png",

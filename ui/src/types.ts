@@ -54,6 +54,13 @@ export interface AdapterInfo {
   com_port?: number | null;
   vendor_id?: number | null;
   product_id?: number | null;
+  /** Вендор из `J2534 open` (Scanmatik, CHIPSOFT, …). */
+  vendor?: string | null;
+  /** Строка прошивки из `J2534 version`: `FW:1060 HW:02 SN:A62122`. */
+  firmware?: string | null;
+  dll_version?: string | null;
+  api?: string | null;
+  dll?: string | null;
 }
 
 export interface Note {
@@ -124,8 +131,12 @@ export interface StepSummary {
   rx_bytes: number;
   cmd_hist: Record<string, number>;
   resp_hist: Record<string, number>;
-  reads: StepRead[];
-  filehash: FileHash[];
+  /** Сетевой обмен процесса (Winsock/DoIP) — не протокол ЭБУ. */
+  net_hist?: Record<string, number>;
+  net_tx?: number;
+  net_rx?: number;
+  reads?: StepRead[];
+  filehash?: FileHash[];
   png?: string | null;
   winkfp_jobs: WinkfpJob[];
   verdict: StepVerdict;

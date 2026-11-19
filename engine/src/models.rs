@@ -81,29 +81,31 @@ pub struct Event {
     pub kind: EventKind,
     pub transport: Transport,
     /// Имя API-функции или псевдоним: `FT_Write`, `WriteFile`, `MARK`, `FILE`, …
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<Direction>,
     /// Длина полезной нагрузки.
     #[serde(default)]
     pub len: u32,
     /// Полная нагрузка в виде «12 04 0d 1b».
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hex: String,
     /// Короткий предпросмотр/декод для ленты.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rc: Option<i32>,
     /// Номер шага, во время которого пришло событие.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u32>,
-    /// Исходная строка лога — для экспорта и обратной совместимости.
-    #[serde(default)]
+    /// Исходная строка лога. В `events.jsonl` пишется только для `kind=raw`
+    /// (там она — единственное содержимое): для остальных событий это байт-в-байт
+    /// копия строки `raw.log`, и хранение её в JSON удваивало файл (docs/12 §2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub raw: String,
     /// Расширения: com, handle, n, ovl, checksum, truncated, …
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub meta: Value,
 }
 
@@ -235,20 +237,37 @@ pub struct SessionCounts {
     pub files: u64,
     #[serde(default)]
     pub errors: u64,
+    /// Холостые опросы (`J2534 rx-empty`): штатные таймауты, не ошибки.
+    #[serde(default)]
+    pub empty_polls: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdapterInfo {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub serial: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub com_port: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor_id: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_id: Option<u16>,
+    /// Производитель/вендор из `J2534 open` (`vendor="Scanmatik"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// Строка прошивки адаптера из `J2534 version` (`FW:1060 HW:02 SN:A62122`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    /// Версия DLL драйвера (`1.0.0.120 (built 25.01.2025)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dll_version: Option<String>,
+    /// Ветка API драйвера (`04.04`/`05.00`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dll: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +282,11 @@ pub struct Note {
 
 fn note_author() -> String {
     "user".into()
+}
+
+/// serde: не писать поле, если оно ноль (компактный JSONL для шагов).
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,13 +432,21 @@ pub struct StepSummary {
     pub cmd_hist: std::collections::BTreeMap<String, u64>,
     #[serde(default)]
     pub resp_hist: std::collections::BTreeMap<String, u64>,
-    #[serde(default)]
+    /// Сетевой обмен (Winsock/DoIP и т.п.) — отдельно от ответов шины: это не
+    /// протокол ЭБУ, и в `resp_hist` он вводил в заблуждение (docs/12 §10).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub net_hist: std::collections::BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub net_tx: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub net_rx: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<StepRead>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filehash: Vec<FileHash>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub png: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub winkfp_jobs: Vec<WinkfpJob>,
     #[serde(default)]
     pub verdict: StepVerdict,
@@ -435,6 +467,9 @@ impl StepSummary {
             rx_bytes: 0,
             cmd_hist: Default::default(),
             resp_hist: Default::default(),
+            net_hist: Default::default(),
+            net_tx: 0,
+            net_rx: 0,
             reads: Vec::new(),
             filehash: Vec::new(),
             png: None,

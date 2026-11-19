@@ -272,12 +272,19 @@ pub fn import_legacy_log(
     let mut current: Option<u32> = None;
     let mut acc: Vec<Event> = Vec::new();
     let mut last_step_idx: Option<u32> = None;
+    // Адаптер восстанавливаем из тех же строк, что и живой захват: `J2534 open`
+    // и `J2534 version` (docs/12 §10 — в импорте поле тоже оставалось пустым).
+    let mut adapter_seen: Option<crate::models::AdapterInfo> = None;
 
     // Один проход: события пишем сразу, срез шага копим для сводки.
     for line in text.lines() {
         let Some(mut ev) = decode::parse_capture_line(line) else {
             continue;
         };
+        if ev.api == "J2534 open" || ev.api == "J2534 version" {
+            let info = adapter_seen.get_or_insert_with(Default::default);
+            decode::apply_adapter_event(info, &ev);
+        }
         // Шкалы времени не смешиваем: t уже либо из `[+Xs]`, либо из `rel=`, либо 0.
 
         match ev.kind {
@@ -341,6 +348,9 @@ pub fn import_legacy_log(
     meta.facts = banner.facts;
     meta.pid = banner.pid;
     meta.tool_path = banner.tool;
+    if meta.adapter.is_none() {
+        meta.adapter = adapter_seen;
+    }
     writer.finish(&meta)?;
     let meta = writer.meta.clone();
 

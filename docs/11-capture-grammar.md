@@ -47,14 +47,16 @@
 Итоговый блок счётчиков (пишет движок в конце сессии):
 
 ```
-# counters dropped_events=0 truncated_payloads=0 decode_errors=0 rx_sof=0 calls=0
-# session incomplete: reason=queue_overflow dropped=12
+# agent-counters dropped_events=0 truncated_payloads=0 decode_errors=0 rx_sof=0 calls=0 partial_results=0 contract_violations=0 xdi_events=0 bridge_events=12345 bridge_batches=87 bridge_backlog_max=64 mode=full
+# counters dropped_events=0 truncated_payloads=0 decode_errors=0 evicted_events=0 partial_results=0 contract_violations=0 rx_sof=0 calls=0 bridge_events=12345 bridge_batches=87 bridge_backlog_max=64
+# session incomplete: reason=capture_loss dropped=12 truncated=1 partial=1 contract=1
+# session note: evicted_events=120 (сводка шага неполна, raw.log полон)
 ```
 
 ## 2. `J2534 open` (F6)
 
 ```
-[+1.200000s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" dev=1 rc=0 th=8120
+[+1.200000s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" dev=1 mod=1 rc=0 th=8120
 ```
 
 `dev=` — `DeviceID` из выходного параметра (после успешного вызова), `-1` при ошибке.
@@ -83,12 +85,25 @@
 Пишется, когда сообщений нет, их несколько, или вызов завершился ошибкой:
 
 ```
-[+32.100000s] J2534 call ch=1 call=1247 op=ReadMsgs n_in=10 n_out=3 rc=0 th=8120 dur=20134
-[+33.000000s] J2534 call ch=1 call=1248 op=ReadMsgs n_in=10 n_out=0 rc=0x11 th=8120 dur=20001
-[+33.100000s] J2534 call ch=1 call=1249 op=WriteMsgs n_in=5 n_out=2 rc=0 th=8120 dur=812
+[+32.100000s] J2534 call ch=1 call=1247 op=ReadMsgs n_in=10 n_out=3 timeout_ms=20 rc=0 th=8120 dur=20134
+[+33.000000s] J2534 call ch=1 call=1248 op=ReadMsgs n_in=10 n_out=0 timeout_ms=20 rc=0x11 th=8120 dur=20001
+[+33.100000s] J2534 call ch=1 call=1249 op=WriteMsgs n_in=5 n_out=2 timeout_ms=100 rc=0 th=8120 dur=812
+[+33.200000s] J2534 call ch=1 call=1250 op=ReadMsgs n_in=10 n_out=2 timeout_ms=500 rc=0x10 partial=1 th=8120 dur=513
+[+33.300000s] J2534 call ch=1 call=1251 op=ReadMsgs n_in=10 n_out=12 timeout_ms=500 rc=0 contract=n_out_gt_n_in th=8120 dur=12
 ```
 
 `op` — имя экспорта (`ReadMsgs`, `WriteMsgs`, `StartPeriodicMsg`, …).
+
+* `timeout_ms=` — значение таймаута, которое приложение передало вызову. Без него
+  по логу нельзя отличить штатное ожидание 20 мс от 500 мс, а агрегат пустых
+  опросов (`rx-empty`) вообще нечем проверить.
+* `partial=1` — сообщения записаны, но `rc != 0`. Контракт PassThru допускает
+  уже снятые с очереди сообщения вместе с кодом ошибки; такие сообщения идут
+  отдельными строками `J2534 RX/TX` с тем же `call`.
+* `contract=` — нарушение контракта драйвером:
+  `n_out_gt_n_in` (записал больше, чем дали — читаем ровно `n_in`),
+  `empty_with_msgs` (`rc=0x10/0x11`, но счётчик сообщений не ноль).
+  Каждое нарушение считает счётчик `contract_violations`.
 
 ## 5. Сообщения TX/RX (F4)
 
@@ -110,7 +125,21 @@
 SOF-кадр (`rxs=0x2 START_OF_MESSAGE`, `DataSize=0`) — **без** секции `: hex`,
 с `sof=1`, отдельной короткой строкой; в счётчик полезных сообщений не входит.
 
-В компактном режиме SOF не пишется построчно, а агрегируется:
+Если у SOF есть данные (`DataSize>0`), строка **сохраняет** и `sof=1`, и `: hex`:
+статус кадра не отменяет его содержимое.
+
+CAN (протоколы `CAN`/`ISO15765`): первые 4 байта `Data` — идентификатор кадра.
+Он дублируется декодированным `id=`, но `hex` всегда содержит **все** байты
+`Data[DataSize]`, а `len=` равен их числу; длина идентификатора — `idlen=`:
+
+```
+[+32.500000s] J2534 RX ch=1 call=1250 i=1/1 n_in=1 n_out=1 th=8120 ts=0 rxs=0x0 proto=CAN id=0x7E8 idlen=4 svc=0x50 xdi=9 len=11 dur=14 rc=0 : 00 00 07 e8 06 50 03 00 00 aa bb
+```
+
+`xdi=` — `ExtraDataIndex` из `PASSTHRU_MSG` (смещение 20): где в `Data`
+начинаются extra-данные. Печатается, только если `0 < xdi < DataSize`.
+
+В компактном режиме SOF без данных не пишется построчно, а агрегируется:
 
 ```
 [+41.000000s] J2534 rx-sof-stat ch=1 n=33777

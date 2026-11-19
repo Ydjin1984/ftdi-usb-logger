@@ -1108,11 +1108,20 @@ struct SessionWriterTask {
     /// Когда `session.json` последний раз писали «на живую» (см. `persist_meta`).
     last_meta_save: Instant,
     /// Счётчики потерь (docs/09 §4): неполный лог нельзя выдавать за полный.
-    dropped_events: u64,
+    /// `evicted_events` — сколько событий не вошло в сводку шага (буфер шага),
+    /// это НЕ потеря захвата: строки в `raw.log`/`events.jsonl` уже записаны.
+    evicted_events: u64,
     truncated_payloads: u64,
     decode_errors: u64,
+    /// Частичные результаты `ReadMsgs` (сообщения при `rc!=0`) и нарушения
+    /// контракта драйвера (`n_out > n_in`, пустой ответ с сообщениями).
+    partial_results: u64,
+    contract_violations: u64,
     /// Последний `# counters` от Frida-агента (`rx_sof`, `calls`, его потери).
     agent_counters: Option<serde_json::Value>,
+    /// Адаптер, определённый по логу (`J2534 open`/`J2534 version`), если
+    /// оператор не выбрал его вручную (docs/12 §10: в session.json был null).
+    adapter_seen: Option<crate::models::AdapterInfo>,
 }
 
 impl SessionWriterTask {
@@ -1151,10 +1160,13 @@ impl SessionWriterTask {
             raw_t0_epoch,
             raw_fallback_t: 0.0,
             last_meta_save: Instant::now(),
-            dropped_events: 0,
+            evicted_events: 0,
             truncated_payloads: 0,
             decode_errors: 0,
+            partial_results: 0,
+            contract_violations: 0,
             agent_counters: None,
+            adapter_seen: None,
         }
     }
 
@@ -1400,6 +1412,22 @@ impl SessionWriterTask {
         if ev.api == "COUNTERS" {
             self.agent_counters = Some(ev.meta.clone());
         }
+        // Адаптер определяется по логу: `J2534 open` (вендор/DLL) и
+        // `J2534 version` (прошивка/серийник/версия DLL). В session.json он
+        // оставался null, если оператор не выбрал шнурок вручную (docs/12 §10).
+        if ev.api == "J2534 open" || ev.api == "J2534 version" {
+            let mut info = self.adapter_seen.clone().unwrap_or_default();
+            crate::decode::apply_adapter_event(&mut info, &ev);
+            self.adapter_seen = Some(info);
+        }
+        // Признаки нарушения контракта драйвера — счётчики движка, не агента:
+        // работают и на разборе старого лога, где RPC агента уже недоступен.
+        if ev.meta.get("partial").and_then(serde_json::Value::as_str) == Some("1") {
+            self.partial_results = self.partial_results.saturating_add(1);
+        }
+        if ev.meta.get("contract").is_some() {
+            self.contract_violations = self.contract_violations.saturating_add(1);
+        }
         let cut = ev
             .meta
             .get("truncated")
@@ -1433,7 +1461,7 @@ impl SessionWriterTask {
             }
             open.buffer.push(ev.clone());
         }
-        self.dropped_events = self.dropped_events.saturating_add(dropped_now);
+        self.evicted_events = self.evicted_events.saturating_add(dropped_now);
         self.push_pending(ev.clone());
         Ok(ev)
     }
@@ -1863,6 +1891,35 @@ impl SessionWriterTask {
                 self.raw_packets, self.raw_bytes
             ));
         }
+        // Адаптер: ручной выбор важнее угаданного, но пустые поля добираем из лога.
+        if let Some(found) = self.adapter_seen.clone() {
+            match &mut self.meta.adapter {
+                Some(chosen) => {
+                    if chosen.serial.is_empty() {
+                        chosen.serial = found.serial.clone();
+                    }
+                    if chosen.description.is_empty() {
+                        chosen.description = found.description.clone();
+                    }
+                    if chosen.vendor.is_none() {
+                        chosen.vendor = found.vendor.clone();
+                    }
+                    if chosen.firmware.is_none() {
+                        chosen.firmware = found.firmware.clone();
+                    }
+                    if chosen.dll_version.is_none() {
+                        chosen.dll_version = found.dll_version.clone();
+                    }
+                    if chosen.api.is_none() {
+                        chosen.api = found.api.clone();
+                    }
+                    if chosen.dll.is_none() {
+                        chosen.dll = found.dll.clone();
+                    }
+                }
+                None => self.meta.adapter = Some(found),
+            }
+        }
         // Шаги пишутся в steps/*.json в процессе; если в памяти пусто — дочитаем из сессии.
         let steps = if self.steps.is_empty() {
             self.store
@@ -1881,9 +1938,9 @@ impl SessionWriterTask {
                 text: format!("отчёты не сформированы: {err}"),
             });
         }
-        // Счётчики потерь и явная метка неполноты (§4, §7). Счётчики агента
-        // (rx_sof/calls) приходят его собственной строкой `# counters`, здесь —
-        // то, что знает движок, плюс зеркало агентских чисел.
+        // Счётчики потерь. Три источника потерь захвата (агент, мост, движок)
+        // сводятся вместе, вытеснение из сводки шага идёт отдельным именем:
+        // строки в raw.log уже записаны, это неполнота сводки, а не лога.
         let agent = self.agent_counters.clone().unwrap_or(serde_json::Value::Null);
         let pick = |key: &str| -> u64 {
             agent
@@ -1891,24 +1948,54 @@ impl SessionWriterTask {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0)
         };
-        let dropped = self.dropped_events;
+        let dropped = pick("dropped_events").saturating_add(pick("bridge_dropped"));
+        let truncated = self.truncated_payloads.max(pick("truncated_payloads"));
+        let partial = self.partial_results.max(pick("partial_results"));
+        let contract = self.contract_violations.max(pick("contract_violations"));
         let counters_line = format!(
-            "# counters dropped_events={} truncated_payloads={} decode_errors={} rx_sof={} calls={}",
+            concat!(
+                "# counters dropped_events={} truncated_payloads={} decode_errors={} ",
+                "evicted_events={} partial_results={} contract_violations={} ",
+                "rx_sof={} calls={} bridge_events={} bridge_batches={} bridge_backlog_max={}"
+            ),
             dropped,
-            self.truncated_payloads,
+            truncated,
             self.decode_errors,
+            self.evicted_events,
+            partial,
+            contract,
             pick("rx_sof"),
-            pick("calls")
+            pick("calls"),
+            pick("bridge_events"),
+            pick("bridge_batches"),
+            pick("bridge_backlog_max")
         );
         if let Err(err) = self.writer.write_raw_line(&counters_line) {
             tracing::warn!("raw.log: counters не записаны: {err}");
         }
-        if dropped > 0 {
-            let incomplete = format!(
-                "# session incomplete: reason=step_buffer_overflow dropped={dropped}"
-            );
+        if dropped > 0 || truncated > 0 || partial > 0 || contract > 0 {
+            let reasons = [
+                (dropped > 0).then(|| format!("dropped={dropped}")),
+                (truncated > 0).then(|| format!("truncated={truncated}")),
+                (partial > 0).then(|| format!("partial={partial}")),
+                (contract > 0).then(|| format!("contract={contract}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+            let incomplete = format!("# session incomplete: reason=capture_loss {reasons}");
             if let Err(err) = self.writer.write_raw_line(&incomplete) {
                 tracing::warn!("raw.log: session incomplete не записана: {err}");
+            }
+        }
+        if self.evicted_events > 0 {
+            let note = format!(
+                "# session note: evicted_events={} (сводка шага неполна, raw.log полон)",
+                self.evicted_events
+            );
+            if let Err(err) = self.writer.write_raw_line(&note) {
+                tracing::warn!("raw.log: session note не записана: {err}");
             }
         }
         // Итоги в конец raw.log (`# totals: events=N tx=P/TxB rx=Q/RxB steps=S`) — как в
@@ -2471,6 +2558,7 @@ fn resolve_adapter(selection: Option<&str>) -> Option<AdapterInfo> {
         com_port: dev.com_port,
         vendor_id: dev.vendor_id,
         product_id: dev.product_id,
+        ..Default::default()
     };
     if let Some(selection) = selection {
         let needle = selection.to_lowercase();
@@ -2586,6 +2674,33 @@ async fn capture_shot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_is_taken_from_j2534_open_and_version() {
+        // docs/12 §10: `adapter: null` при живой строке прошивки в логе.
+        let mut info = AdapterInfo::default();
+        let mut open = Event::new(EventKind::Sys, Transport::J2534, 38.0, "");
+        open.api = "J2534 open".into();
+        open.meta = serde_json::json!({"vendor": "Scanmatik", "dll": "smj2534.dll", "dev": 1});
+        crate::decode::apply_adapter_event(&mut info, &open);
+
+        let mut ver = Event::new(EventKind::Sys, Transport::J2534, 38.1, "");
+        ver.api = "J2534 version".into();
+        ver.meta = serde_json::json!({
+            "fw": "FW:1060 HW:02 SN:A62122",
+            "dll": "1.0.0.120 (built 25.01.2025)",
+            "api": "04.04",
+        });
+        crate::decode::apply_adapter_event(&mut info, &ver);
+
+        assert_eq!(info.serial, "A62122");
+        assert_eq!(info.vendor.as_deref(), Some("Scanmatik"));
+        assert_eq!(info.description, "Scanmatik");
+        assert_eq!(info.firmware.as_deref(), Some("FW:1060 HW:02 SN:A62122"));
+        assert_eq!(info.dll.as_deref(), Some("smj2534.dll"));
+        assert_eq!(info.dll_version.as_deref(), Some("1.0.0.120 (built 25.01.2025)"));
+        assert_eq!(info.api.as_deref(), Some("04.04"));
+    }
 
     fn test_cfg(root: &Path) -> Arc<Config> {
         Arc::new(Config {

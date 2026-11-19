@@ -211,6 +211,15 @@ def pass_one(api, tag, hold_flag=None):
         if rc == 0 and n.value:
             break
 
+    # Контрактные сценарии драйвера (docs/12 §9). Значение timeout — селектор
+    # сценария в fake_j2534.dll: 777 — сообщения при rc!=0, 778 — n_out > n_in,
+    # 779 — CAN с 4-байтным id и ExtraDataIndex.
+    for sel, name in ((777, "partial"), (778, "overflow"), (779, "can")):
+        buf = (PassThruMsg * 10)()
+        cnt = C.c_uint32(10)
+        rc = api["ReadMsgs"](ch.value, buf, C.byref(cnt), sel)
+        print("%s %s rc=0x%x n=%d" % (tag, name, rc & 0xFFFFFFFF, cnt.value), flush=True)
+
     periodic_msg = make_msg(0x8003, 0, [0x00, 0x02, 0x3E, 0x00])
     pid = C.c_uint32(0)
     print("%s periodic rc=%d" % (tag, api["StartPeriodic"](ch.value, C.byref(periodic_msg), C.byref(pid), 1000)), flush=True)
@@ -235,6 +244,13 @@ def main():
         k32, handle, api = load(dll_path)
         print("loaded%d base=0x%x" % (attempt, handle), flush=True)
         pass_one(api, "pass%d" % attempt, hold_flag if attempt == 1 else None)
+        if attempt == 2:
+            # Второй Open при ТОМ ЖЕ module_load_id: Close → Open без выгрузки
+            # библиотеки. Отдельный проход нужен, чтобы приёмка «Close → Open»
+            # опиралась на одинаковый `mod=` двух строк `J2534 open`, а не на
+            # повторную загрузку DLL (docs/12 §12).
+            pass_one(api, "reopen")
+            print("reopen-done", flush=True)
         k32.FreeLibrary(C.c_void_p(handle))
         print("freed%d" % attempt, flush=True)
         if attempt == 1:

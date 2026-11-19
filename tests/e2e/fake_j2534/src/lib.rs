@@ -75,6 +75,19 @@ fn msg_zeroed() -> PassThruMsg {
 
 /// Записать сообщение в массив драйвера (по индексу).
 unsafe fn put_msg(base: *mut PassThruMsg, index: usize, proto: u32, rxs: u32, flags: u32, bytes: &[u8]) {
+    put_msg_xdi(base, index, proto, rxs, flags, bytes, 0);
+}
+
+/// То же + `ExtraDataIndex` (для ISO15765 extra-данных; стенд проверяет `xdi=`).
+unsafe fn put_msg_xdi(
+    base: *mut PassThruMsg,
+    index: usize,
+    proto: u32,
+    rxs: u32,
+    flags: u32,
+    bytes: &[u8],
+    xdi: u32,
+) {
     let slot = base.add(index);
     let mut m = msg_zeroed();
     m.protocol_id = proto;
@@ -82,6 +95,7 @@ unsafe fn put_msg(base: *mut PassThruMsg, index: usize, proto: u32, rxs: u32, fl
     m.tx_flags = flags;
     m.timestamp = 0;
     m.data_size = bytes.len() as u32;
+    m.extra_data_index = xdi;
     let n = bytes.len().min(4128);
     m.data[..n].copy_from_slice(&bytes[..n]);
     std::ptr::write(slot, m);
@@ -136,11 +150,62 @@ pub extern "system" fn PassThruReadMsgs(
     _channel: u32,
     msgs: *mut PassThruMsg,
     num: *mut u32,
-    _timeout: u32,
+    timeout: u32,
 ) -> i32 {
     if num.is_null() {
         return ERR_BUFFER_EMPTY;
     }
+    let want = unsafe { *num } as usize;
+
+    // ── сценарии стенда (docs/12 §9), выбираются значением `timeout` ────────
+    // 777: драйвер снял сообщения с очереди, но вернул код «пусто». Контракт
+    // разрешает такие частичные результаты — логгер обязан их сохранить.
+    if timeout == 777 {
+        if msgs.is_null() || want < 2 {
+            unsafe { *num = 0 };
+            return ERR_BUFFER_EMPTY;
+        }
+        unsafe {
+            put_msg(msgs, 0, 0x8003, 0x00, 0, &[0x00, 0x03, 0x67, 0x85, 0x11]);
+            put_msg(msgs, 1, 0x8003, 0x00, 0, &[0x00, 0x02, 0xc1, 0x00]);
+            *num = 2;
+        }
+        return ERR_BUFFER_EMPTY;
+    }
+    // 778: драйвер записал больше, чем дали (n_out > n_in). Пишем только в
+    // пределах входной ёмкости, но счётчик выставляем на 12 — логгер обязан
+    // прочитать ровно `n_in` и зафиксировать нарушение контракта.
+    if timeout == 778 {
+        let slots = want.min(10);
+        unsafe {
+            for i in 0..slots {
+                put_msg(msgs, i, 0x8003, 0x00, 0, &[0x00, 0x03, 0xc0, 0x0e + i as u8]);
+            }
+            *num = 12;
+        }
+        return STATUS_NOERROR;
+    }
+    // 779: CAN-кадр: первые 4 байта Data — идентификатор, ExtraDataIndex=9.
+    if timeout == 779 {
+        if msgs.is_null() || want < 1 {
+            unsafe { *num = 0 };
+            return ERR_BUFFER_EMPTY;
+        }
+        unsafe {
+            put_msg_xdi(
+                msgs,
+                0,
+                5,
+                0,
+                0,
+                &[0x00, 0x00, 0x07, 0xe8, 0x06, 0x50, 0x03, 0x00, 0x00, 0xaa, 0xbb],
+                9,
+            );
+            *num = 1;
+        }
+        return STATUS_NOERROR;
+    }
+
     let call = READ_CALLS.fetch_add(1, Ordering::SeqCst);
     // D3: штатные «ответа нет» — ERR_TIMEOUT, затем ERR_BUFFER_EMPTY.
     if call < 2 {
@@ -151,7 +216,6 @@ pub extern "system" fn PassThruReadMsgs(
         unsafe { *num = 0 };
         return ERR_BUFFER_EMPTY;
     }
-    let want = unsafe { *num } as usize;
     if msgs.is_null() || want < 3 {
         unsafe { *num = 0 };
         return ERR_BUFFER_EMPTY;

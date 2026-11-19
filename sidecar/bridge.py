@@ -65,6 +65,15 @@ class NonFatalError(Exception):
     """Ошибка одной команды: error/fatal:false, цикл продолжается."""
 
 
+EV_FLUSH_BYTES = 32768   # размер батча вывода событий
+EV_FLUSH_MS = 20.0       # максимальная задержка события в буфере
+
+
+def _mono() -> float:
+    """Монотонное время для батча (time.monotonic, без зависимости от RPC)."""
+    return time.monotonic()
+
+
 def rfc3339_now() -> str:
     """Текущее время UTC в RFC3339 с миллисекундами: 2026-11-09T12:00:13.123Z."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -100,6 +109,15 @@ class Bridge:
         self._closing = False
         self._load_probe: dict = {}
         self._probe_evt = threading.Event()
+        # Батч вывода событий: раньше на каждое событие приходился отдельный
+        # write+flush (системный вызов на кадр). Копим 32 КиБ или 20 мс; порядок
+        # с log/rpc/ready/bye держится тем, что любой не-event сбрасывает буфер.
+        self._evbuf: list[str] = []
+        self._evbytes = 0
+        self._last_flush = _mono()
+        self.batches = 0
+        self.backlog_max = 0
+        self.dropped = 0
 
     # ───────────────────────────── вывод ──────────────────────────────
 
@@ -107,6 +125,9 @@ class Bridge:
         line = json_line(obj)
         with self._lock:
             try:
+                # События и log/rpc/ready идут в общем потоке: перед не-event
+                # сбрасываем батч, иначе порядок строк в логе поедет.
+                self._flush_events_locked()
                 self._out.write(line + "\n")
                 self._out.flush()
             except (BrokenPipeError, OSError, ValueError):
@@ -118,11 +139,37 @@ class Bridge:
 
     def _write_event_locked(self, line: str) -> None:
         self.events += 1
+        self._evbuf.append(line)
+        self._evbytes += len(line) + 64
+        backlog = len(self._evbuf)
+        if backlog > self.backlog_max:
+            self.backlog_max = backlog
+        if self._evbytes >= EV_FLUSH_BYTES:
+            self._flush_events_locked()
+
+    def _flush_events_locked(self) -> None:
+        if not self._evbuf:
+            self._last_flush = _mono()
+            return
+        batch, self._evbuf = self._evbuf, []
+        self._evbytes = 0
+        self.batches += 1
         try:
-            self._out.write(json_line({"type": "event", "line": line, "wall": rfc3339_now()}) + "\n")
+            for line in batch:
+                self._out.write(
+                    json_line({"type": "event", "line": line, "wall": rfc3339_now()}) + "\n"
+                )
             self._out.flush()
+            self._last_flush = _mono()
         except (BrokenPipeError, OSError, ValueError):
+            self.dropped += len(batch)
             raise SystemExit(0)
+
+    def _maybe_flush_events(self) -> None:
+        """Сброс по времени: поток может быть редким, ждать 32 КиБ нельзя."""
+        with self._lock:
+            if self._evbuf and (_mono() - self._last_flush) * 1000.0 >= EV_FLUSH_MS:
+                self._flush_events_locked()
 
     def emit_event(self, line: str) -> None:
         with self._lock:
@@ -137,6 +184,7 @@ class Bridge:
             pending, self._buffer = self._buffer, []
             for line in pending:
                 self._write_event_locked(line)
+            self._flush_events_locked()
 
     # ────────────────────────── сообщения Frida ────────────────────────
 
@@ -163,6 +211,7 @@ class Bridge:
                 }
                 self._probe_evt.set()
             self.emit_event(line)
+            self._maybe_flush_events()
         elif mtype == "error":
             # Ошибка внутри JS-агента: не фатальна для моста.
             self.errors += 1
@@ -348,12 +397,21 @@ class Bridge:
         if not isinstance(data, dict):
             return
         parts = []
-        for key in ("dropped_events", "truncated_payloads", "decode_errors", "rx_sof", "calls"):
+        for key in ("dropped_events", "truncated_payloads", "decode_errors", "rx_sof", "calls",
+                    "partial_results", "contract_violations", "xdi_events"):
             try:
                 parts.append("%s=%d" % (key, int(data.get(key) or 0)))
             except (TypeError, ValueError):
                 continue
-        line = "# counters " + " ".join(parts)
+        # Своя часть счётчиков: сколько событий прошло через мост, какими
+        # батчами и какой был максимум буфера. Потери записи (`dropped`)
+        # считаются отдельно от потерь захвата.
+        parts.append("bridge_events=%d" % self.events)
+        parts.append("bridge_batches=%d" % self.batches)
+        parts.append("bridge_backlog_max=%d" % self.backlog_max)
+        if self.dropped:
+            parts.append("bridge_dropped=%d" % self.dropped)
+        line = "# agent-counters " + " ".join(parts)
         mode = data.get("mode")
         if mode:
             line += " mode=%s" % mode
@@ -381,6 +439,15 @@ class Bridge:
             except Exception:  # noqa: BLE001
                 pass
         self.pid = None
+        # Хвост батча: без явного сброса последние события могли остаться в буфере,
+        # если bye не запрашивался (аварийное закрытие).
+        with self._lock:
+            try:
+                self._flush_events_locked()
+            except SystemExit:
+                raise
+            except Exception:  # noqa: BLE001 - закрытие не должно падать
+                pass
         if emit_bye:
             self.emit({"type": "bye", "code": 0, "events": self.events})
 

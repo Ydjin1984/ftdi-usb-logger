@@ -216,3 +216,82 @@ fn repair_closes_unfinished_steps() {
     );
     assert!(dir.join("steps/01.json").is_file());
 }
+
+#[test]
+fn events_jsonl_has_no_duplicate_raw_and_keeps_raw_only_for_kind_raw() {
+    // docs/12 §10: поле `raw` байт-в-байт дублировало строку raw.log и делало
+    // events.jsonl в 2.7× больше. Теперь сырая строка пишется в raw.log, а в
+    // JSONL остаётся только у kind=raw (там это единственное содержимое).
+    let td = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(td.path()).unwrap();
+    let mut w = store.create(SessionMeta::new("compact-1", "compact")).unwrap();
+    let dir = w.dir().to_path_buf();
+
+    let mut e = tx(1.0, "00 03 80 e1 01");
+    e.api = "J2534 TX".into();
+    e.raw = "[+1.000000s] J2534 TX ch=1 call=15 i=1/1 n_in=1 n_out=1 th=1 ts=0 flags=0x0 proto=0x8003 svc=0x80 len=5 dur=12 rc=0 : 00 03 80 e1 01".into();
+    e.meta = serde_json::json!({"call": 15, "channel": "1", "protocol": "0x8003"});
+    w.append(&mut e).unwrap();
+
+    let mut raw = Event::new(EventKind::Raw, Transport::None, 2.0, "");
+    raw.api = "RAW".into();
+    raw.raw = "неразобранная строка лога".into();
+    raw.text = Some("неразобранная строка лога".into());
+    w.append(&mut raw).unwrap();
+
+    let m = w.meta.clone();
+    w.finish(&m).unwrap();
+    drop(w);
+
+    let jsonl = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    let lines: Vec<&str> = jsonl.lines().collect();
+    assert_eq!(lines.len(), 2, "ожидались два события:\n{jsonl}");
+
+    let tx_line: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert!(
+        tx_line.get("raw").is_none(),
+        "raw дублирует raw.log и в JSONL не нужен: {tx_line}"
+    );
+    // Обязательный контракт экспорта: api и hex на месте (re/01_extract_pairs.py).
+    assert_eq!(tx_line.get("api").and_then(|v| v.as_str()), Some("J2534 TX"));
+    assert_eq!(
+        tx_line.get("hex").and_then(|v| v.as_str()),
+        Some("00 03 80 e1 01")
+    );
+
+    let raw_line: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(
+        raw_line.get("raw").and_then(|v| v.as_str()),
+        Some("неразобранная строка лога"),
+        "для kind=raw сырая строка обязательна: {raw_line}"
+    );
+
+    // raw.log по-прежнему содержит исходную строку (источник — raw события).
+    let rawlog = std::fs::read_to_string(dir.join("raw.log")).unwrap();
+    assert!(
+        rawlog.contains("J2534 TX ch=1 call=15"),
+        "raw.log потерял исходную строку:\n{rawlog}"
+    );
+}
+
+#[test]
+fn empty_polls_are_counted_separately_from_errors() {
+    // docs/12 §10: `errors: 20` в session.json были холостыми опросами (rx-empty),
+    // а не ошибками. Счётчики разведены: errors и empty_polls.
+    let td = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(td.path()).unwrap();
+    let mut w = store.create(SessionMeta::new("polls-1", "polls")).unwrap();
+
+    let mut poll = Event::new(EventKind::Sys, Transport::J2534, 1.0, "");
+    poll.api = "J2534 rx-empty".into();
+    poll.meta = serde_json::json!({"n": 3, "timeout_ms": 500});
+    w.append(&mut poll).unwrap();
+
+    let mut err = Event::new(EventKind::Error, Transport::J2534, 2.0, "");
+    err.api = "J2534 chan-miss".into();
+    w.append(&mut err).unwrap();
+
+    let meta = w.meta.clone();
+    assert_eq!(meta.counts.empty_polls, 3, "холостые опросы считаются по n");
+    assert_eq!(meta.counts.errors, 1, "ошибкой остаётся только chan-miss");
+}

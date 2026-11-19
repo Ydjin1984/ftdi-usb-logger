@@ -88,7 +88,7 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     out.push_str(BAR);
     out.push('\n');
     out.push_str(&format!(
-        "СЕССИЯ {:<24} start={}   статус={}   посылок={}   шагов={}   TX={}B RX={}B   файлов={}   ошибок={}\n",
+        "СЕССИЯ {:<24} start={}   статус={}   посылок={}   шагов={}   TX={}B RX={}B   файлов={}   ошибок={}   холостых опросов={}\n",
         meta.label,
         meta.started_at,
         meta.status,
@@ -98,6 +98,7 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         meta.counts.rx_bytes,
         meta.counts.files,
         meta.counts.errors,
+        meta.counts.empty_polls,
     ));
     if let Some(ended) = &meta.ended_at {
         out.push_str(&format!("  конец: {ended}\n"));
@@ -125,17 +126,29 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         }
     }
     if let Some(adapter) = &meta.adapter {
-        out.push_str(&format!(
-            "  адаптер: serial={} desc={} com={} vid={:04X} pid={:04X}\n",
-            adapter.serial,
-            adapter.description,
-            adapter
-                .com_port
-                .map(|p| format!("COM{p}"))
-                .unwrap_or_else(|| "?".into()),
-            adapter.vendor_id.unwrap_or(0),
-            adapter.product_id.unwrap_or(0),
-        ));
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(vendor) = &adapter.vendor {
+            parts.push(format!("vendor={vendor}"));
+        }
+        if !adapter.serial.is_empty() {
+            parts.push(format!("serial={}", adapter.serial));
+        }
+        if !adapter.description.is_empty() {
+            parts.push(format!("desc={}", adapter.description));
+        }
+        if let Some(fw) = &adapter.firmware {
+            parts.push(format!("fw={fw}"));
+        }
+        if let Some(ver) = &adapter.dll_version {
+            parts.push(format!("dll={ver}"));
+        }
+        if let Some(api) = &adapter.api {
+            parts.push(format!("api={api}"));
+        }
+        if let Some(com) = adapter.com_port {
+            parts.push(format!("COM{com}"));
+        }
+        out.push_str(&format!("  адаптер: {}\n", parts.join(" ")));
     }
     if !meta.facts.is_empty() {
         // Универсальный захват: USB/J2534-факты показываем отдельной группой.
@@ -185,6 +198,15 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
             step.idx,
             hist_line(&step.resp_hist)
         ));
+        if !step.net_hist.is_empty() {
+            out.push_str(&format!(
+                "  # PHASE {}   сеть (не протокол ЭБУ): {} | TX {} B / RX {} B\n",
+                step.idx,
+                hist_line(&step.net_hist),
+                step.net_tx,
+                step.net_rx
+            ));
+        }
         if step.reads.is_empty() {
             out.push_str(&format!("  # PHASE {}   чтения: нет\n", step.idx));
         }
@@ -348,6 +370,10 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         ("TX, байт".into(), meta.counts.tx_bytes.to_string()),
         ("RX, байт".into(), meta.counts.rx_bytes.to_string()),
         ("Ошибок".into(), meta.counts.errors.to_string()),
+        (
+            "Холостых опросов".into(),
+            meta.counts.empty_polls.to_string(),
+        ),
     ];
     for (key, value) in rows {
         out.push_str(&format!("| {} | {} |\n", md_cell(&key), md_cell(&value)));
@@ -439,6 +465,14 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
 
         out.push_str(&format!("**Команды:** {}\n\n", hist_line(&step.cmd_hist)));
         out.push_str(&format!("**Ответы:** {}\n\n", hist_line(&step.resp_hist)));
+        if !step.net_hist.is_empty() {
+            out.push_str(&format!(
+                "**Сеть (не протокол ЭБУ):** {} · TX {} B / RX {} B\n\n",
+                hist_line(&step.net_hist),
+                step.net_tx,
+                step.net_rx
+            ));
+        }
 
         if !step.reads.is_empty() {
             out.push_str("**Потоки чтения**\n\n| Начало | Конец | Длина, B | Блоков | SHA-256 |\n|---|---|---|---|---|\n");

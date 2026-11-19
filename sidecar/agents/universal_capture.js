@@ -22,7 +22,13 @@ const MODE = CFG.mode === 'compact' ? 'compact' : 'full';
 const BITS = Process.arch === 'ia32' ? 32 : 64;
 let CALL_SEQ = 0;
 function threadId() { try { return Process.getCurrentThreadId(); } catch (e) { return 0; } }
-const counters = { calls: 0, rx_sof: 0, truncated_payloads: 0, decode_errors: 0, dropped_events: 0, file_reads: 0 };
+// Счётчики полноты по стороне агента (docs/09 §4). `dropped_events` здесь —
+// именно потери захвата (очередь/буфер), а не вытеснение из сводки шага:
+// вытеснение считает движок отдельным `evicted_events`.
+const counters = {
+  calls: 0, rx_sof: 0, truncated_payloads: 0, decode_errors: 0, dropped_events: 0,
+  file_reads: 0, partial_results: 0, contract_violations: 0, xdi_events: 0
+};
 
 // ── QPC: 6 знаков после точки и длительность вызова в микросекундах ───────
 // Date.now() даёт миллисекунды — для `dur` этого мало. QueryPerformanceCounter
@@ -205,7 +211,8 @@ function installFtHook(name, addr) {
       onEnter(args) { this.buf = args[1]; this.len = args[2].toInt32(); this.pwritten = args[3]; },
       onLeave(ret) {
         let n = 0; try { n = this.pwritten.readU32(); } catch (e) {}
-        log('TX ftd2xx FT_Write rc=' + ret.toInt32() + ' len=' + this.len + ' n=' + n + ' : ' + hexDump(this.buf, Math.min(this.len, MAXDUMP)));
+        chunkedLog('TX ftd2xx FT_Write rc=' + ret.toInt32() + ' len=' + this.len + ' n=' + n,
+          this.buf, this.len);
       }
     });
   } else if (name === 'FT_Read') {
@@ -213,7 +220,8 @@ function installFtHook(name, addr) {
       onEnter(args) { this.buf = args[1]; this.len = args[2].toInt32(); this.pgot = args[3]; },
       onLeave(ret) {
         let n = 0; try { n = this.pgot.readU32(); } catch (e) {}
-        if (n > 0) log('RX ftd2xx FT_Read rc=' + ret.toInt32() + ' want=' + this.len + ' n=' + n + ' : ' + hexDump(this.buf, Math.min(n, MAXDUMP)));
+        if (n > 0) chunkedLog('RX ftd2xx FT_Read rc=' + ret.toInt32() + ' want=' + this.len + ' n=' + n,
+          this.buf, n);
       }
     });
   } else if (name === 'FT_Open' || name === 'FT_OpenEx') {
@@ -456,7 +464,7 @@ function installVcpHooks() {
           // GetOverlappedResult/Ex или из sweep-fallback по OVERLAPPED.Internal.
           return;
         }
-        log('VCP TX WriteFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0) + ' : ' + hexDump(this.buf, Math.min(this.len, MAXDUMP)));
+        chunkedLog('VCP TX WriteFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0), this.buf, this.len);
       }
     });
   }
@@ -502,7 +510,7 @@ function installVcpHooks() {
           return;
         }
         const ln = n > 0 ? n : 0;
-        if (ln > 0) log('VCP RX ReadFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0) + ' : ' + hexDump(this.buf, Math.min(ln, MAXDUMP)));
+        if (ln > 0) chunkedLog('VCP RX ReadFile(' + comHandles[this.hkey] + ') rc=' + ret.toInt32() + ' n=' + n + ' ovl=' + (this.ovl ? 1 : 0), this.buf, ln);
       }
     });
   }
@@ -880,13 +888,13 @@ function ovlEmit(e, n) {
     try { fileEnt = fileHandles[hkey] || null; } catch (err) {}
     if (e.isRead) {
       if (fileEnt) return;
-      log('VCP RX ReadFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1 : ' + hexDump(e.buf, Math.min(n, MAXDUMP)));
+      chunkedLog('VCP RX ReadFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1', e.buf, n);
     } else if (fileEnt) {
       fileEnt.bytes += n;
       fileEnt.writes += 1;
       log('FILE write ' + fileEnt.path + ' n=' + n + ' total=' + fileEnt.bytes);
     } else {
-      log('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1 : ' + hexDump(e.buf, Math.min(n, MAXDUMP)));
+      chunkedLog('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + n + ' ovl=1', e.buf, n);
     }
   } catch (err) { ovlErr('ovlEmit', err); }
 }
@@ -1016,7 +1024,7 @@ function ovlRemember(args, isRead) {
     const ent = ovlPending[key];
     if (!isRead && ent.kind === 'com' && ent.len > 0) {
       try {
-        log('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + ent.len + ' ovl=1 : ' + hexDump(ent.buf, Math.min(ent.len, MAXDUMP)));
+        chunkedLog('VCP TX WriteFile(' + ovlLabel(hkey) + ') rc=0 n=' + ent.len + ' ovl=1', ent.buf, ent.len);
         ent.txLogged = true;
       } catch (err) { ovlErr('tx-enter', err); }
     }
@@ -1162,7 +1170,7 @@ function installOverlappedHooks() {
       const hkey = args[0].toString();
       const buf = args[1];
       const len = args[2].toInt32();
-      if (len > 0) log('VCP TX WriteFileEx(' + ovlLabel(hkey) + ') len=' + len + ' ovl=1 : ' + hexDump(buf, Math.min(len, MAXDUMP)));
+      if (len > 0) chunkedLog('VCP TX WriteFileEx(' + ovlLabel(hkey) + ') len=' + len + ' ovl=1', buf, len);
     })
   });
   if (pReadEx) attachHook(pReadEx, {
@@ -1249,6 +1257,30 @@ function readBe32(ptr) { try { return ((u8(ptr) << 24) | (u8(ptr.add(1)) << 16) 
 function str8(ptr) { try { return ptr && !ptr.isNull() ? ptr.readUtf8String() : ''; } catch (e) { return ''; } }
 function str16(ptr) { try { return ptr && !ptr.isNull() ? ptr.readUtf16String() : ''; } catch (e) { return ''; } }
 function hx(ptr, len) { try { return len > 0 ? hexDump(ptr, Math.min(len, MAXDUMP)) : ''; } catch (e) { return ''; } }
+
+// Одна строка лога — не больше MAXDUMP байт. Крупный буфер режем на части с
+// `part=i/n`, чтобы хвост не терялся молча (16 КиБ FTDI/VCP — реальный кейс).
+// Если частей больше 64, пишем явную отметку усечения с исходной длиной: лучше
+// видимая потеря, чем тихая.
+function chunkedLog(head, buf, len) {
+  try {
+    if (!len || len <= 0) { log(head); return; }
+    const total = Math.ceil(len / MAXDUMP);
+    const parts = Math.min(total, 64);
+    for (let i = 0; i < parts; i++) {
+      const off = i * MAXDUMP;
+      const take = Math.min(len - off, MAXDUMP);
+      if (take <= 0) break;
+      let s = head;
+      if (total > 1) s += ' part=' + (i + 1) + '/' + total;
+      if (total > parts && i === parts - 1) {
+        counters.truncated_payloads += 1;
+        s += ' truncated=1 len=' + len + ' logged=' + (parts * MAXDUMP);
+      }
+      log(s + ' : ' + hx(buf.add(off), take));
+    }
+  } catch (e) { hookError('chunked log', e); }
+}
 function hex2(v) {
   var s = (v & 0xff).toString(16);
   return '0x' + (s.length < 2 ? '0' + s : s);
@@ -1424,39 +1456,46 @@ function markChannelsPossiblyOpen(reason) {
 // ERR_BUFFER_EMPTY (0x10) и ERR_TIMEOUT (0x11) — штатные ответы опроса.
 // Построчно их писать нельзя (поток забивается), но и терять нельзя: считаем
 // и печатаем агрегат раз в 5 с и на disconnect.
-const emptyStat = {};   // ch -> {n, timeout_ms, last_rc}
-const txErrStat = {};   // ch -> {n, last_rc}
+const emptyStat = {};   // load|ch|gen|rc|timeout_ms -> {n, ...}
+const txErrStat = {};   // load|ch|gen|rc -> {n, ...}
 let emptyTimer = null;
 
-function emptyPoll(ch, rc, timeoutMs) {
-  const k = String(ch);
-  let st = emptyStat[k];
-  if (!st) st = emptyStat[k] = { n: 0, timeout_ms: timeoutMs, last_rc: rc };
-  st.n += 1;
-  st.timeout_ms = timeoutMs;
-  st.last_rc = rc;
+function chanGenOf(load, ch) {
+  const st = chanState[chanKey(load, ch)];
+  return st ? st.gen : 0;
 }
 
-function txErr(ch, rc) {
-  const k = String(ch);
-  let st = txErrStat[k];
-  if (!st) st = txErrStat[k] = { n: 0, last_rc: rc };
+// Ключ агрегата — по загрузке DLL, поколению канала, коду и таймауту: иначе
+// разные результаты и таймауты сливаются в одну строку и «агрегат» врёт.
+function emptyPoll(load, ch, rc, timeoutMs) {
+  const gen = chanGenOf(load, ch);
+  const k = load + '|' + ch + '|' + gen + '|' + (rc >>> 0) + '|' + (timeoutMs >>> 0);
+  let st = emptyStat[k];
+  if (!st) st = emptyStat[k] = { n: 0, load: load, ch: ch, gen: gen, rc: rc, timeout_ms: timeoutMs };
   st.n += 1;
-  st.last_rc = rc;
+}
+
+function txErr(load, ch, rc) {
+  const gen = chanGenOf(load, ch);
+  const k = load + '|' + ch + '|' + gen + '|' + (rc >>> 0);
+  let st = txErrStat[k];
+  if (!st) st = txErrStat[k] = { n: 0, load: load, ch: ch, gen: gen, rc: rc };
+  st.n += 1;
 }
 
 function flushIoStats() {
   for (const k in emptyStat) {
     const st = emptyStat[k];
     if (!st.n) continue;
-    log('J2534 rx-empty ch=' + k + ' n=' + st.n + ' timeout_ms=' + st.timeout_ms +
-        ' last_rc=0x' + (st.last_rc >>> 0).toString(16));
+    log('J2534 rx-empty ch=' + st.ch + ' gen=' + st.gen + ' mod=' + st.load + ' n=' + st.n +
+        ' timeout_ms=' + st.timeout_ms + ' last_rc=0x' + (st.rc >>> 0).toString(16));
     st.n = 0;
   }
   for (const k in txErrStat) {
     const st = txErrStat[k];
     if (!st.n) continue;
-    log('J2534 tx-err-stat ch=' + k + ' n=' + st.n + ' last_rc=0x' + (st.last_rc >>> 0).toString(16));
+    log('J2534 tx-err-stat ch=' + st.ch + ' gen=' + st.gen + ' mod=' + st.load + ' n=' + st.n +
+        ' last_rc=0x' + (st.rc >>> 0).toString(16));
     st.n = 0;
   }
 }
@@ -1527,22 +1566,26 @@ function ptRecord(base, idx) {
   const flags = u32(p.add(8));
   const tsv = u32(p.add(12));
   const size = u32(p.add(16)) >>> 0;
+  const xdiRaw = u32(p.add(20)) >>> 0;      // ExtraDataIndex: где начинаются extra-данные
   const dataPtr = p.add(24);
-  let len = 0, canId = -1, svc = null, hex = '';
+  let len = 0, canId = -1, idLen = 0, svc = null, hex = '', xdi = 0;
   if (size <= PT_DATA_MAX) {
     const isCan = (proto === 5 || proto === 6);
-    let off = 0;
-    if (isCan && size >= 4) { canId = readBe32(dataPtr); off = 4; }
-    len = size - off;
+    // CAN: первые 4 байта Data — идентификатор кадра. Он декодируется в `id`,
+    // но исходные байты остаются в hex целиком: раньше они выносились из hex и
+    // терялись при обратной сборке кадра.
+    if (isCan && size >= 4) { canId = readBe32(dataPtr); idLen = 4; }
+    len = size;
     if (size > 0) {
-      const svcOff = isCan ? off : ptStripLength(dataPtr, size);
+      const svcOff = isCan ? idLen : ptStripLength(dataPtr, size);
       svc = ptServiceByte(proto, dataPtr, size, svcOff);
+      // Горячий путь (§8): hexDump только для непустых буферов.
+      hex = hx(dataPtr, size);
     }
-    // Горячий путь (§8): hexDump только для непустых буферов.
-    if (len > 0) hex = hx(dataPtr.add(off), len);
+    if (xdiRaw > 0 && xdiRaw < size) { xdi = xdiRaw; counters.xdi_events += 1; }
   }
   return { proto: proto, rxs: rxs, flags: flags, ts: tsv, size: size,
-           len: len, canId: canId, svc: svc, hex: hex };
+           len: len, canId: canId, idLen: idLen, svc: svc, hex: hex, xdi: xdi };
 }
 
 // c.common=1 — все общие поля на строке сообщения (одиночный вызов);
@@ -1556,10 +1599,13 @@ function ptLine(dir, ch, r, c) {
   if (sof) s += ' sof=1';
   s += ' proto=' + ptProtoName(r.proto);
   if (r.canId >= 0) s += ' id=0x' + r.canId.toString(16).toUpperCase();
+  if (r.idLen > 0) s += ' idlen=' + r.idLen;
   if (r.svc !== null) s += ' svc=' + hex2(r.svc);
+  if (r.xdi > 0) s += ' xdi=' + r.xdi;
   s += ' len=' + r.len;
   if (c.common) s += ' dur=' + c.dur + ' rc=' + c.rc;
-  if (sof) return s;                       // SOF: короткая строка без hex (D2)
+  // SOF без данных — короткая строка (D2); SOF с данными сохраняет и байты.
+  if (sof && r.len === 0) return s;
   if (r.len > 0) s += ' : ' + r.hex;
   return s;
 }
@@ -1657,8 +1703,10 @@ function installJ2534Hook(name, addr, mod, load) {
         const rc = ret.toInt32();
         // DeviceID валиден только при успехе; при ошибке пишем dev=-1.
         const dev = rc === 0 ? (u32(this.pDev) >>> 0) : -1;
+        // `mod=` — идентификатор загрузки DLL: по нему видно, что второй Open
+        // идёт БЕЗ выгрузки библиотеки (docs/12, приёмка Close → Open).
         log('J2534 open name="' + quote(this.name) + '" vendor="' + vendor + '" dll="' + dll +
-            '" dev=' + dev + ' rc=' + rc + ' th=' + this.th);
+            '" dev=' + dev + ' mod=' + load + ' rc=' + rc + ' th=' + this.th);
       })
     });
     return;
@@ -1729,54 +1777,95 @@ function installJ2534Hook(name, addr, mod, load) {
         const nOut = u32(this.pNum) >>> 0;
         counters.calls += 1;
 
-        if (rc === 0x10 || rc === 0x11) {          // ERR_BUFFER_EMPTY / ERR_TIMEOUT
-          emptyPoll(this.ch, rc, this.timeoutMs);
+        const to = this.timeoutMs;
+        // rc=0 печатается как `0`, остальные — hex: так строка не меняет вид
+        // для успешных вызовов и остаётся однозначной для ошибок.
+        const rcHex = rc === 0 ? '0' : '0x' + (rc >>> 0).toString(16);
+        // Предел чтения — ёмкость входного массива (n_in). n_out > n_in значит,
+        // что драйвер записал больше, чем ему дали: читаем только n_in, но факт
+        // нарушения контракта фиксируем отдельно, а не молча обрезаем.
+        const capByInput = this.nIn > 0 ? this.nIn : 256;
+        const overflow = nOut > capByInput;
+        let cap = Math.min(nOut, capByInput, 256);
+
+        if ((rc === 0x10 || rc === 0x11) && nOut === 0) {   // ERR_BUFFER_EMPTY / ERR_TIMEOUT
+          emptyPoll(load, this.ch, rc, to);
           if (MODE === 'full') {
             log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
-                ' n_out=' + nOut + ' rc=0x' + (rc >>> 0).toString(16) + ' th=' + this.th + ' dur=' + dur);
+                ' n_out=0 timeout_ms=' + to + ' rc=' + rcHex + ' th=' + this.th + ' dur=' + dur);
           }
           return;
         }
-        if (rc !== 0) {
+        if (rc !== 0 && nOut === 0) {
           log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
-              ' n_out=' + nOut + ' rc=0x' + (rc >>> 0).toString(16) + ' th=' + this.th + ' dur=' + dur);
-          log('J2534 rx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=ReadMsgs');
+              ' n_out=0 timeout_ms=' + to + ' rc=' + rcHex + ' th=' + this.th + ' dur=' + dur);
+          log('J2534 rx-error ch=' + this.ch + ' rc=' + rcHex + ' op=ReadMsgs');
           return;
         }
         if (nOut === 0) {
           log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
-              ' n_out=0 rc=0 th=' + this.th + ' dur=' + dur);
-          return;
-        }
-        if (abi.dec === 0) {
-          // ABI не подтверждён (05.00 или ambiguous): раскладку PASSTHRU_MSG не
-          // угадываем — фиксируем факт вызова и счётчики, структуру не читаем.
-          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
-              ' n_out=' + nOut + ' rc=0 th=' + this.th + ' dur=' + dur + ' dec=0');
+              ' n_out=0 timeout_ms=' + to + ' rc=0 th=' + this.th + ' dur=' + dur);
           return;
         }
 
-        const cap = Math.min(nOut, 256);
+        // rc != 0 при непустом n_out — частичный результат: контракт PassThru
+        // допускает сообщения, уже снятые с очереди, вместе с кодом ошибки.
+        const partial = rc !== 0;
+        const emptyWithMsgs = (rc === 0x10 || rc === 0x11) && nOut > 0;
+        if (partial) counters.partial_results += 1;
+        if (emptyWithMsgs) {
+          // «Пусто» с сообщениями — тоже нарушение контракта драйвера.
+          counters.contract_violations += 1;
+          log('J2534 msgs-empty-with-data ch=' + this.ch + ' call=' + this.call +
+              ' n_out=' + nOut + ' rc=' + rcHex);
+        }
+        if (overflow) {
+          counters.contract_violations += 1;
+          log('J2534 msgs-overflow ch=' + this.ch + ' call=' + this.call + ' n_in=' + this.nIn +
+              ' n_out=' + nOut + ' read=' + cap + ' rc=' + rcHex);
+        }
+        const contractTag = overflow
+          ? ' contract=n_out_gt_n_in'
+          : (emptyWithMsgs ? ' contract=empty_with_msgs' : '');
+        if (abi.dec === 0 || this.pMsg.isNull()) {
+          // ABI не подтверждён (05.00 или ambiguous): раскладку PASSTHRU_MSG не
+          // угадываем — фиксируем факт вызова и счётчики, структуру не читаем.
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' timeout_ms=' + to + ' rc=' + rcHex +
+              (partial ? ' partial=1' : '') + contractTag +
+              ' th=' + this.th + ' dur=' + dur + ' dec=0');
+          return;
+        }
+
         const recs = [];
         for (let i = 0; i < cap; i++) recs.push(ptRecord(this.pMsg, i));
         if (nOut > cap) {
-          counters.truncated_payloads += 1;
-          log('J2534 rx-truncated ch=' + this.ch + ' returned=' + nOut + ' logged=' + cap);
+          // Усечение именно по нашему пределу 256. n_out > n_in — не усечение,
+          // а нарушение контракта: оно посчитано выше и не должно раздувать
+          // `truncated_payloads` (иначе «усечений нет» не докажешь).
+          if (cap >= 256) counters.truncated_payloads += 1;
+          log('J2534 rx-truncated ch=' + this.ch + ' call=' + this.call + ' returned=' + nOut +
+              ' logged=' + cap);
         }
-        const single = (nOut === 1 && cap === 1);
+        const single = (recs.length === 1 && !partial && !overflow);
         if (!single) {
           log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
-              ' n_out=' + nOut + ' rc=0 th=' + this.th + ' dur=' + dur);
+              ' n_out=' + nOut + ' timeout_ms=' + to + ' rc=' + rcHex +
+              (partial ? ' partial=1' : '') + contractTag +
+              ' th=' + this.th + ' dur=' + dur);
         }
         for (let i = 0; i < recs.length; i++) {
           const r = recs[i];
           const isSof = (r.rxs & 0x02) !== 0;
           if (isSof) counters.rx_sof += 1;
           // Компактный режим: SOF построчно не пишется, только счётчик (§4).
-          if (MODE === 'compact' && isSof) continue;
+          // Полезные данные SOF (len > 0) сохраняются и в компактном режиме —
+          // отбрасывается только пустой статус.
+          if (MODE === 'compact' && isSof && r.len === 0) continue;
           log(ptLine('RX', this.ch, r, {
             call: this.call, i: i + 1, n: recs.length, common: single,
-            nIn: this.nIn, nOut: nOut, th: this.th, dur: dur, rc: rc
+            nIn: this.nIn, nOut: nOut, th: this.th, dur: dur, rc: rc,
+            partial: partial, overflow: overflow
           }));
         }
       })
@@ -1794,6 +1883,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.call = ++CALL_SEQ;
         this.th = threadId();
         this.t0 = qpcNow();
+        try { this.timeoutMs = args[3].toInt32(); } catch (e) { this.timeoutMs = 0; }
         chanTouch(load, this.ch, 'WriteMsgs');
         // Снимок ДО вызова: драйвер правит массив и *pNumMsgs на месте.
         this.recs = [];
@@ -1808,24 +1898,25 @@ function installJ2534Hook(name, addr, mod, load) {
         const dur = qpcUs(this.t0, qpcNow());
         const nOut = u32(this.pNum) >>> 0;   // сколько драйвер реально принял
         counters.calls += 1;
+        const to = this.timeoutMs;
         if (this.nIn > this.cap && this.cap > 0) {
           counters.truncated_payloads += 1;
           log('J2534 tx-truncated ch=' + this.ch + ' queued=' + this.nIn + ' logged=' + this.cap);
         }
         if (rc !== 0) {
-          txErr(this.ch, rc);
+          txErr(load, this.ch, rc);
           log('J2534 tx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=WriteMsgs');
         }
         if (!this.recs.length) {
           log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=WriteMsgs n_in=' + this.nIn +
-              ' n_out=' + nOut + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur +
+              ' n_out=' + nOut + ' timeout_ms=' + to + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur +
               (abi.dec === 0 ? ' dec=0' : ''));
           return;
         }
         const single = (this.recs.length === 1 && this.nIn === 1);
         if (!single) {
           log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=WriteMsgs n_in=' + this.nIn +
-              ' n_out=' + nOut + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur);
+              ' n_out=' + nOut + ' timeout_ms=' + to + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur);
         }
         // Полнота TX: сохраняются ВСЕ n_in входных сообщений, n_out — ответ драйвера.
         for (let i = 0; i < this.recs.length; i++) {
@@ -2968,7 +3059,10 @@ rpc.exports = {
       truncated_payloads: counters.truncated_payloads,
       decode_errors: counters.decode_errors,
       dropped_events: counters.dropped_events,
-      file_reads: counters.file_reads
+      file_reads: counters.file_reads,
+      partial_results: counters.partial_results,
+      contract_violations: counters.contract_violations,
+      xdi_events: counters.xdi_events
     };
   },
   ping: function () {

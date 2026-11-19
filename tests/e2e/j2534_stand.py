@@ -254,7 +254,7 @@ def main():
           count(r"J2534 chan-possibly-open ch=1 gen=1 reason=resume") >= 1)
 
     # TX: пакетная запись 5 → 2
-    tx_calls = re.findall(r"J2534 call ch=1 call=(\d+) op=WriteMsgs n_in=5 n_out=2 rc=0", text)
+    tx_calls = re.findall(r"J2534 call ch=1 call=(\d+) op=WriteMsgs n_in=5 n_out=2 timeout_ms=100 rc=0", text)
     check("WriteMsgs: n_in=5, драйвер принял n_out=2 (два прохода)", len(tx_calls) >= 2, str(tx_calls))
     tx_msgs = re.findall(r"J2534 TX ch=1 call=(\d+) i=(\d+)/(\d+)", text)
     check("WriteMsgs: записаны все 5 входных сообщений на проход", len(tx_msgs) >= 10, "TX строк: %d" % len(tx_msgs))
@@ -266,16 +266,70 @@ def main():
         check("WriteMsgs: у первого вызова ровно i=1..5", bool(full), str({k: sorted(v) for k, v in per_call.items()}))
 
     # RX: 3 сообщения, одно из них SOF
-    rx_calls = re.findall(r"J2534 call ch=1 call=(\d+) op=ReadMsgs n_in=10 n_out=3 rc=0", text)
+    rx_calls = re.findall(r"J2534 call ch=1 call=(\d+) op=ReadMsgs n_in=10 n_out=3 timeout_ms=20 rc=0", text)
     check("ReadMsgs: n_in=10, n_out=3 (два прохода)", len(rx_calls) >= 2, str(rx_calls))
     sofs = re.findall(r"J2534 RX ch=1 call=\d+ i=(\d+)/(\d+) ts=0 rxs=0x2 sof=1 proto=0x8003 len=0$", text, re.M)
     if args.mode == "full":
         check("SOF: отдельная короткая строка без hex", len(sofs) >= 2, "SOF строк: %d" % len(sofs))
         check("SOF не содержит hex-секции", not re.search(r"sof=1[^\n]* : ", text))
-        check("rx-empty: подавленные таймауты посчитаны", count(r"J2534 rx-empty ch=1 n=\d+ timeout_ms=20 last_rc=0x1[01]") >= 1)
+        check(
+            "rx-empty: подавленные таймауты посчитаны (ключ mod/gen/timeout)",
+            count(r"J2534 rx-empty ch=1 gen=\d+ mod=\d+ n=\d+ timeout_ms=20 last_rc=0x1[01]") >= 1,
+            "%d строк" % count(r"J2534 rx-empty"),
+        )
+        check(
+            "rx-empty: последний rc/таймаут в строке вызова",
+            count(r"op=ReadMsgs n_in=10 n_out=0 timeout_ms=20 rc=0x1[01]") >= 1,
+        )
     else:
         check("compact: SOF не печатается построчно", len(sofs) == 0)
-        check("compact: агрегат rx_sof", "rx-sof-stat" in text or "# counters" in text)
+        check(
+            "compact: агрегат rx_sof в счётчиках",
+            "rx-sof-stat" in text or bool(re.search(r"# agent-counters .*rx_sof=(\d+)", text)),
+        )
+
+    # ── P1: таймаут на строке вызова ────────────────────────────────────
+    check(
+        "ReadMsgs: timeout_ms в обычной строке вызова",
+        count(r"J2534 call ch=1 call=\d+ op=ReadMsgs n_in=10 n_out=3 timeout_ms=20 rc=0") >= 2,
+    )
+
+    # ── P0: частичный результат при rc!=0 ───────────────────────────────
+    partial = re.findall(
+        r"J2534 call ch=1 call=(\d+) op=ReadMsgs n_in=10 n_out=2 timeout_ms=777 rc=0x10 partial=1", text
+    )
+    check("ReadMsgs: сообщения при rc!=0 сохранены (partial=1)", bool(partial), str(count(r"partial=1")))
+    if partial:
+        rx_partial = [c for c in re.findall(r"J2534 RX ch=1 call=(\d+) i=\d+/\d+", text)]
+        check(
+            "ReadMsgs: при partial=1 записаны оба сообщения",
+            rx_partial.count(partial[0]) == 2,
+            "call=%s RX=%d" % (partial[0], rx_partial.count(partial[0])),
+        )
+
+    # ── P0: нарушение контракта n_out > n_in ────────────────────────────
+    check(
+        "ReadMsgs: n_out > n_in зафиксирован, а не обрезан молча",
+        count(r"J2534 msgs-overflow ch=1 call=\d+ n_in=10 n_out=12 read=10") >= 1,
+    )
+    check(
+        "ReadMsgs: строка вызова помечена contract=n_out_gt_n_in",
+        count(r"op=ReadMsgs n_in=10 n_out=12 timeout_ms=778 rc=0 contract=n_out_gt_n_in") >= 1,
+    )
+
+    # ── P0: исходные байты CAN и ExtraDataIndex ─────────────────────────
+    can = re.findall(
+        r"J2534 RX ch=1 call=\d+ i=1/1 .* proto=CAN id=0x7E8 idlen=4 .*xdi=9 len=11 .* : ([0-9a-f ]+)$",
+        text,
+        re.M,
+    )
+    check("CAN: id/len/xdi в строке", bool(can), "строк: %d" % len(can))
+    if can:
+        check(
+            "CAN: исходные байты (включая id) в hex",
+            can[0].startswith("00 00 07 e8"),
+            "hex=%r" % can[0],
+        )
 
     # FAST_INIT: PASSTHRU_MSG, а не 4 байта
     fast = re.findall(r"J2534 ioctl ch=1 call=\d+ id=0x0005 \(FAST_INIT\) .*in_size=4 in=0002277f", text)
@@ -296,8 +350,39 @@ def main():
     check("periodic-start: интервал и id", count(r"J2534 periodic-start ch=1 call=\d+ id=0x7 ms=1000") >= 2)
 
     check("ошибок хука нет", "universal hook error" not in text)
-    counters = re.findall(r"# counters dropped_events=(\d+) truncated_payloads=(\d+) decode_errors=(\d+)", text)
-    check("# counters: dropped=0 truncated=0 decode_errors=0", bool(counters) and counters[-1] == ("0", "0", "0"), str(counters))
+    # Строка агента и моста: `# agent-counters` (движок пишет свой `# counters`
+    # при закрытии сессии, в стенде его нет — стенд проверяет сторону захвата).
+    counters = re.findall(
+        r"# agent-counters dropped_events=(\d+) truncated_payloads=(\d+) decode_errors=(\d+) "
+        r"rx_sof=(\d+) calls=(\d+) partial_results=(\d+) contract_violations=(\d+)",
+        text,
+    )
+    check(
+        "# agent-counters: dropped=0 truncated=0 decode_errors=0",
+        bool(counters) and counters[-1][:3] == ("0", "0", "0"),
+        str(counters),
+    )
+    if counters:
+        check(
+            "# agent-counters: partial/contract посчитаны (сообщения при rc!=0, n_out>n_in)",
+            int(counters[-1][5]) >= 2 and int(counters[-1][6]) >= 2,
+            str(counters[-1]),
+        )
+    check(
+        "# agent-counters: счётчики моста в строке (батчи, буфер)",
+        count(r"# agent-counters .*bridge_events=\d+ bridge_batches=\d+ bridge_backlog_max=\d+") >= 1,
+    )
+
+    # ── Close → Open при ТОМ ЖЕ module_load_id ──────────────────────────
+    opens = re.findall(r"J2534 open .* dev=(\d+) mod=(\d+) rc=0", text)
+    check("J2534 open: три открытия (два прохода + повтор без выгрузки)", len(opens) >= 3, str(opens))
+    if len(opens) >= 3:
+        mods = [m for _, m in opens]
+        check(
+            "Close → Open без выгрузки DLL: второй Open с тем же mod",
+            mods[1] == mods[2] and mods[0] != mods[1],
+            "mods=%s" % mods,
+        )
 
     # Второй проход: после выгрузки DLL события снова идут в лог.
     second = [c for c in re.findall(r"J2534 connect dev=1 ch=1 .*gen=(\d+)", text)]

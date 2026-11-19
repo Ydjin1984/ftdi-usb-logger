@@ -135,6 +135,19 @@ function emptyCounts(): SessionCounts {
   return { events: 0, tx: 0, rx: 0, tx_bytes: 0, rx_bytes: 0, steps: 0, files: 0, errors: 0 };
 }
 
+/** Поля meta одной строкой для поиска: `ключ=значение`, без JSON.stringify. */
+function metaText(ev: Event): string {
+  const meta = ev.meta as Record<string, unknown> | null | undefined;
+  if (!meta || typeof meta !== "object") return "";
+  let out = "";
+  for (const key of Object.keys(meta)) {
+    const value = meta[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out += key + "=" + String(value) + " ";
+    }
+  }
+  return out.toLowerCase();
+}
 class Store {
   state: StoreState;
   private listeners = new Set<() => void>();
@@ -564,6 +577,20 @@ class Store {
     this.emit();
   }
 
+  /** Текст meta для поиска: `ключ=значение` парами, без JSON.stringify. */
+  private static metaText(ev: Event): string {
+    const meta = ev.meta as Record<string, unknown> | null | undefined;
+    if (!meta || typeof meta !== "object") return "";
+    let out = "";
+    for (const key of Object.keys(meta)) {
+      const value = meta[key];
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        out += key + "=" + String(value) + " ";
+      }
+    }
+    return out.toLowerCase();
+  }
+
   visibleEvents(): Event[] {
     const { events, filters, query } = this.state;
     const q = query.trim().toLowerCase();
@@ -571,10 +598,14 @@ class Store {
       return events.filter(
         (e) =>
           filters.has(e.kind) &&
-          (e.hex.includes(q) ||
-            e.api.toLowerCase().includes(q) ||
+          ((e.hex || "").includes(q) ||
+            (e.api || "").toLowerCase().includes(q) ||
             (e.text || "").toLowerCase().includes(q) ||
-            e.raw.toLowerCase().includes(q)),
+            (e.raw || "").toLowerCase().includes(q) ||
+            // В events.jsonl поле raw больше не дублируется (docs/12 §10):
+            // искать нужно и по разобранным полям, иначе ключи вроде
+            // `channel=1` или `timeout_ms=500` перестанут находиться.
+            metaText(e).includes(q)),
       );
     }
     if (filters.size === ALL_KINDS.length) return events;
