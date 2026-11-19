@@ -11,6 +11,8 @@ msg({
   "СЕССИИ": "SESSIONS",
   "USB-УСТРОЙСТВА": "USB DEVICES",
   "ПРОГРАММЫ": "PROGRAMS",
+  // Языконезависимая подпись режима — записана явно, чтобы словарь был полным.
+  "usb": "usb",
   "записать USB-шину (USBPcap)": "record USB bus (USBPcap)",
   "сырой захват USB через драйвер USBPcap (нужны права администратора)":
     "raw USB capture through the USBPcap driver (administrator rights required)",

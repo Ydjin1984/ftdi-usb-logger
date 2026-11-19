@@ -1,7 +1,7 @@
 ﻿; FTDI/USB Logger — установщик Inno Setup 6.
 ;
 ; Собирается из scripts\build-installer.ps1:
-;   ISCC.exe /Q /DAppVersion=0.3.0 installer\ftdi-logger.iss
+;   ISCC.exe /Q /DAppVersion=0.3.1 installer\ftdi-logger.iss
 ;
 ; Payload — portable-сборка (движок + UI + лаунчер + встроенный Python с Frida),
 ; которую готовит build-installer.ps1 в build\installer\payload\FTDI_USB_Logger.
@@ -9,7 +9,7 @@
 ; сам лаунчер при запуске запросит UAC (движку нужны права для Frida-хуков).
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.3.1"
 #endif
 
 [Setup]
@@ -33,6 +33,9 @@ UninstallDisplayIcon={app}\FTDI_USB_Logger.exe
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; Язык мастера выбирается явно: иначе при нескольких [Languages] окно выбора
+; может не показаться, и английский установщик остаётся русским.
+ShowLanguageDialog=yes
 CloseApplications=yes
 RestartApplications=no
 MinVersion=10.0
@@ -50,9 +53,23 @@ VersionInfoCopyright=DaVinci Cyber Engineering
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+; Свои строки обязаны быть на обоих языках, иначе английский мастер показывает
+; русский текст: встроенные .isl их не содержат.
+russian.DesktopIcon=Ярлык на рабочем столе
+english.DesktopIcon=Create a desktop shortcut
+russian.StartMenuIcon=Ярлык в меню «Пуск»
+english.StartMenuIcon=Create a Start menu shortcut
+russian.AdditionalIcons=Дополнительно:
+english.AdditionalIcons=Additional icons:
+russian.UninstallShortcut=Удалить FTDI USB Logger
+english.UninstallShortcut=Uninstall FTDI USB Logger
+russian.LaunchApp=Запустить FTDI/USB Logger
+english.LaunchApp=Launch FTDI/USB Logger
+
 [Tasks]
-Name: "desktopicon"; Description: "Ярлык на рабочем столе"; GroupDescription: "Дополнительно:"; Flags: checkedonce
-Name: "startmenuicon"; Description: "Ярлык в меню «Пуск»"; GroupDescription: "Дополнительно:"; Flags: checkedonce
+Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
+Name: "startmenuicon"; Description: "{cm:StartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "..\build\installer\payload\FTDI_USB_Logger\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -64,10 +81,10 @@ Source: "..\build\installer\payload\README.txt"; DestDir: "{app}"; Flags: ignore
 ; лаунчер при первом запуске (Launcher.cs, EnsureDesktopShortcut).
 Name: "{autodesktop}\FTDI USB Logger"; Filename: "{app}\FTDI_USB_Logger.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; Tasks: desktopicon
 Name: "{autoprograms}\FTDI USB Logger"; Filename: "{app}\FTDI_USB_Logger.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; Tasks: startmenuicon
-Name: "{autoprograms}\Удалить FTDI USB Logger"; Filename: "{uninstallexe}"; Tasks: startmenuicon
+Name: "{autoprograms}\{cm:UninstallShortcut}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
 
 [Run]
-Filename: "{app}\FTDI_USB_Logger.exe"; Description: "Запустить FTDI/USB Logger"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\FTDI_USB_Logger.exe"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Логи запуска создаются уже после установки — Inno их не знает, убираем явно.

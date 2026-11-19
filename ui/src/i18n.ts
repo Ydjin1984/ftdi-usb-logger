@@ -10,13 +10,35 @@
  *
  * Смена языка перезагружает страницу: компоненты строят текст один раз в
  * конструкторе, и полный перезапуск — самый надёжный путь без утечек слушателей.
+ *
+ * Выбор языка хранится в двух местах: в адресе (`?lang=en`) и в localStorage.
+ * Адрес — основной канал: он работает и при заблокированном хранилище, где
+ * переключение раньше молча не применялось.
  */
 
 export type Lang = "ru" | "en";
 
 const STORAGE_KEY = "ftdi.lang";
+const URL_PARAM = "lang";
+
+/** Язык из адреса: `?lang=en`. */
+function langFromUrl(): Lang | null {
+  try {
+    const v = new URL(location.href).searchParams.get(URL_PARAM);
+    return v === "en" || v === "ru" ? (v as Lang) : null;
+  } catch {
+    return null;
+  }
+}
 
 function readLang(): Lang {
+  // Адрес — самый надёжный носитель выбора: он работает и тогда, когда
+  // localStorage недоступен (гостевой/инкогнито-профиль, запрет данных сайтов,
+  // переполнение квоты). Раньше в этом случае setLang молча не срабатывал:
+  // выбор писался в никуда, перезагрузка читала «ru», интерфейс оставался
+  // русским — без единой ошибки в консоли.
+  const fromUrl = langFromUrl();
+  if (fromUrl) return fromUrl;
   try {
     return localStorage.getItem(STORAGE_KEY) === "en" ? "en" : "ru";
   } catch {
@@ -212,10 +234,45 @@ export function setLang(next: Lang): void {
   try {
     localStorage.setItem(STORAGE_KEY, next);
   } catch {
-    /* приватный режим: язык просто не сохранится */
+    /* хранилище недоступно — выбранный язык поедет в адресе */
   }
   for (const fn of listeners) fn(next);
-  location.reload();
+  // Компоненты строят текст один раз в конструкторе, поэтому язык применяем
+  // полной перезагрузкой. Выбор передаём в адресе (`?lang=en`), а не полагаемся
+  // только на хранилище: так смена языка срабатывает и при заблокированном
+  // localStorage, и переживает ручную перезагрузку страницы (F5).
+  try {
+    const url = new URL(location.href);
+    url.searchParams.set(URL_PARAM, next);
+    location.replace(url.toString());
+  } catch {
+    location.reload();
+  }
+}
+
+/**
+ * Перенести язык из адреса в хранилище и убрать параметр из адресной строки.
+ * Если сохранить не удалось, параметр остаётся: тогда он — единственный носитель
+ * выбора и переживёт следующую перезагрузку.
+ */
+export function syncLangParam(): void {
+  const fromUrl = langFromUrl();
+  if (!fromUrl) return;
+  let saved = false;
+  try {
+    localStorage.setItem(STORAGE_KEY, fromUrl);
+    saved = true;
+  } catch {
+    /* хранилище недоступно — оставляем язык в адресе */
+  }
+  if (!saved) return;
+  try {
+    const url = new URL(location.href);
+    url.searchParams.delete(URL_PARAM);
+    history.replaceState(history.state, "", url.toString());
+  } catch {
+    /* адрес не трогаем: роли не играет, язык уже применён */
+  }
 }
 
 /** Локализовать статическую разметку (index.html) и атрибут lang. */

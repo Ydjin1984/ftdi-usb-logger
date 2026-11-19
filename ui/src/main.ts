@@ -24,7 +24,7 @@ import {
   openStopConfirm,
 } from "./components/dialogs";
 import { isDemoMode } from "./api";
-import { errText, localizeDom, msg, t } from "./i18n";
+import { errText, localizeDom, msg, syncLangParam, t } from "./i18n";
 
 msg({
   "Разделы рабочего пространства": "Workspace sections",
@@ -305,6 +305,7 @@ function showBootError(message: string): void {
 }
 
 async function main(): Promise<void> {
+  syncLangParam();
   localizeDom();
   build();
   installDropzone();

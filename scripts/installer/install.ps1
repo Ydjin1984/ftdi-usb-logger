@@ -53,7 +53,7 @@ if (-not $silent) {
     New-Item -Path $reg -Force | Out-Null
     $values = @{
         DisplayName = "FTDI/USB Logger"
-        DisplayVersion = "0.3.0"
+        DisplayVersion = "0.3.1"
         Publisher = "DaVinci Cyber Engineering"
         InstallLocation = $dst
         DisplayIcon = $icon
