@@ -94,6 +94,68 @@ fn text_and_markdown_reports() {
 }
 
 #[test]
+fn proxy_section_appears_only_with_lane_and_warns_on_loss() {
+    use ftdi_logger::models::{ProxyCross, ProxyLane};
+
+    // Без полосы раздела нет: прокси не участвовал — отчёт молчит (docs/13 §8).
+    let plain = sample_meta();
+    let txt = report::render_text(&plain, &[]);
+    let md = report::render_markdown(&plain, &[]);
+    assert!(!txt.contains("J2534 прокси"), "раздел появился без полосы");
+    assert!(!md.contains("J2534 прокси"), "раздел появился без полосы (md)");
+
+    // Потерян 1 кадр из 5 (20 %) — это выше порога 5 %, нужен явный warning.
+    let mut meta = sample_meta();
+    meta.proxy = Some(ProxyLane {
+        files: 2,
+        bytes: 13 * 1024,
+        tx: 5,
+        rx: 4,
+        calls: 9,
+        errors: 1,
+        first_t: Some(0.1),
+        last_t: Some(0.7),
+        cross: ProxyCross {
+            tx_matched: 3,
+            tx_missing: 1,
+            rx_matched: 1,
+            rx_missing: 0,
+            extra: 5,
+        },
+        notes: Vec::new(),
+    });
+    let txt = report::render_text(&meta, &[]);
+    assert!(txt.contains("J2534 прокси"), "{txt}");
+    assert!(txt.contains("Журналов: 2 (13.0 КБ)"), "{txt}");
+    assert!(txt.contains("Кадры: TX 5 / RX 4"), "{txt}");
+    assert!(txt.contains("Вызовов: 9, ошибок: 1"), "{txt}");
+    assert!(txt.contains("совпало TX 3 / RX 1"), "{txt}");
+    assert!(
+        txt.contains("ВНИМАНИЕ"),
+        "20 % потерь должны быть замечены: {txt}"
+    );
+    assert!(txt.contains("20.0 %"), "{txt}");
+
+    let md = report::render_markdown(&meta, &[]);
+    assert!(md.contains("## J2534 прокси"), "{md}");
+    assert!(md.contains("**ВНИМАНИЕ:**"), "{md}");
+
+    // Малая потеря (1 из 100) — без предупреждения: это гонка attach, не потеря.
+    meta.proxy = Some(ProxyLane {
+        cross: ProxyCross {
+            tx_matched: 99,
+            tx_missing: 1,
+            rx_matched: 0,
+            rx_missing: 0,
+            extra: 0,
+        },
+        ..Default::default()
+    });
+    let txt = report::render_text(&meta, &[]);
+    assert!(!txt.contains("ВНИМАНИЕ"), "1 % потерь — это шум, а не warning: {txt}");
+}
+
+#[test]
 fn csv_jsonl_zip_markdown_exports() {
     let td = tempfile::tempdir().unwrap();
     let store = SessionStore::open(td.path()).unwrap();

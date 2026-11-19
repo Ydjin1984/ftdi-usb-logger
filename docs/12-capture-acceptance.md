@@ -239,3 +239,25 @@ python tests\e2e\j2534_stand.py --dll tests\e2e\fake_j2534\target\release\fake_j
 # разбор готового лога
 cargo run --release --manifest-path engine\Cargo.toml --example decode_raw -- <raw.log> --json events.jsonl
 ```
+
+## Второй канал: J2534-прокси (v0.4.0)
+
+Проверка §12 контракта `docs/13-j2534-proxy.md` на этой машине (12 зарегистрированных
+J2534-драйверов, Scanmatik SM2, PCMflash 1.2.0).
+
+| Шаг | Что сделано | Результат |
+|---|---|---|
+| Сборка | `proxy\build.ps1` (x86 + x64, VS 2022) | 14 имён + NONAME 1377–1379, зависимость только `KERNEL32.dll` |
+| Дымовой тест | `proxy\tests\smoke.ps1` над `fake_j2534.dll` | 36/36: форвард 14 функций, шапка, TX/RX, дописывание журнала |
+| Регистрация | `POST /api/j2534/proxy {"action":"install"}` | ключ `PassThruSupport.04.04\Scanmatik - SM2 Proxy` с `FunctionLibrary` = путь установки, `Enabled=1` |
+| Выбор драйвера | после переустановки dist (ini пропал) | сначала взял CHIPSOFT (первый из 12) — исправлено: приоритет бэкапа адаптера, теперь `smj2534.dll` и предупреждение в `notes` |
+| Переключение | `enable` + `select-adapter` | `HKCU\Software\PCMFlash\Adapter` = `J2534: Scanmatik - SM2 Proxy`, бэкап `J2534: Scanmatik - SM2 USB` |
+| Возврат | `disable` + `restore-adapter` | адаптер вернулся к `Scanmatik - SM2 USB` |
+| Снятие | `remove` | ключа нет, в ветке снова 12 устройств, как до опыта |
+| Полоса прокси | журнал из настоящего `raw.log` (330 строк) → `POST /sessions/:id/proxy/collect` | `raw-proxy.log` + `proxy.json`, TX 110/110, RX 110/110, потеряно 0, лишних 0 |
+| Сверка транспорта | первый прогон показал `rx_missing=44` | это кадры HTTP-пробы лицензии (Winsock) — исправлено: сверяются только `transport=j2534` |
+
+Чего не проверяли: живой обмен PCMflash **через** прокси на этом стенде (нужен
+запуск 32-битного PCMflash и физический адаптер; вендорный форвард ординалов
+1377–1379 проверен сборкой и экспортами, но не вызовом — 32-битного вендорного
+драйвера в окружении нет).

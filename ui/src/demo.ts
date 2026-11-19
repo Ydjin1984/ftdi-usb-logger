@@ -58,6 +58,19 @@ export function demoSession(): SessionMeta {
       "adapter: FT232R USB UART serial=A1B2C3D4",
       t("hooks: 36 установлено"),
     ],
+    // Второй канал захвата: полоса J2534-прокси и её сверка с полосой frida (§8).
+    proxy: {
+      files: 2,
+      bytes: 74521,
+      tx: 728,
+      rx: 966,
+      calls: 2876,
+      errors: 0,
+      first_t: 0.02,
+      last_t: 441.6,
+      cross: { tx_matched: 726, tx_missing: 5, rx_matched: 962, rx_missing: 4, extra: 3 },
+      notes: [],
+    },
   };
 }
 

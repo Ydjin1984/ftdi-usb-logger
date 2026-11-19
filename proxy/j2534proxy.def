@@ -1,0 +1,31 @@
+; j2534proxy.def -- exports of the FTDI/USB Logger J2534 proxy.
+;
+; J2534 applications resolve the Pass-Thru entry points by *name*, so the
+; undecorated names below are mandatory (the counterpart DLL uses the same
+; 14 names in the same order and with the same ordinals).
+;
+; Ordinals 1377-1379 are the three undocumented Scanmatik/PCMflash vendor
+; entry points.  They are exported by ordinal only (NONAME), exactly like the
+; real driver, and stay transparent: x86 forwards them with a naked tail-jump,
+; x64 answers ERR_FAILED (0x07) -- there is no 64-bit vendor protocol.
+
+LIBRARY j2534proxy
+
+EXPORTS
+    PassThruOpen                  @1
+    PassThruClose                 @2
+    PassThruConnect               @3
+    PassThruDisconnect            @4
+    PassThruReadMsgs              @5
+    PassThruWriteMsgs             @6
+    PassThruStartPeriodicMsg      @7
+    PassThruStopPeriodicMsg       @8
+    PassThruStartMsgFilter        @9
+    PassThruStopMsgFilter         @10
+    PassThruSetProgrammingVoltage @11
+    PassThruReadVersion           @12
+    PassThruGetLastError          @13
+    PassThruIoctl                 @14
+    Vnd1377 @1377 NONAME
+    Vnd1378 @1378 NONAME
+    Vnd1379 @1379 NONAME

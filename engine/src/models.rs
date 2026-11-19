@@ -358,6 +358,10 @@ pub struct SessionMeta {
     /// Дополнительные факты: EDIABAS INI, лицензионный гейт, версия ftd2xx …
     #[serde(default)]
     pub facts: Vec<String>,
+    /// Полоса J2534-прокси: второй канал захвата (docs/13 §8). `None` — прокси
+    /// не участвовал в сессии или журналов в её окне не нашлось.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyLane>,
 }
 
 fn transport_default() -> String {
@@ -389,8 +393,77 @@ impl SessionMeta {
             engine_version: env!("CARGO_PKG_VERSION").into(),
             dir: String::new(),
             facts: Vec::new(),
+            proxy: None,
         }
     }
+}
+
+// ───────────────────────────── полоса J2534-прокси ────────────────────────
+
+/// Сверка полос frida и proxy по мультимножеству кадров `(dir, hex)` (docs/13 §8).
+///
+/// `*_matched`/`*_missing` считаются по кадрам ОСНОВНОГО канала: насколько полно
+/// их повторил прокси. `extra` — обратное направление: кадры, которые видел
+/// только прокси (значит, frida их потеряла или не успела прицепиться).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ProxyCross {
+    #[serde(default)]
+    pub tx_matched: u64,
+    #[serde(default)]
+    pub tx_missing: u64,
+    #[serde(default)]
+    pub rx_matched: u64,
+    #[serde(default)]
+    pub rx_missing: u64,
+    #[serde(default)]
+    pub extra: u64,
+}
+
+impl ProxyCross {
+    /// Кадров основного канала, по которым шла сверка (знаменатель для «5 %»).
+    pub fn main_frames(&self) -> u64 {
+        self.tx_matched + self.tx_missing + self.rx_matched + self.rx_missing
+    }
+
+    /// Потеряно в прокси кадров основного канала.
+    pub fn missing(&self) -> u64 {
+        self.tx_missing + self.rx_missing
+    }
+}
+
+/// Второй канал захвата: журналы `j2534proxy.dll`, склеенные в сессию.
+///
+/// Все поля с `#[serde(default)]`: сессии, записанные движком до появления
+/// полосы, читаются без ошибок, а неполный `proxy.json` не ломает отчёт.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProxyLane {
+    /// Сколько журналов `proxy-*.log` подхвачено в окне сессии.
+    #[serde(default)]
+    pub files: u64,
+    /// Их суммарный размер — «сколько байт журнала прочитано».
+    #[serde(default)]
+    pub bytes: u64,
+    /// Кадры с непустой полезной нагрузкой (пустые RX-статусы не в счёт).
+    #[serde(default)]
+    pub tx: u64,
+    #[serde(default)]
+    pub rx: u64,
+    /// Вызовы: из строки `# proxy stop: calls=N`, иначе — по сквозному `call=`.
+    #[serde(default)]
+    pub calls: u64,
+    /// Вызовы с `rc != 0` плюс строки `J2534 err`.
+    #[serde(default)]
+    pub errors: u64,
+    /// Границы по времени прокси (`[+<секунды>s]` от загрузки DLL).
+    #[serde(default)]
+    pub first_t: Option<f64>,
+    #[serde(default)]
+    pub last_t: Option<f64>,
+    #[serde(default)]
+    pub cross: ProxyCross,
+    /// Почему сверка неполна: «нет основного канала», «время старта не разобрано» …
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 // ─────────────────────────────── шаг ─────────────────────────────────────

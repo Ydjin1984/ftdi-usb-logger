@@ -1,0 +1,45 @@
+; j2534proxy.ini.sample -- sample configuration of the FTDI/USB Logger J2534 proxy.
+;
+; Copy next to j2534proxy.dll as "j2534proxy.ini" (the installer does this and
+; fills RealLibrary from the already registered PassThru device).  Encoding:
+; ASCII / UTF-8 without BOM, Windows INI syntax.  It is read with
+; GetPrivateProfileStringA on the first call, so a change needs a restart of
+; the J2534 application.
+;
+; Environment variables win over this file (docs/13 section 4):
+;   FTDI_J2534_REAL_DLL   -- exact path of the real driver (priority 1)
+;   FTDI_J2534_PROXY_LOG  -- exact log file path       (priority 1)
+;   FTDI_J2534_PROXY_OFF=1 -- switch the proxy off      (priority 1)
+
+[proxy]
+
+; 1 = proxy is active (journal + forwarding), 0 = pure pass-through, no journal.
+; FTDI_J2534_PROXY_OFF=1 overrides this value.
+Enabled=1
+
+; Full path of the real Pass-Thru library this proxy forwards to.
+; Priority: FTDI_J2534_REAL_DLL > this key > real_dll.txt next to the DLL.
+; The installer fills it from the registered driver (FunctionLibrary of the
+; device selected in HKCU\Software\PCMFlash\Adapter).
+; An empty value or a missing file is not fatal for the application: every
+; call returns ERR_DEVICE_NOT_CONNECTED (0x08) and the journal says
+; "# proxy fatal: real library not found".
+RealLibrary=C:\Program Files (x86)\Scanmatik\smj2534.dll
+
+; Directory for proxy-YYYYMMDD-HHMMSS-pid<PID>.log.
+; Empty value -> %LOCALAPPDATA%\FTDI_USB_Logger\j2534proxy.
+; If the directory cannot be created or written, %TEMP% is used.
+LogDir=C:\Users\User\AppData\Local\FTDI_USB_Logger\j2534proxy
+
+; Hex payload limit per journal line.  Longer frames are clipped and the line
+; keeps "truncated=1" (the real DataSize is still written in len=).  Max 4128.
+MaxDataBytes=4128
+
+[device]
+
+; Written into HKLM\SOFTWARE\WOW6432Node\PassThruSupport.04.04\<Name> by the
+; installer, and echoed in the journal header as "# device:".  A J2534
+; application shows this name, e.g. "J2534: Scanmatik - SM2 Proxy".
+Name=Scanmatik - SM2 Proxy
+
+Vendor=DaVinci Cyber Engineering

@@ -382,6 +382,21 @@
   color: var(--text-dim);
   font-weight: 500;
 }
+/* Второй канал захвата: полоса J2534-прокси в карточке и инспекторе сессии. */
+.session-item__proxy {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--text-mute);
+  overflow-wrap: anywhere;
+}
+.session-item__proxy.is-warn {
+  color: var(--warn);
+}
 .badge-rec {
   font-family: var(--font-mono);
   font-size: 8.5px;
@@ -738,6 +753,46 @@
   font-size: 11px;
   color: var(--text-mute);
   line-height: 1.45;
+}
+/* Строки статуса J2534-прокси: моноширинный текст, по строке на факт. */
+.proxy-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+/* Чекбокс с подписью в одну строку (настройки, второй канал захвата). */.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.check-row input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--acc);
+}
+.check-row:has(input:disabled) {
+  cursor: default;
+  color: var(--text-mute);
+}
+.check-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.check-row__hint {
+  font-size: 11px;
+  color: var(--text-mute);
 }
 .format-grid {
   display: grid;

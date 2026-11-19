@@ -135,10 +135,42 @@ flowchart LR
 | J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + **все** экспорты `PassThru*` (open/connect/read/write/ioctl/filter/voltage/version) | ✅ на уровне сообщений: протокол, CAN ID (и `idlen=` — id остаётся в `hex`), `ExtraDataIndex`, payload, ISOTP-PCI, сервис KWP/UDS; вендорные протоколы без CAN-id (PCMflash `0x8003`) разбираются по префиксу длины; частичные результаты при `rc!=0` и нарушения контракта драйвера не теряются |
 | **LAN** (J2534-по-IP, DoIP/ISO 13400, BMW ICOM/HSFZ, сетевые адаптеры) | хуки Winsock `ws2_32`: `connect/accept`, `send/recv`, `WSASend/WSARecv`, `sendto/recvfrom`, `WSAGetOverlappedResult` | ✅ обмен TCP/UDP целиком, включая overlapped; DoIP-заголовки, source/target address, UDS-сервис и NRC в инспекторе |
 | Любой USB с проприетарным драйвером | сырой захват USBPcap → `USBRAW bus/dev/ep/transfer/…` | ⚠️ нужен установленный [USBPcap](https://desowin.org/usbpcap/) + права администратора; отдельная сессия — одновременно с захватом процесса пока не запускается |
+| **J2534-прокси** (тот же обмен, но со стороны драйвера) | своя 32-битная DLL регистрируется отдельным J2534-устройством, форвардит вызовы в настоящий драйвер и пишет журнал вне процесса | ✅ второй канал к Frida: работает без инъекции, видит вендорные ординалы 1377–1379, журнал сводится в сессию и сверяется кадр-в-кадр |
 
 В панели **USB-УСТРОЙСТВА** — все USB-устройства системы и зарегистрированные J2534-драйверы;
 в шапке — индикатор `шина: USB/J2534 · N`. Список устройств обновляется каждые ~12 с даже
 во время записи, поэтому замена шнурка видна без перезапуска.
+
+---
+
+## J2534 через прокси — второй канал захвата
+
+Frida-агент видит вызовы **изнутри** процесса. Прокси-DLL видит их **на границе**
+«приложение → драйвер»: приложение грузит нашу библиотеку как обычный J2534-драйвер,
+она форвардит всё в настоящий и пишет свой журнал. Это второй, независимый канал —
+он работает, даже когда внедриться в процесс не удаётся.
+
+```mermaid
+flowchart LR
+    P["PCMflash"] --> X["j2534proxy.dll<br/>наша, x86"]
+    X --> R["настоящий драйвер<br/>smj2534.dll"]
+    R --> A["адаптер"] --> E["ЭБУ"]
+    X --> L2["proxy-*.log<br/>полоса proxy"]
+    F["Frida-агент"] -.-> X
+    F --> L1["raw.log<br/>полоса frida"]
+    L1 --> M["сессия + сверка кадров"]
+    L2 --> M
+```
+
+Включается в **Настройки → J2534**: переключатель регистрирует устройство
+`Scanmatik - SM2 Proxy`, при необходимости переключает адаптер в PCMflash (прежний выбор
+сохраняется и восстанавливается) и подхватывает журналы в открытую сессию. В сессии
+появляются обе полосы: `raw.log` и `raw-proxy.log`, а отчёт показывает, сколько кадров
+совпало, сколько потерял каждый канал.
+
+Установщик ставит прокси сразу (галка «Установить J2534-прокси», запрос UAC) — но
+**не** переключает адаптер в чужой программе: это всегда осознанное действие.
+Подробности, формат журнала и откат — [docs/13-j2534-proxy.md](docs/13-j2534-proxy.md).
 
 ---
 
@@ -378,6 +410,7 @@ sequenceDiagram
 | `engine/` | Rust-движок: `main/config/discovery/procscan/screenshot/frida`, `models/store/decode/api/report/import/ediabas/usbdevices/j2534/usbpcap`, интеграционные тесты |
 | `ui/` | интерфейс (TypeScript + CSS, vite): поток, инспектор, таймлайн, панели, диалоги, CDP-проверки |
 | `sidecar/` | `bridge.py` (JSON Lines) + `agents/universal_capture.js` (все хуки) и `ftdi_capture.js` (старый набор) |
+| `proxy/` | 32-битная J2534-прокси (`j2534proxy.c`, `.def`, `version.rc`, `build.ps1`) — второй канал захвата, см. `docs/13` |
 | `scripts/` | `build.ps1`, `run.ps1`, `dev.ps1` |
 | `tests/e2e/` | `smoke.ps1`, `universal.ps1` (MS4x), `bmw-scanner.ps1`, `dummy_target.py`, edge-сценарии |
 | `docs/` | контракты, архитектура, runbook, интерфейсы, edge-кейсы, smoke, ревью, разведка по универсальному захвату |
@@ -403,6 +436,8 @@ sequenceDiagram
 | `POST /api/session/new` | завершить текущую и пересканировать окружение |
 | `GET /api/tools?mode=auto\|usb\|window\|all` | процессы-кандидаты |
 | `GET /api/devices` · `GET /api/usb/devices` · `GET /api/j2534/drivers` | FTDI / USB / J2534 |
+| `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter`) |
+| `POST /api/sessions/{id}/proxy/collect` | подхватить журналы прокси в открытую сессию сейчас |
 | `POST /api/usbpcap/start` | сырой захват шины (нужен USBPcap) |
 | `POST /api/sessions/{id}/step/start` · `step/end` · `mark` · `note` · `shot` | разметка сессии |
 | `POST /api/sessions/{id}/reparse` | пересобрать отчёты из `events.jsonl` |
@@ -422,6 +457,8 @@ sessions/20261109-154706-bmw-scanner-e2e/
 ├── events.jsonl        # события (kind, api, transport, direction, t, hex, meta)
 ├── events.idx          # индекс для быстрого поиска
 ├── raw.log             # лог в формате старого logger.py (импортируемый обратно)
+├── raw-proxy.log       # второй канал: журнал J2534-прокси (если включён)
+├── proxy.json          # сводка полосы прокси и сверка с основным каналом
 ├── steps/01.json …     # сводки шагов (команды, ответы, чтения, скриншот)
 ├── shots/              # PNG-скриншоты шагов
 ├── reads/              # дампы чтений с SHA-256
@@ -635,10 +672,21 @@ flowchart LR
 | J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | DLL loading by patterns + **all** `PassThru*` exports (open/connect/read/write/ioctl/filter/voltage/version) | ✅ at message level: protocol, CAN ID, payload, ISOTP PCI, KWP/UDS service; vendor protocols without a CAN ID (PCMflash `0x8003`) are parsed by length prefix |
 | **LAN** (J2534-over-IP, DoIP/ISO 13400, BMW ICOM/HSFZ, network adapters) | Winsock hooks `ws2_32`: `connect/accept`, `send/recv`, `WSASend/WSARecv`, `sendto/recvfrom`, `WSAGetOverlappedResult` | ✅ full TCP/UDP exchange, including overlapped; DoIP headers, source/target address, UDS service and NRC in the inspector |
 | Any USB device with a proprietary driver | raw USBPcap capture → `USBRAW bus/dev/ep/transfer/…` | ⚠️ requires [USBPcap](https://desowin.org/usbpcap/) and administrator rights |
+| **J2534 proxy** (the same exchange, seen from the driver side) | our own 32-bit DLL registers as a separate J2534 device, forwards calls to the real driver and writes a log outside the process | ✅ second channel next to Frida: works without injection, sees vendor ordinals 1377–1379, its log is merged into the session and cross-checked frame by frame |
 
 The **USB DEVICES** panel lists every USB device and registered J2534 driver; the header shows a
 `bus: USB/J2534 · N` indicator. The device list refreshes every ~12 s even while recording, so a
 cable swap is visible without a restart.
+
+### J2534 proxy — the second capture channel
+
+Enable it in **Settings → J2534**: the switch registers the `Scanmatik - SM2 Proxy` device,
+optionally switches PCMflash to it (the previous choice is saved and restored) and pulls the
+proxy logs into the open session. The session then carries both lanes, `raw.log` and
+`raw-proxy.log`, and the report shows how many frames matched and what each channel lost.
+The installer ships the proxy (a checked “Install the J2534 proxy” task, UAC prompt) but never
+switches adapters in another application by itself. See
+[docs/13-j2534-proxy.md](docs/13-j2534-proxy.md) (Russian).
 
 ### Requirements
 

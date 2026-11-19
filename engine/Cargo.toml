@@ -1,6 +1,6 @@
 [package]
 name = "ftdi-logger"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2021"
 description = "FTDI/USB logger engine: capture, storage, replay and reporting for Quickflash-family tools"
 default-run = "ftdi-logger"
@@ -29,8 +29,12 @@ mime_guess = "2"
 open = "5"
 
 [target.'cfg(windows)'.dependencies]
+# `Win32_Security` нужен ради RegCreateKeyExW (запись J2534-устройства, docs/13 §5):
+# в windows 0.58 функция объявлена под этим feature — без него прокси не
+# зарегистрировать, а список драйверов читается и без записи.
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",

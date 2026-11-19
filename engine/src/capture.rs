@@ -437,6 +437,12 @@ impl CaptureManager {
             meta.facts.push(format!("# ftd2xx module: {m}"));
         }
         meta.facts.extend(license_gate_facts());
+        // Включённый прокси — факт окружения: без него непонятно, почему в логе
+        // окажутся два канала (docs/13 §8). Пишем один раз на сессию: повторная
+        // строка на каждый attach только засоряла бы шапку.
+        if let Some(fact) = crate::proxy::session_fact(&self.cfg.root.join("j2534proxy")) {
+            meta.facts.push(fact);
+        }
         let (ediabas_facts, ediabas_sys, ediabas_state) =
             prepare_ediabas(&detail.proc.name, &detail.proc.exe);
         meta.facts.extend(ediabas_facts);
@@ -1083,6 +1089,8 @@ struct OpenStep {
 
 /// Единственный писатель сессии: события, батчи, шаги, финализация.
 struct SessionWriterTask {
+    /// Корень установки: из него берётся каталог J2534-прокси при финализации.
+    cfg: Arc<Config>,
     bus: broadcast::Sender<ServerMsg>,
     shared: Arc<Shared>,
     store: Arc<SessionStore>,
@@ -1126,7 +1134,7 @@ struct SessionWriterTask {
 
 impl SessionWriterTask {
     fn new(
-        _cfg: Arc<Config>,
+        cfg: Arc<Config>,
         bus: broadcast::Sender<ServerMsg>,
         shared: Arc<Shared>,
         store: Arc<SessionStore>,
@@ -1141,6 +1149,7 @@ impl SessionWriterTask {
             .map(|duration| duration.as_secs_f64())
             .unwrap_or(0.0);
         Self {
+            cfg,
             bus,
             shared,
             store,
@@ -1838,6 +1847,46 @@ impl SessionWriterTask {
         self.steps.len() + if self.open.is_some() { 1 } else { 0 }
     }
 
+    /// Собрать полосу J2534-прокси в сессию (docs/13 §8).
+    ///
+    /// Любая ошибка — только `warn` и факт: второй канал вторичен по
+    /// определению, и его сбор не имеет права испортить уже записанную сессию.
+    fn collect_proxy(&mut self) {
+        let install_dir = self.cfg.root.join("j2534proxy");
+        // Выключенный прокси или отсутствующая DLL — не повод для факта:
+        // фича просто не используется, отчёт о ней молчит.
+        if !crate::proxy::is_active(&install_dir) {
+            return;
+        }
+        let log_dir = crate::proxy::log_dir_for(&install_dir);
+        match crate::proxy::collect(self.writer.dir(), &self.meta.started_at, &log_dir) {
+            Ok(Some(lane)) => {
+                self.meta.facts.push(format!(
+                    "# j2534proxy: журналов {}, кадров TX {}/RX {}, вызовов {}, ошибок {}",
+                    lane.files, lane.tx, lane.rx, lane.calls, lane.errors
+                ));
+                self.meta.proxy = Some(lane);
+            }
+            Ok(None) => {
+                // Включён, но журналов нет — самая частая причина: в PCMflash
+                // выбран другой адаптер, и прокси-устройство никто не грузил.
+                // Молчать нельзя: пользователь иначе ищет «поломку», хотя
+                // второй канал просто не был задействован.
+                self.meta.facts.push(
+                    "# j2534proxy: журналов нет — приложение не использовало \
+                     прокси-устройство (выбран другой адаптер?)"
+                        .into(),
+                );
+            }
+            Err(err) => {
+                tracing::warn!("прокси-полоса {}: {err}", self.meta.id);
+                self.meta
+                    .facts
+                    .push(format!("# j2534proxy: журналы не собраны: {err:#}"));
+            }
+        }
+    }
+
     /// Финализация сессии: дозакрыть шаг, сбросить буферы, отчёты, `session.json`.
     async fn finalize(&mut self, status: &str) -> Option<SessionMeta> {
         if self.open.is_some() {
@@ -1891,6 +1940,9 @@ impl SessionWriterTask {
                 self.raw_packets, self.raw_bytes
             ));
         }
+        // J2534-прокси: второй канал пишет свой журнал вне процесса (docs/13 §8).
+        // Собираем до отчёта — раздел «J2534 прокси» строится из `meta.proxy`.
+        self.collect_proxy();
         // Адаптер: ручной выбор важнее угаданного, но пустые поля добираем из лога.
         if let Some(found) = self.adapter_seen.clone() {
             match &mut self.meta.adapter {
@@ -3601,6 +3653,132 @@ Error (134) API-0014: RESULT NOT FOUND\n";
                 .map(|d| d.jobs.is_empty())
                 .unwrap_or(false)
         );
+    }
+
+    /// Финализация подхватывает полосу J2534-прокси (docs/13 §8).
+    ///
+    /// Проверяется интеграция, которой не видно из тестов `proxy`: факт в шапке,
+    /// `meta.proxy` в `session.json` и раздел в готовых отчётах. Содержимое DLL
+    /// не важно — `is_active` проверяет только наличие файла.
+    #[test]
+    fn finalize_collects_j2534_proxy_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
+        let install_dir = cfg.root.join("j2534proxy");
+        let proxy_logs = dir.path().join("proxy-logs");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&proxy_logs).unwrap();
+        std::fs::write(install_dir.join("j2534proxy.dll"), b"MZ").unwrap();
+        std::fs::write(
+            install_dir.join("j2534proxy.ini"),
+            format!(
+                "[proxy]\nEnabled=1\nLogDir={}\n\n[device]\nName=Scanmatik - SM2 Proxy\n",
+                proxy_logs.display()
+            ),
+        )
+        .unwrap();
+
+        let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
+        let (bus, _bus_rx) = broadcast::channel::<ServerMsg>(64);
+        let shared = Arc::new(Shared {
+            active: Mutex::new(None),
+            hooks: Mutex::new("off".into()),
+            counts: Mutex::new(SessionCounts::default()),
+            current_step: Mutex::new(None),
+            target: Mutex::new(None),
+            started_at: Mutex::new(None),
+            pid: Mutex::new(None),
+            cmd_tx: Mutex::new(None),
+            pump: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+            bridge_ready: AtomicBool::new(false),
+            raw_usb: AtomicBool::new(false),
+        });
+        let mut session_meta = SessionMeta::new("j2534-proxy", "pcmflash");
+        session_meta.transport = "j2534".into();
+        let writer = store.create(session_meta).unwrap();
+        let meta = writer.meta.clone();
+        *shared.active.lock() = Some(meta.clone());
+        *shared.started_at.lock() = Some(meta.started_at.clone());
+        let task = SessionWriterTask::new(
+            cfg.clone(),
+            bus.clone(),
+            shared.clone(),
+            store.clone(),
+            writer,
+            meta.clone(),
+            0xFFFF_FFF1,
+            None,
+            false,
+        );
+        let (tx, rx) = mpsc::channel::<Cmd>(32);
+        *shared.cmd_tx.lock() = Some(tx.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let worker = rt.spawn(task.run(rx));
+
+        let finished = rt.block_on(async move {
+            // Журнал прокси создаётся уже «в окне» сессии: mtime = сейчас.
+            std::fs::write(
+                proxy_logs.join("proxy-20261119-193000-pid77.log"),
+                concat!(
+                    "[+0.100000s] J2534 TX ch=1 call=1 len=4 : 00 02 27 7f\n",
+                    "[+0.200000s] J2534 RX ch=1 call=2 len=3 : 02 50 03\n",
+                    "# proxy stop: calls=2 tx=1 rx=1 errors=0\n",
+                ),
+            )
+            .unwrap();
+            // Основной канал видит те же два кадра.
+            for line in [
+                "[+1.000000s] J2534 TX ch=1 call=3 len=4 : 00 02 27 7f",
+                "[+1.100000s] J2534 RX ch=1 call=4 len=3 : 02 50 03",
+            ] {
+                tx.send(Cmd::Line {
+                    line: line.into(),
+                    wall: now_rfc3339(),
+                })
+                .await
+                .unwrap();
+            }
+            let (reply, wait) = oneshot::channel();
+            tx.send(Cmd::Detach { reply }).await.unwrap();
+            wait.await.unwrap().unwrap().expect("мета сессии")
+        });
+        rt.block_on(worker).expect("писатель должен завершиться без паники");
+
+        let lane = finished
+            .proxy
+            .as_ref()
+            .expect("включённый прокси с журналом обязан дать полосу");
+        assert_eq!(lane.files, 1);
+        assert_eq!((lane.tx, lane.rx), (1, 1), "кадры полосы прокси");
+        assert_eq!(lane.cross.tx_matched, 1, "TX нашёлся в прокси");
+        assert_eq!(lane.cross.rx_matched, 1, "RX нашёлся в прокси");
+        assert_eq!(lane.cross.missing(), 0, "потерь быть не должно");
+        assert!(
+            finished
+                .facts
+                .iter()
+                .any(|fact| fact.starts_with("# j2534proxy: журналов 1")),
+            "факт о полосе должен быть в шапке: {:?}",
+            finished.facts
+        );
+
+        let session_dir = PathBuf::from(&meta.dir);
+        let stored: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(session_dir.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stored.proxy.as_ref().map(|lane| (lane.tx, lane.rx)),
+            Some((1, 1)),
+            "полоса должна сохраниться в session.json"
+        );
+        assert!(session_dir.join("raw-proxy.log").is_file());
+        assert!(session_dir.join("proxy.json").is_file());
+        let md = std::fs::read_to_string(session_dir.join("report.md")).unwrap();
+        assert!(md.contains("## J2534 прокси"), "{md}");
+        let txt = std::fs::read_to_string(session_dir.join("report.txt")).unwrap();
+        assert!(txt.contains("Журналов: 1"), "{txt}");
     }
 }
 

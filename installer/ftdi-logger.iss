@@ -1,4 +1,4 @@
-; FTDI/USB Logger — установщик Inno Setup 6.
+﻿; FTDI/USB Logger — установщик Inno Setup 6.
 ;
 ; Собирается из scripts\build-installer.ps1:
 ;   ISCC.exe /Q /DAppVersion=0.3.4 installer\ftdi-logger.iss
@@ -66,10 +66,22 @@ russian.UninstallShortcut=Удалить FTDI USB Logger
 english.UninstallShortcut=Uninstall FTDI USB Logger
 russian.LaunchApp=Запустить FTDI/USB Logger
 english.LaunchApp=Launch FTDI/USB Logger
+russian.ProxyGroup=J2534:
+english.ProxyGroup=J2534:
+russian.ProxyTask=Установить J2534-прокси (второй канал захвата)
+english.ProxyTask=Install the J2534 proxy (second capture channel)
+russian.ProxyOk=J2534-прокси зарегистрирован как отдельное устройство. Включить его позже: Настройки → J2534.
+english.ProxyOk=The J2534 proxy is registered as a separate device. Enable it later in Settings → J2534.
+russian.ProxyFail=Прокси не зарегистрирован: запрос прав администратора отменён или файлы не найдены. Включите его позже в Настройки → J2534 (там же объясняется, чего не хватает).
+english.ProxyFail=The proxy was not registered: the administrator prompt was cancelled or files are missing. Enable it later in Settings → J2534.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 Name: "startmenuicon"; Description: "{cm:StartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
+; Регистрация J2534-прокси требует HKLM, поэтому идёт отдельным elevated-шагом
+; (см. RegisterProxy). Отмена UAC не валит установку — прокси можно включить в
+; настройках, движок к тому моменту уже работает с правами администратора.
+Name: "j2534proxy"; Description: "{cm:ProxyTask}"; GroupDescription: "{cm:ProxyGroup}"; Flags: checkedonce
 
 [Files]
 Source: "..\build\installer\payload\FTDI_USB_Logger\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -85,6 +97,12 @@ Name: "{autoprograms}\{cm:UninstallShortcut}"; Filename: "{uninstallexe}"; Tasks
 
 [Run]
 Filename: "{app}\FTDI_USB_Logger.exe"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Обычное удаление идёт без прав администратора, поэтому запись HKLM сама не
+; уйдёт; основной путь — CurUninstallStepChanged ниже (ShellExec с UAC). Этот
+; шаг остаётся страховкой для случая, когда установщик уже повышен.
+Filename: "{app}\ftdi-j2534proxy-setup.exe"; Parameters: "remove --app ""{app}"""; Flags: runhidden skipifdoesntexist; RunOnceId: "RemoveJ2534Proxy"
 
 [UninstallDelete]
 ; Логи запуска создаются уже после установки — Inno их не знает, убираем явно.
@@ -103,12 +121,56 @@ begin
   Result := '';
 end;
 
+{ Регистрация J2534-прокси. Установка per-user, поэтому HKLM-запись создаёт
+  отдельный helper с повышением прав: Inno в режиме lowest сам повыситься не
+  может. Отмена UAC не считается ошибкой установки — прокси включается позже
+  из настроек (движок к тому моменту уже запускается с правами администратора). }
+procedure RegisterProxy();
+var
+  Helper, Params: String;
+  ResultCode: Integer;
+begin
+  Helper := ExpandConstant('{app}\ftdi-j2534proxy-setup.exe');
+  if not FileExists(Helper) then
+  begin
+    Log('j2534proxy: нет ' + Helper + ' — регистрация пропущена');
+    Exit;
+  end;
+  Params := 'install --app "' + ExpandConstant('{app}') + '"';
+  if not ShellExec('runas', Helper, Params, ExpandConstant('{app}'), SW_HIDE,
+                   ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('j2534proxy: ShellExec(runas) не запустился');
+    if not WizardSilent then
+      MsgBox(CustomMessage('ProxyFail'), mbInformation, MB_OK);
+    Exit;
+  end;
+  if ResultCode = 0 then
+  begin
+    Log('j2534proxy: зарегистрирован');
+    if not WizardSilent then
+      MsgBox(CustomMessage('ProxyOk'), mbInformation, MB_OK);
+  end
+  else
+  begin
+    Log('j2534proxy: helper вернул ' + IntToStr(ResultCode));
+    if not WizardSilent then
+      MsgBox(CustomMessage('ProxyFail'), mbInformation, MB_OK);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('j2534proxy') then
+    RegisterProxy();
+end;
+
 { Ярлык на рабочем столе мог создать лаунчер (если Inno не смог) — убираем его
   при удалении. Путь к рабочему столу берём из реестра: shell-константы на
   OneDrive-профилях в установщике не раскрываются. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  Desk, Link, Pwsh, Cmd: String;
+  Desk, Link, Pwsh, Cmd, Helper, Params: String;
   ResultCode: Integer;
 begin
   { Перед удалением закрываем лаунчер и движок: иначе Inno ждёт освобождения exe. }
@@ -116,6 +178,18 @@ begin
   begin
     Exec('taskkill.exe', '/F /IM FTDI_USB_Logger.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('taskkill.exe', '/F /IM ftdi-logger.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    { Запись J2534-прокси лежит в HKLM, а удаление идёт без прав: снимаем её
+      отдельным elevated-вызовом, пока helper ещё существует на диске. }
+    Helper := ExpandConstant('{app}\ftdi-j2534proxy-setup.exe');
+    if FileExists(Helper) then
+    begin
+      Params := 'remove --app "' + ExpandConstant('{app}') + '"';
+      if ShellExec('runas', Helper, Params, ExpandConstant('{app}'), SW_HIDE,
+                   ewWaitUntilTerminated, ResultCode) then
+        Log('j2534proxy: remove вернул ' + IntToStr(ResultCode))
+      else
+        Log('j2534proxy: remove не запустился (UAC отменён) — запись осталась');
+    end;
   end;
   if CurUninstallStep = usPostUninstall then
   begin

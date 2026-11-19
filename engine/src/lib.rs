@@ -13,6 +13,7 @@ pub mod import;
 pub mod ediabas;
 pub mod usbdevices;
 pub mod j2534;
+pub mod proxy;
 pub mod usbpcap;
 
 use std::sync::Arc;

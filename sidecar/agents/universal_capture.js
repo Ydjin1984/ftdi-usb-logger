@@ -2989,11 +2989,71 @@ function hookDllLoadWatch() {
   if (n > 0) log('universal: сторож загрузки DLL активен (' + n + ' хуков) — перезагрузка адаптерных DLL не теряется');
 }
 
+// ── J2534-прокси: не хукать «внутренний» драйвер ───────────────────────────
+// Когда приложение грузит наш j2534proxy.dll, прокси сама подгружает настоящий
+// драйвер, и в процессе оказываются ДВА J2534-модуля. Хук на обоих писал бы
+// каждый кадр дважды — TX на входе в прокси и ещё раз на входе в драйвер, —
+// и счётчики сессии удваивались бы. Поэтому всё, что загружено «внутрь»
+// прокси, не хукаем: эту полосу пишет сама DLL (docs/13-j2534-proxy.md §6).
+const PROXY_MODULE_RE = /^j2534proxy\.dll$/i;
+let proxySkipNoted = {};
+let proxyActiveSeen = false;
+
+function proxyModulePath() {
+  try {
+    const mods = Process.enumerateModules();
+    for (let i = 0; i < mods.length; i++) {
+      if (PROXY_MODULE_RE.test(mods[i].name)) return String(mods[i].path || mods[i].name);
+    }
+  } catch (e) { hookError('proxyModulePath', e); }
+  return null;
+}
+
+// Прокси считается работающей, только если она реально начала форвардить:
+// при инициализации (до LoadLibrary настоящего драйвера) она создаёт именованный
+// мьютекс Local\FTDI_J2534_PROXY_<pid>. Просто «модуль загружен» — не признак:
+// некоторые инструменты грузят все зарегистрированные J2534-DLL для перебора,
+// и по одному лишь факту загрузки мы бы зря перестали хукать рабочий драйвер.
+function proxyActiveInProcess() {
+  if (proxyActiveSeen) return true;
+  try {
+    const k32 = Process.findModuleByName('kernel32.dll');
+    const addr = k32 ? exportAddr(k32, 'OpenMutexA') : null;
+    if (!addr) return false;
+    const openMutex = new NativeFunction(addr, 'pointer', ['uint32', 'int', 'pointer']);
+    const name = Memory.allocUtf8String('Local\\FTDI_J2534_PROXY_' + Process.id);
+    const sync = 0x00100000; // SYNCHRONIZE
+    const h = openMutex(sync, 0, name);
+    if (!h.isNull()) { proxyActiveSeen = true; return true; }
+  } catch (e) { hookError('proxyActiveInProcess', e); }
+  return false;
+}
+
+function isProxyInner(mod) {
+  if (!proxyActiveInProcess()) return false;
+  const proxy = proxyModulePath();
+  if (!proxy) return false;
+  const path = String((mod && mod.path) || '');
+  if (!path) return false;
+  return path.toLowerCase() !== proxy.toLowerCase();
+}
+
 function dispatchUniversalModule(mod) {
   if (!mod || !mod.name) return;
   try {
     if (/^ftd2xx\.dll$/i.test(mod.name)) { if (!ftMod) hookFtModule(mod); }
-    else if (J2534_MODULE_RE.test(mod.name)) hookJ2534Module(mod);
+    else if (J2534_MODULE_RE.test(mod.name)) {
+      // Прокси в процессе? Значит настоящий драйвер загружен ею — см. выше.
+      if (isProxyInner(mod)) {
+        const key = String(mod.path || mod.name).toLowerCase();
+        if (!proxySkipNoted[key]) {
+          proxySkipNoted[key] = true;
+          log('# hooks mod="' + mod.name + '" skip=proxy-inner path="' + (mod.path || '') + '"');
+        }
+      } else {
+        hookJ2534Module(mod);
+      }
+    }
     else if (LAN_MODULE_RE.test(mod.name)) hookLanModule(mod);
     else if (/^winusb\.dll$/i.test(mod.name)) hookWinUsbModule(mod);
     else if (/^hid\.dll$/i.test(mod.name)) hookHidModule(mod);

@@ -160,6 +160,31 @@ else {
     }
 }
 
+# ── 3b. J2534-прокси (второй канал захвата) ──────────────────────────────────
+# Не фатально: без MSVC (или при ошибке компиляции) сборка остаётся рабочей,
+# просто без прокси-канала — движок и интерфейс это переживают и показывают
+# «DLL нет». Подробности — docs\13-j2534-proxy.md.
+Step 'J2534-прокси: proxy\build.ps1 -Arch x86'
+$proxyDir = Join-Path $Root 'proxy'
+$proxyDll = Join-Path $proxyDir 'out\x86\j2534proxy.dll'
+$proxyBuilt = $false
+if (-not (Test-Path -LiteralPath (Join-Path $proxyDir 'build.ps1'))) {
+    Warn 'нет proxy\build.ps1 — прокси-канал в сборку не попадёт'
+}
+else {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $proxyDir 'build.ps1') -Arch x86
+    if ($LASTEXITCODE -ne 0) {
+        Warn ('proxy\build.ps1 завершился с кодом ' + $LASTEXITCODE + ' — прокси-канал в сборку не попадёт')
+    }
+    elseif (Test-Path -LiteralPath $proxyDll) {
+        $proxyBuilt = $true
+        Write-Host ('  + j2534proxy.dll (' + [Math]::Round((Get-Item $proxyDll).Length / 1KB, 1) + ' КБ)')
+    }
+    else {
+        Warn ('build.ps1 прокси отработал, но нет ' + $proxyDll)
+    }
+}
+
 # ── 4. Сборка dist ──────────────────────────────────────────────────────────
 Step 'Собираю dist'
 # Чистим весь dist\, а не только dist\FTDI_USB_Logger: от сломанных запусков
@@ -173,6 +198,17 @@ New-Item -ItemType Directory -Path (Join-Path $DistDir 'sessions') -Force | Out-
 
 Copy-Item -LiteralPath $engineExe -Destination (Join-Path $DistDir 'ftdi-logger.exe') -Force
 Write-Host '  + ftdi-logger.exe'
+
+# Отдельный helper регистрации J2534-прокси: его зовёт установщик (через UAC) и
+# пользователь вручную. Собирается тем же cargo (src\bin\...).
+$setupExe = Join-Path $EngineDir 'target\release\ftdi-j2534proxy-setup.exe'
+if (Test-Path -LiteralPath $setupExe) {
+    Copy-Item -LiteralPath $setupExe -Destination (Join-Path $DistDir 'ftdi-j2534proxy-setup.exe') -Force
+    Write-Host '  + ftdi-j2534proxy-setup.exe'
+}
+else {
+    Warn 'нет ftdi-j2534proxy-setup.exe — установщик не сможет зарегистрировать прокси'
+}
 
 if ($uiBuilt) {
     $dstUi = Join-Path $DistDir 'ui\dist'
@@ -190,6 +226,19 @@ $sidecarDst = Join-Path $DistDir 'sidecar'
 & robocopy $sidecarSrc $sidecarDst /E /XD __pycache__ /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { Fail ('robocopy sidecar завершился с кодом ' + $LASTEXITCODE) }
 Write-Host '  + sidecar\'
+
+# J2534-прокси: в поставку идут только DLL и сопроводительные файлы. Объектники
+# и .lib/.exp остаются в proxy\out — в установщике им делать нечего.
+if ($proxyBuilt) {
+    $dstProxy = Join-Path $DistDir 'j2534proxy'
+    New-Item -ItemType Directory -Path $dstProxy -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $proxyDir 'out\x86\j2534proxy.dll') -Destination $dstProxy -Force
+    foreach ($extra in @('j2534proxy.ini.sample', 'README.txt')) {
+        $src = Join-Path $proxyDir $extra
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $dstProxy -Force }
+    }
+    Write-Host '  + j2534proxy\'
+}
 
 # splash-логотип, иконка приложения и сам splash-скрипт
 foreach ($asset in @('splash.png', 'app.ico')) {

@@ -7,6 +7,7 @@ import { store } from "../store";
 import type { Event, StepSummary } from "../types";
 import { openImage } from "./dialogs";
 import { msg, t } from "../i18n";
+import { proxyBadge, proxyLine, proxyLineTitle, proxyNeedsAttention } from "../proxy";
 
 msg({
   "событие": "event",
@@ -409,6 +410,14 @@ export class Inspector {
     const head = el("div", "sec__head");
     head.append(el("span", "sec__title", t("СЕССИЯ")));
     head.append(el("span", "badge-tag", meta.status));
+    // Второй канал захвата: бейдж полосы прокси (docs/13 §8).
+    const proxy = meta.proxy;
+    const proxyWarn = proxy ? proxyNeedsAttention(proxy) : false;
+    if (proxy) {
+      head.append(
+        el("span", `badge-tag${proxyWarn ? " badge-tag--warn" : ""}`.trim(), proxyBadge()),
+      );
+    }
     sec.append(head);
 
     const card = el("div");
@@ -428,6 +437,16 @@ export class Inspector {
       stat("RX", fmtBytes(meta.counts?.rx_bytes ?? 0), "rx"),
     );
     sec.append(grid);
+
+    // Полоса прокси: счётчики TX/RX и сверка с полосой frida (§8, §9).
+    if (proxy) {
+      const line = el("div", `session-item__proxy${proxyWarn ? " is-warn" : ""}`.trim());
+      line.style.marginTop = "8px";
+      if (proxyWarn) line.append(icon("warn"));
+      line.append(el("span", "", proxyLine(proxy)));
+      line.title = proxyLineTitle(proxy);
+      sec.append(line);
+    }
 
     const props = el("div", "decoded");
     prop(props, t("начало"), fmtDate(meta.started_at));

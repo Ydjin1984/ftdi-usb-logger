@@ -3,7 +3,7 @@
 //! `report.txt` — формат старого логера (шапка сессии + блоки `# PHASE`), `report.md` —
 //! Markdown со сводной Mermaid-схемой шагов. Экспорт: zip / jsonl / csv.
 
-use crate::models::{Event, EventKind, SessionMeta, StepSummary};
+use crate::models::{Event, EventKind, ProxyLane, SessionMeta, StepSummary};
 use crate::store::write_text_atomic;
 use anyhow::Context;
 use std::fs::File;
@@ -78,6 +78,115 @@ fn is_usb_or_j2534_fact(fact: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+// ───────────────────────────── J2534-прокси ──────────────────────────────
+
+/// Доля потерянных кадров основного канала, выше которой молчать нельзя.
+const PROXY_LOSS_WARN: f64 = 5.0;
+
+/// Предупреждение о потере второго канала (`None`, если потерь мало).
+///
+/// Порог 5 % — из контракта (docs/13 §8): ниже него расхождение объясняется
+/// тем, что frida цепляется позже прокси, и предупреждение было бы шумом.
+fn proxy_loss_warning(lane: &ProxyLane) -> Option<String> {
+    let main = lane.cross.main_frames();
+    let missing = lane.cross.missing();
+    if main == 0 || missing == 0 {
+        return None;
+    }
+    let percent = missing as f64 * 100.0 / main as f64;
+    (percent > PROXY_LOSS_WARN).then(|| {
+        format!(
+            "в прокси потеряно {missing} из {main} кадров основного канала \
+             ({percent:.1} %) — второй канал неполон"
+        )
+    })
+}
+
+/// Строка сверки — одна на оба формата отчёта, чтобы txt и md не расходились.
+fn proxy_cross_line(lane: &ProxyLane) -> String {
+    if lane.cross.main_frames() == 0 {
+        return "нет основного канала".to_string();
+    }
+    format!(
+        "совпало TX {} / RX {}, потеряно в прокси {} (TX {} / RX {}), лишних {}",
+        lane.cross.tx_matched,
+        lane.cross.rx_matched,
+        lane.cross.missing(),
+        lane.cross.tx_missing,
+        lane.cross.rx_missing,
+        lane.cross.extra,
+    )
+}
+
+/// Раздел «J2534 прокси» для `report.txt`.
+fn proxy_text_block(lane: &ProxyLane) -> String {
+    let mut out = String::new();
+    out.push_str("  J2534 прокси:\n");
+    out.push_str(&format!(
+        "    Журналов: {} ({:.1} КБ)\n",
+        lane.files,
+        lane.bytes as f64 / 1024.0
+    ));
+    out.push_str(&format!("    Кадры: TX {} / RX {}\n", lane.tx, lane.rx));
+    out.push_str(&format!(
+        "    Вызовов: {}, ошибок: {}\n",
+        lane.calls, lane.errors
+    ));
+    out.push_str(&format!(
+        "    Сверка с основным каналом: {}\n",
+        proxy_cross_line(lane)
+    ));
+    if let (Some(first), Some(last)) = (lane.first_t, lane.last_t) {
+        out.push_str(&format!(
+            "    Время прокси (от загрузки DLL): +{first:.3}…+{last:.3} с\n"
+        ));
+    }
+    for note in lane
+        .notes
+        .iter()
+        .filter(|note| note.as_str() != "нет основного канала")
+    {
+        out.push_str(&format!("    · {note}\n"));
+    }
+    if let Some(warning) = proxy_loss_warning(lane) {
+        out.push_str(&format!("    ВНИМАНИЕ: {warning}\n"));
+    }
+    out
+}
+
+/// Раздел «J2534 прокси» для `report.md`.
+fn proxy_md_block(lane: &ProxyLane) -> String {
+    let mut out = String::new();
+    out.push_str("## J2534 прокси\n\n| Метрика | Значение |\n|---|---|\n");
+    out.push_str(&format!(
+        "| Журналов | {} ({:.1} КБ) |\n",
+        lane.files,
+        lane.bytes as f64 / 1024.0
+    ));
+    out.push_str(&format!(
+        "| Кадры | TX {} / RX {} |\n",
+        lane.tx, lane.rx
+    ));
+    out.push_str(&format!(
+        "| Вызовов | {} (ошибок {}) |\n",
+        lane.calls, lane.errors
+    ));
+    out.push_str(&format!(
+        "| Сверка с основным каналом | {} |\n",
+        md_cell(&proxy_cross_line(lane))
+    ));
+    if let (Some(first), Some(last)) = (lane.first_t, lane.last_t) {
+        out.push_str(&format!(
+            "| Время прокси (от загрузки DLL) | +{first:.3}…+{last:.3} с |\n"
+        ));
+    }
+    out.push('\n');
+    if let Some(warning) = proxy_loss_warning(lane) {
+        out.push_str(&format!("> **ВНИМАНИЕ:** {warning}\n\n"));
+    }
+    out
 }
 
 // ────────────────────────────── report.txt ───────────────────────────────
@@ -186,6 +295,11 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     }
     if !meta.tags.is_empty() {
         out.push_str(&format!("  теги: {}\n", meta.tags.join(", ")));
+    }
+    // Полоса J2534-прокси — отдельным блоком, а не строкой в фактах: это второй
+    // канал, и его потеря видна только в сверке с основным (docs/13 §8).
+    if let Some(lane) = &meta.proxy {
+        out.push_str(&proxy_text_block(lane));
     }
     if meta.counts.errors > 0 && !meta.counts.error_samples.is_empty() {
         // Ошибок мало и они важны: показываем, что именно попало в счётчик.
@@ -490,6 +604,12 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
             out.push_str(&format!("- {fact}\n"));
         }
         out.push('\n');
+    }
+
+    // Второй канал — своим разделом: он появляется только когда прокси реально
+    // писал журнал (docs/13 §8), иначе отчёт не должен о нём заикаться.
+    if let Some(lane) = &meta.proxy {
+        out.push_str(&proxy_md_block(lane));
     }
 
     if meta.counts.errors > 0 && !meta.counts.error_samples.is_empty() {

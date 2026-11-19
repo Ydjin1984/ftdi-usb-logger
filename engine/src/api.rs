@@ -143,6 +143,10 @@ pub fn router(state: AppState) -> Router {
         .route("/usbpcap/devices", get(usbpcap_devices))
         .route("/usbpcap/start", post(usbpcap_start))
         .route("/j2534/drivers", get(j2534_drivers))
+        .route(
+            "/j2534/proxy",
+            get(j2534_proxy_get).post(j2534_proxy_post),
+        )
         .route("/capture/status", get(capture_status))
         .route("/capture/attach", post(capture_attach))
         .route("/capture/detach", post(capture_detach))
@@ -156,6 +160,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/steps/:n", get(step_detail))
         .route("/sessions/:id/report", get(session_report))
         .route("/sessions/:id/reparse", post(session_reparse))
+        .route("/sessions/:id/proxy/collect", post(session_proxy_collect))
         .route("/sessions/:id/export", post(session_export))
         .route("/sessions/:id/share", post(session_share))
         .route("/sessions/:id/files", post(session_files))
@@ -447,6 +452,113 @@ async fn usb_devices() -> Json<Vec<UsbDevice>> {
 
 async fn j2534_drivers() -> Json<Vec<J2534Driver>> {
     Json(crate::j2534::list_drivers())
+}
+
+// ─────────────────────────── J2534-прокси ────────────────────────────────
+
+/// Каталог прокси: `<root>\j2534proxy` (docs/13 §3).
+///
+/// Отсутствие каталога — не ошибка и не 500: `status()` отвечает `present:false`
+/// с подсказкой в `notes`. Иначе на чистой машине интерфейс получал бы 500
+/// вместо «прокси не установлен».
+fn proxy_install_dir(st: &AppState) -> PathBuf {
+    st.cfg.root.join("j2534proxy")
+}
+
+/// GET /api/j2534/proxy — состояние поставки (docs/13 §8).
+async fn j2534_proxy_get(State(st): State<AppState>) -> Json<crate::proxy::ProxyStatus> {
+    Json(crate::proxy::status(&proxy_install_dir(&st)))
+}
+
+#[derive(Debug, Deserialize)]
+struct ProxyActionReq {
+    #[serde(default)]
+    action: String,
+    /// Явный путь настоящего драйвера — только для `action=install`.
+    #[serde(default)]
+    real: Option<String>,
+}
+
+/// POST /api/j2534/proxy — `install|remove|enable|disable|select-adapter|restore-adapter`.
+///
+/// Отказ действия отдаётся как `{"ok": false, "notes": […]}` с кодом 200, а не
+/// 500: для UI это не поломка движка, а состояние («нужны права администратора»),
+/// которое показывается рядом с переключателем (docs/13 §8).
+async fn j2534_proxy_post(
+    State(st): State<AppState>,
+    Json(req): Json<ProxyActionReq>,
+) -> Json<Value> {
+    let dir = proxy_install_dir(&st);
+    let action = req.action.trim().to_ascii_lowercase();
+    let result = match action.as_str() {
+        "install" => crate::proxy::install(&dir, req.real.as_deref()),
+        "remove" => crate::proxy::remove(&dir),
+        "enable" => crate::proxy::set_enabled(&dir, true),
+        "disable" => crate::proxy::set_enabled(&dir, false),
+        "select-adapter" => crate::proxy::select_adapter(&dir, true),
+        "restore-adapter" => crate::proxy::restore_adapter(&dir),
+        other => {
+            return Json(json!({
+                "ok": false,
+                "notes": [format!(
+                    "неизвестное действие: {other} \
+                     (install|remove|enable|disable|select-adapter|restore-adapter)"
+                )],
+            }))
+        }
+    };
+    match result {
+        Ok(status) => Json(serde_json::to_value(status).unwrap_or_else(|err| {
+            json!({"ok": false, "notes": [format!("сериализация состояния: {err}")]})
+        })),
+        Err(err) => Json(json!({"ok": false, "notes": [format!("{err:#}")]})),
+    }
+}
+
+/// POST /api/sessions/:id/proxy/collect — подхватить журналы прокси сейчас
+/// (docs/13 §8). Полоса сохраняется в `session.json`, чтобы отчёт её видел.
+async fn session_proxy_collect(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let reader = reader_or_404(&st, &id)?;
+    let mut meta = reader.meta().clone();
+    let session_dir = reader.dir().to_path_buf();
+    drop(reader);
+    let log_dir = crate::proxy::log_dir_for(&proxy_install_dir(&st));
+    // Ошибка сбора — тоже JSON `ok:false`, а не 500: полоса вторична, и UI
+    // должен показать причину, не теряя открытую сессию.
+    Ok(match crate::proxy::collect(&session_dir, &meta.started_at, &log_dir) {
+        Ok(Some(lane)) => {
+            let notes = lane.notes.clone();
+            meta.proxy = Some(lane.clone());
+            if let Err(err) = st.store.update_meta(&meta) {
+                // Сбор уже состоялся — терять его из-за индекса нельзя.
+                tracing::warn!("прокси-полоса {id}: session.json не обновлён: {err}");
+            }
+            let _ = st.bus.send(ServerMsg::Toast {
+                level: "info".into(),
+                text: format!(
+                    "сессия {id}: прокси-полоса — TX {} / RX {} кадров",
+                    lane.tx, lane.rx
+                ),
+            });
+            Json(json!({"ok": true, "lane": lane, "notes": notes}))
+        }
+        Ok(None) => Json(json!({
+            "ok": true,
+            "lane": null,
+            "notes": [format!(
+                "журналов proxy-*.log в {} за окно сессии не нашлось",
+                log_dir.display()
+            )],
+        })),
+        Err(err) => Json(json!({
+            "ok": false,
+            "lane": null,
+            "notes": [format!("{err:#}")],
+        })),
+    })
 }
 
 async fn usbpcap_devices() -> Json<Vec<String>> {

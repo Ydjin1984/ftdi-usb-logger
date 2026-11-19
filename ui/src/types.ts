@@ -78,6 +78,90 @@ export interface Note {
   author: string;
 }
 
+/* ── J2534-прокси: второй канал захвата (docs/13-j2534-proxy.md, §8) ─────── */
+
+/** Файл прокси-DLL в каталоге установки. */
+export interface ProxyDll {
+  path: string;
+  present: boolean;
+  /** Версия из ресурсов DLL (`1.0.0.120`); пустая — прочитать не удалось. */
+  version: string;
+}
+
+/** `j2534proxy.ini`: `Enabled` — главный признак включённости прокси. */
+export interface ProxyIni {
+  path: string;
+  present: boolean;
+  enabled: boolean;
+}
+
+/** Запись устройства в `HKLM\SOFTWARE\WOW6432Node\PassThruSupport.04.04`. */
+export interface ProxyRegistry {
+  registered: boolean;
+  key: string;
+  device_name: string;
+  function_library: string;
+}
+
+/** Настоящий (вендорный) драйвер, в который прокси форвардит вызовы. */
+export interface ProxyReal {
+  path: string;
+  present: boolean;
+  /** Откуда взят путь: `env`, `ini`, `file`, `registry`. */
+  from: string;
+}
+
+/** Выбор адаптера в PCMflash и сохранённый прежний выбор. */
+export interface ProxyPcmflash {
+  adapter: string;
+  proxy_selected: boolean;
+  /** Прежний адаптер — восстанавливается при выключении; пусто, если бэкапа нет. */
+  backup: string;
+}
+
+/** Полное состояние прокси: ответ `GET /j2534/proxy`. */
+export interface ProxyStatus {
+  ok: boolean;
+  elevated: boolean;
+  install_dir: string;
+  dll: ProxyDll;
+  ini: ProxyIni;
+  registry: ProxyRegistry;
+  real: ProxyReal;
+  log_dir: string;
+  log_files: number;
+  pcmflash: ProxyPcmflash;
+  /** Причины отказа при `ok:false` — показываются пользователю как есть. */
+  notes: string[];
+}
+
+/** Сверка полос: сколько кадров frida нашлось в журнале прокси. */
+export interface ProxyCross {
+  tx_matched: number;
+  /** Есть в frida, нет в прокси — потеря второго канала. */
+  tx_missing: number;
+  rx_matched: number;
+  rx_missing: number;
+  /** Есть в прокси, нет в frida — потеря первого канала. */
+  extra: number;
+}
+
+/** Полоса прокси в сессии (`session.json.proxy`). */
+export interface ProxyLane {
+  /** Сколько журналов и байт подхвачено. */
+  files: number;
+  bytes: number;
+  tx: number;
+  rx: number;
+  calls: number;
+  errors: number;
+  /** Границы по времени прокси. */
+  first_t?: number | null;
+  last_t?: number | null;
+  cross: ProxyCross;
+  notes?: string[];
+}
+
 export interface SessionMeta {
   id: string;
   started_at: string;
@@ -98,6 +182,8 @@ export interface SessionMeta {
   engine_version: string;
   dir: string;
   facts: string[];
+  /** Полоса прокси, если в окне сессии нашлись её журналы (§8). */
+  proxy?: ProxyLane | null;
 }
 
 export interface StepRead {

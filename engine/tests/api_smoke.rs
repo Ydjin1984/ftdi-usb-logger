@@ -644,3 +644,123 @@ async fn api_universal() {
 
     server.abort();
 }
+
+/// Смоук J2534-прокси (docs/13 §8): статус, отказ действия и сбор полосы.
+///
+/// `LogDir` уводится в temp-каталог: настоящий `%LOCALAPPDATA%\…\j2534proxy`
+/// на рабочей машине может содержать живые журналы, и тест не должен от них
+/// зависеть (иначе он то проходит, то нет).
+#[tokio::test]
+async fn proxy_status_and_collect() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().to_path_buf();
+    let cli = Cli::parse_from([
+        "ftdi-logger",
+        "--root",
+        root.to_str().unwrap(),
+        "--no-open",
+        "--no-bridge",
+    ]);
+    let cfg = Arc::new(Config::from_cli(&cli).unwrap());
+    cfg.ensure_dirs().unwrap();
+    let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
+    let (bus, _) = tokio::sync::broadcast::channel::<ServerMsg>(256);
+    let capture = Arc::new(ftdi_logger::capture::CaptureManager::new(
+        cfg.clone(),
+        store.clone(),
+        bus.clone(),
+    ));
+    let state = ftdi_logger::api::AppState {
+        cfg: cfg.clone(),
+        store: store.clone(),
+        capture,
+        bus,
+        started: Instant::now(),
+    };
+    let app = ftdi_logger::api::router(state);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // Установка «есть», но DLL нет — статус обязан ответить, а не 500.
+    let install_dir = root.join("j2534proxy");
+    let log_dir = root.join("proxy-logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::fs::create_dir_all(&install_dir).unwrap();
+    std::fs::write(
+        install_dir.join("j2534proxy.ini"),
+        format!(
+            "[proxy]\nEnabled=1\nRealLibrary=C:\\Scanmatik\\smj2534.dll\nLogDir={}\n\n[device]\nName=Scanmatik - SM2 Proxy\nVendor=DaVinci Cyber Engineering\n",
+            log_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let status = get_json(addr, "/api/j2534/proxy").await;
+    assert_eq!(status.get("ok"), Some(&Value::Bool(true)));
+    assert_eq!(
+        status.get("dll").and_then(|dll| dll.get("present")),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        status.get("ini").and_then(|ini| ini.get("enabled")),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        status.get("install_dir").and_then(Value::as_str),
+        Some(install_dir.to_string_lossy().as_ref()),
+        "install_dir — каталог прокси внутри установки (без префикса \\\\?\\): {status}"
+    );
+    assert!(
+        status
+            .get("notes")
+            .and_then(Value::as_array)
+            .is_some_and(|notes| !notes.is_empty()),
+        "отсутствие DLL должно быть в notes: {status}"
+    );
+
+    // Неизвестное действие — JSON `ok:false`, не 500 и не паника.
+    let (code, body) = post_json(addr, "/api/j2534/proxy", r#"{"action":"взорвать"}"#).await;
+    assert_eq!(code, 200, "неизвестное действие: {body}");
+    assert_eq!(body.get("ok"), Some(&Value::Bool(false)), "{body}");
+    assert!(
+        body.get("notes")
+            .and_then(Value::as_array)
+            .is_some_and(|notes| !notes.is_empty()),
+        "причина отказа должна быть в notes: {body}"
+    );
+
+    // Сессия и журнал прокси «в окне» её старта.
+    let mut meta = SessionMeta::new("proxy-api", "proxy");
+    meta.status = "finished".into();
+    let mut w = store.create(meta).unwrap();
+    let dir = w.dir().to_path_buf();
+    let m = w.meta.clone();
+    w.finish(&m).unwrap();
+    drop(w);
+    std::fs::write(
+        log_dir.join("proxy-20261119-190000-pid9.log"),
+        "[+0.100000s] J2534 TX ch=1 call=1 len=4 : 00 02 27 7f\n# proxy stop: calls=1 tx=1 rx=0 errors=0\n",
+    )
+    .unwrap();
+
+    let (code, body) = post_json(addr, "/api/sessions/proxy-api/proxy/collect", "").await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body.get("ok"), Some(&Value::Bool(true)), "{body}");
+    let lane = body.get("lane").expect("lane должен быть объектом");
+    assert_eq!(lane.get("tx"), Some(&Value::from(1)), "{body}");
+    assert_eq!(lane.get("calls"), Some(&Value::from(1)), "{body}");
+    // Полоса сохранилась в session.json — отчёт потом её увидит.
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("session.json")).unwrap()).unwrap();
+    assert!(
+        saved.get("proxy").is_some(),
+        "session.json без proxy: {saved}"
+    );
+
+    server.abort();
+}

@@ -1,9 +1,11 @@
-/** Диалоги: экспорт/отправка, метки, шаги, шаблоны, справка, светофор. */
+/** Диалоги: настройки (J2534/прокси), экспорт/отправка, метки, шаги, шаблоны, справка, светофор. */
 
 import { el, iconButton } from "../dom";
+import { api } from "../api";
 import { store } from "../store";
-import type { NewSessionResult } from "../types";
-import { msg, t } from "../i18n";
+import { fmtNum } from "../format";
+import type { NewSessionResult, ProxyStatus } from "../types";
+import { errText, msg, t } from "../i18n";
 
 msg({
   "нет активной сессии": "no active session",
@@ -117,6 +119,35 @@ msg({
   "Программа": "Program",
   "Выберите программу или PID": "Choose a program or PID",
   "Новая сессия: выбор цели": "New session: choose a target",
+  // Настройки → J2534 / прокси (docs/13-j2534-proxy.md §9).
+  "Настройки": "Settings",
+  "J2534 / прокси": "J2534 / proxy",
+  "J2534 через прокси (второй канал)": "J2534 through the proxy (second channel)",
+  "прокси-библиотека встаёт между программой и драйвером адаптера и пишет журнал вне процесса: канал не зависит от инъекции и переживает падение агента":
+    "the proxy library sits between the tool and the adapter driver and writes its log outside the process: the channel does not depend on injection and survives an agent crash",
+  "настоящий драйвер не найден — укажите RealLibrary в j2534proxy.ini":
+    "the real driver was not found — set RealLibrary in j2534proxy.ini",
+  "Драйвер": "Driver",
+  "Реестр": "Registry",
+  "реестр": "registry",
+  "не найден": "not found",
+  "есть, v{version}": "present, v{version}",
+  "зарегистрировано": "registered",
+  "читаю состояние прокси…": "reading the proxy state…",
+  "прокси не включён": "the proxy is not enabled",
+  "прокси не включился": "the proxy did not turn on",
+  "требуются права администратора": "administrator rights are required",
+  "не удалось прочитать состояние прокси: {msg}": "failed to read the proxy state: {msg}",
+  "прокси: {msg}": "proxy: {msg}",
+  "Переключить PCMflash на прокси-устройство": "Switch PCMflash to the proxy device",
+  "прежний выбор PCMflash сохраняется и восстанавливается при выключении":
+    "the previous PCMflash choice is saved and restored when you switch the proxy off",
+  "Подхватить журналы сейчас": "Collect logs now",
+  "только для открытой сессии: журналы прокси подхватываются в текущую сессию":
+    "only for an open session: proxy logs are collected into the current session",
+  "журналы подхвачены: TX {tx} / RX {rx}": "logs collected: TX {tx} / RX {rx}",
+  "журналов прокси не найдено": "no proxy logs were found",
+  "не удалось подхватить журналы: {msg}": "failed to collect the logs: {msg}",
 });
 
 interface ModalOpts {
@@ -484,6 +515,273 @@ export function openTemplatesDialog(): void {
     ],
   });
   void m;
+}
+
+/* ───────────────────────── настройки: J2534 / прокси ───────────────────── */
+
+/** Строки статуса — моноширинный текст: «DLL: есть, v1.0.0.120» (docs/13 §9). */
+function statusLines(lines: string[]): HTMLElement {
+  const box = el("div", "proxy-status");
+  for (const line of lines) box.append(el("div", "", line));
+  return box;
+}
+
+/**
+ * `POST /j2534/proxy` при отказе отвечает частичным `{ok:false, notes:[…]}` —
+ * без блоков состояния (engine/src/api.rs). Держим ранее прочитанное, иначе
+ * строки статуса показывали бы «DLL: нет» вместо реального состояния.
+ */
+function mergeProxyStatus(prev: ProxyStatus | null, next: ProxyStatus): ProxyStatus {
+  if (!prev) return { ...next, notes: next.notes ?? [] };
+  return { ...prev, ...next, notes: next.notes ?? prev.notes ?? [] };
+}
+/** Чекбокс с подписью и пояснением; `<label>` — чтобы клик по тексту работал. */
+function checkRow(input: HTMLInputElement, label: string, hint?: string): HTMLElement {
+  input.type = "checkbox";
+  const row = el("label", "check-row");
+  const text = el("div", "check-row__text");
+  text.append(el("span", "", label));
+  if (hint) text.append(el("span", "check-row__hint", hint));
+  row.append(input, text);
+  return row;
+}
+
+/** Откуда взят путь настоящего драйвера (`real.from`). */
+function proxySourceLabel(from: string | null | undefined): string {
+  switch (from) {
+    case "registry":
+      return t("реестр");
+    case "ini":
+      return "ini";
+    case null:
+    case undefined:
+    case "":
+      return "—";
+    default:
+      return from;
+  }
+}
+
+/**
+ * Настройки → J2534 / прокси: второй канал захвата (docs/13-j2534-proxy.md §9).
+ *
+ * Переключатель: вкл = `install` → `enable` (→ `select-adapter`), выкл = `disable`
+ * (→ `restore-adapter`). Состояние всегда перечитывается из ответа сервера:
+ * при `ok:false` переключатель показывается выключенным, а `notes` — текстом ошибки.
+ */
+export function openSettingsDialog(): void {
+  let busy = false;
+  /** Последнее полное состояние: частичный ответ об отказе его не затирает. */
+  let last: ProxyStatus | null = null;
+
+  const body = el("div");
+  body.append(el("div", "sec__title", t("J2534 / прокси")));
+
+  const toggle = el("input") as HTMLInputElement;
+  toggle.checked = false;
+  body.append(
+    checkRow(
+      toggle,
+      t("J2534 через прокси (второй канал)"),
+      t(
+        "прокси-библиотека встаёт между программой и драйвером адаптера и пишет журнал вне процесса: канал не зависит от инъекции и переживает падение агента",
+      ),
+    ),
+  );
+
+  const driverHint = el("div", "field__hint");
+  driverHint.style.color = "var(--warn)";
+  driverHint.style.display = "none";
+  driverHint.textContent = t("настоящий драйвер не найден — укажите RealLibrary в j2534proxy.ini");
+  body.append(driverHint);
+
+  const statusBox = el("div");
+  statusBox.append(el("div", "muted", t("читаю состояние прокси…")));
+  body.append(statusBox);
+
+  const notesBox = el("div", "field__hint");
+  notesBox.style.display = "none";
+  body.append(notesBox);
+
+  const adapter = el("input") as HTMLInputElement;
+  // По умолчанию включён: включение прокси сразу переключает PCMflash на нашу запись.
+  adapter.checked = true;
+  body.append(
+    checkRow(
+      adapter,
+      t("Переключить PCMflash на прокси-устройство"),
+      t("прежний выбор PCMflash сохраняется и восстанавливается при выключении"),
+    ),
+  );
+
+  const collect = el("button", "btn btn--sm", t("Подхватить журналы сейчас"));
+  collect.type = "button";
+  const collectBox = el("div");
+  collectBox.append(
+    collect,
+    el(
+      "div",
+      "field__hint",
+      t("только для открытой сессии: журналы прокси подхватываются в текущую сессию"),
+    ),
+  );
+  body.append(collectBox);
+
+  const setBusy = (value: boolean): void => {
+    busy = value;
+    toggle.disabled = value;
+    adapter.disabled = value;
+    collect.disabled = value || !store.state.active;
+  };
+
+  const render = (st: ProxyStatus): void => {
+    last = st;
+    const dll = st.dll;
+    const dllText = dll?.present
+      ? dll.version
+        ? t("есть, v{version}", { version: dll.version })
+        : t("есть")
+      : t("нет");
+    const driverText = st.real?.present
+      ? `${st.real.path || "—"} (${proxySourceLabel(st.real.from)})`
+      : t("не найден");
+    statusBox.replaceChildren(
+      statusLines([
+        `DLL: ${dllText}`,
+        `${t("Драйвер")}: ${driverText}`,
+        `${t("Реестр")}: ${st.registry?.registered ? t("зарегистрировано") : t("нет")}`,
+        `PCMflash: ${st.pcmflash?.adapter || "—"}`,
+      ]),
+    );
+
+    // `ok:false` — состояние согласованное, но включённым прокси не считается.
+    toggle.checked = st.ok && st.ini?.enabled === true;
+    driverHint.style.display = st.real?.present ? "none" : "";
+
+    const notes = st.notes ?? [];
+    notesBox.replaceChildren();
+    notesBox.style.color = st.ok ? "var(--text-mute)" : "var(--err)";
+    if (!notes.length && st.ok) {
+      notesBox.style.display = "none";
+    } else {
+      notesBox.style.display = "";
+      for (const note of notes.length ? notes : [t("прокси не включён")]) {
+        notesBox.append(el("div", "", t(note)));
+      }
+    }
+  };
+
+  /** Выполнить действие и показать ровно то состояние, которое вернул сервер. */
+  const apply = (fn: () => Promise<ProxyStatus>): void => {
+    if (busy) return;
+    setBusy(true);
+    void (async () => {
+      try {
+        const next = await fn();
+        // Частичный ответ об отказе дополняем ранее прочитанным состоянием.
+        render(mergeProxyStatus(last, next));
+        if (!next.ok) {
+          const reason = (next.notes?.length ? next.notes : [t("прокси не включился")])
+            .map((n) => t(n))
+            .join("; ");
+          store.toast("error", reason);
+        }
+      } catch (e) {
+        store.toast("error", t("прокси: {msg}", { msg: errText(e) }));
+        // Ответа нет — перечитываем состояние, чтобы переключатель не врал.
+        try {
+          render(mergeProxyStatus(last, await api.j2534ProxyStatus()));
+        } catch {
+          /* движок не ответил и на чтение — оставляем прежнюю картинку */
+        }
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  toggle.addEventListener("change", () => {
+    if (!toggle.checked) {
+      apply(async () => {
+        let st = await api.j2534ProxyAction("disable");
+        // Прежний адаптер возвращаем, если его выбирали мы (`proxy_selected`).
+        if (st.ok && (adapter.checked || st.pcmflash?.proxy_selected)) {
+          st = await api.j2534ProxyAction("restore-adapter");
+        }
+        return st;
+      });
+      return;
+    }
+    apply(async () => {
+      let st = await api.j2534ProxyAction("install");
+      if (!st.ok) return st;
+      st = await api.j2534ProxyAction("enable");
+      if (!st.ok) return st;
+      if (adapter.checked) st = await api.j2534ProxyAction("select-adapter");
+      return st;
+    });
+  });
+
+  adapter.addEventListener("change", () => {
+    apply(() =>
+      api.j2534ProxyAction(adapter.checked ? "select-adapter" : "restore-adapter"),
+    );
+  });
+
+  collect.addEventListener("click", () => {
+    const active = store.state.active;
+    if (!active) return;
+    collect.disabled = true;
+    void (async () => {
+      try {
+        const res = await api.sessionProxyCollect(active.id);
+        if (res.lane) {
+          store.toast(
+            "ok",
+            t("журналы подхвачены: TX {tx} / RX {rx}", {
+              tx: fmtNum(res.lane.tx ?? 0),
+              rx: fmtNum(res.lane.rx ?? 0),
+            }),
+          );
+          // Карточка сессии перерисуется с полосой прокси.
+          void store.refreshSessions();
+        } else {
+          store.toast(
+            "warn",
+            res.notes?.length
+              ? res.notes.map((n) => t(n)).join("; ")
+              : t("журналов прокси не найдено"),
+          );
+        }
+      } catch (e) {
+        store.toast("error", t("не удалось подхватить журналы: {msg}", { msg: errText(e) }));
+      } finally {
+        collect.disabled = !store.state.active;
+      }
+    })();
+  });
+
+  const m = modal({
+    title: t("Настройки"),
+    body,
+    footer: [primary(t("закрыть"), () => m.close())],
+    width: 640,
+  });
+  setBusy(false);
+  void (async () => {
+    try {
+      render(await api.j2534ProxyStatus());
+    } catch (e) {
+      statusBox.replaceChildren();
+      notesBox.style.display = "";
+      notesBox.style.color = "var(--err)";
+      notesBox.textContent = t("не удалось прочитать состояние прокси: {msg}", {
+        msg: errText(e),
+      });
+      toggle.disabled = true;
+      adapter.disabled = true;
+    }
+  })();
 }
 
 /* ─────────────────────────────── справка ───────────────────────────────── */

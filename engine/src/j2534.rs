@@ -155,8 +155,10 @@ fn drivers_from_branch(branch: &str, api: &str) -> Vec<J2534Driver> {
 }
 
 /// `%SystemRoot%\System32\x.dll` → развёрнутый путь (только `%VAR%`-подстановки).
-#[cfg(windows)]
-fn expand_env_vars(text: &str) -> String {
+///
+/// `pub(crate)`: тем же развёртыванием пользуется `proxy` (`LogDir` в ini пишется
+/// как `%LOCALAPPDATA%\…`, docs/13 §4) — второй такой же парсер не нужен.
+pub(crate) fn expand_env_vars(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('%') {

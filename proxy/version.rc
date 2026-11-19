@@ -1,0 +1,36 @@
+/*
+ * version.rc -- version resource of the FTDI/USB Logger J2534 proxy.
+ *
+ * FileVersion/ProductVersion are deliberately 1.0.0.120: PCMflash and the
+ * J2534 tooling around it expect the Pass-Thru library generation that the
+ * real adapters report, and the engine's proxy status card shows that string
+ * (docs/13 section 8).  Keep it in sync with PROXY_VERSION in j2534proxy.c.
+ */
+
+#include <windows.h>
+
+1 VERSIONINFO
+FILEVERSION    1,0,0,120
+PRODUCTVERSION 1,0,0,120
+FILEOS         0x4
+FILETYPE       0x2
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName",      "DaVinci Cyber Engineering"
+      VALUE "FileDescription",  "FTDI/USB Logger J2534 Proxy (Pass-Thru 04.04)"
+      VALUE "FileVersion",      "1.0.0.120"
+      VALUE "InternalName",     "j2534proxy"
+      VALUE "LegalCopyright",   "Copyright (C) DaVinci Cyber Engineering"
+      VALUE "OriginalFilename", "j2534proxy.dll"
+      VALUE "ProductName",      "FTDI/USB Logger J2534 Proxy"
+      VALUE "ProductVersion",   "1.0.0.120"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

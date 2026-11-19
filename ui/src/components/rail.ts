@@ -6,6 +6,7 @@ import { store } from "../store";
 import { openUsbpcapDialog } from "./dialogs";
 import type { FtdiDevice, J2534Driver, SessionMeta, ToolProcess, UsbDevice } from "../types";
 import { msg, t } from "../i18n";
+import { proxyBadge, proxyLine, proxyLineTitle, proxyNeedsAttention } from "../proxy";
 
 msg({
   "СЕССИИ": "SESSIONS",
@@ -222,6 +223,14 @@ export class Rail {
       if (meta.status === "recording") title.append(el("span", "badge-rec", "REC"));
       if (meta.transport === "import") title.append(el("span", "badge-tag", t("импорт")));
       else if (meta.transport === "mixed") title.append(el("span", "badge-tag", "mix"));
+      // Второй канал захвата: бейдж и строка сверки полосы прокси (§8).
+      const proxy = meta.proxy;
+      const proxyWarn = proxy ? proxyNeedsAttention(proxy) : false;
+      if (proxy) {
+        title.append(
+          el("span", `badge-tag${proxyWarn ? " badge-tag--warn" : ""}`.trim(), proxyBadge()),
+        );
+      }
       const time = el("div", "session-item__time", fmtDate(meta.started_at));
       const stats = el("div", "session-item__meta");
       stats.append(
@@ -230,6 +239,15 @@ export class Rail {
         spanBold("RX", fmtBytesShort(meta.counts?.rx_bytes ?? 0) + "B"),
       );
       item.append(title, time, stats);
+      if (proxy) {
+        const line = el(
+          "div",
+          `session-item__proxy${proxyWarn ? " is-warn" : ""}`,
+          proxyLine(proxy),
+        );
+        line.title = proxyLineTitle(proxy);
+        item.append(line);
+      }
       const open = (): void => void store.selectSession(meta.id);
       item.addEventListener("click", open);
       item.addEventListener("keydown", (e) => {

@@ -28,3 +28,7 @@ Thumbs.db
 
 # Артефакты сборки поддельного J2534-драйвера (стенд tests/e2e/j2534_stand.py)
 /tests/e2e/fake_j2534/target/
+
+# Артефакты сборки J2534-прокси (перегенерируются proxy\build.ps1 и smoke.ps1)
+/proxy/out/
+/proxy/tests/out/

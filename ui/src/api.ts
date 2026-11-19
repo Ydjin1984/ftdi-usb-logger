@@ -7,6 +7,8 @@ import type {
   Health,
   PayloadDecode,
   ProcessDetail,
+  ProxyLane,
+  ProxyStatus,
   UsbDevice,
   J2534Driver,
   NewSessionResult,
@@ -75,6 +77,22 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 const json = (payload: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(payload) });
 
+/** Действия над J2534-прокси: тело `POST /j2534/proxy` (docs/13 §8). */
+export type ProxyAction =
+  | "install"
+  | "remove"
+  | "enable"
+  | "disable"
+  | "select-adapter"
+  | "restore-adapter";
+
+/** Ответ `POST /sessions/:id/proxy/collect`: подхваченная полоса или причины. */
+export interface ProxyCollect {
+  ok: boolean;
+  lane: ProxyLane | null;
+  notes: string[];
+}
+
 export const api = {
   health: () => req<Health>("/api/health"),
 
@@ -114,6 +132,16 @@ export const api = {
   usbpcapDevices: () => req<string[]>("/api/usbpcap/devices"),
   startUsbpcap: (device: string) => req<SessionMeta>("/api/usbpcap/start", json({ device })),
   j2534Drivers: () => req<J2534Driver[]>("/api/j2534/drivers"),
+
+  /* J2534-прокси — второй канал захвата (docs/13-j2534-proxy.md §8). */
+  /** Состояние прокси: DLL, ini, реестр, настоящий драйвер, адаптер PCMflash. */
+  j2534ProxyStatus: () => req<ProxyStatus>("/api/j2534/proxy"),
+  /** Действие над прокси; ответ — уже актуальное состояние. */
+  j2534ProxyAction: (action: ProxyAction) => req<ProxyStatus>("/api/j2534/proxy", json({ action })),
+  /** Подхватить журналы прокси в открытую сессию прямо сейчас. */
+  sessionProxyCollect: (id: string) =>
+    req<ProxyCollect>(`/api/sessions/${encodeURIComponent(id)}/proxy/collect`, json({})),
+
   toolDetail: (pid: number) => req<ProcessDetail>(`/api/tools/${pid}/detail`),
 
   attach: (pid: number, label?: string, adapter?: string) =>

@@ -4,7 +4,7 @@ import { store } from "../store";
 import { isMuted, setMuted } from "../sound";
 import { button, el, icon, iconButton } from "../dom";
 import { fmtTimeOnly } from "../format";
-import { openHelpDialog, openNewSessionDialog } from "./dialogs";
+import { openHelpDialog, openNewSessionDialog, openSettingsDialog } from "./dialogs";
 import { getLang, msg, setLang, t, type Lang } from "../i18n";
 
 msg({
@@ -14,6 +14,7 @@ msg({
   "завершить текущую сессию, пересканировать шнурки и программы (Ctrl+Alt+N)":
     "finish the current session, rescan cables and programs (Ctrl+Alt+N)",
   "как работать (F1)": "how it works (F1)",
+  "настройки: J2534 / прокси": "settings: J2534 / proxy",
   "язык интерфейса": "interface language",
   "админ": "admin",
   "есть": "yes",
@@ -95,9 +96,22 @@ export class Topbar {
       title: t("завершить текущую сессию, пересканировать шнурки и программы (Ctrl+Alt+N)"),
       onClick: () => openNewSessionDialog(),
     });
+    const settings = iconButton("settings", t("настройки: J2534 / прокси"), () =>
+      openSettingsDialog(),
+    );
     const help = iconButton("help", t("как работать (F1)"), () => openHelpDialog());
 
-    this.el.append(brand, this.pills, spacer, newSession, this.clock, this.langSelect, this.mute, help);
+    this.el.append(
+      brand,
+      this.pills,
+      spacer,
+      newSession,
+      this.clock,
+      this.langSelect,
+      this.mute,
+      settings,
+      help,
+    );
     this.update();
   }
 
