@@ -77,6 +77,7 @@ fn engine(root: &Path, sidecar_script: &str) -> (Arc<CaptureManager>, PathBuf) {
         no_bridge: false,
         discovery_ms: 2000,
         max_event_bytes: 64 * 1024,
+        capture_mode: "full".into(),
     });
     let store = Arc::new(SessionStore::open(&cfg.sessions_dir).expect("store"));
     let (bus, _) = broadcast::channel::<ServerMsg>(1024);
@@ -292,6 +293,7 @@ fn real_dummy_target_ready_and_parse_family() {
         no_bridge: false,
         discovery_ms: 2000,
         max_event_bytes: 64 * 1024,
+        capture_mode: "full".into(),
     });
     let store = Arc::new(SessionStore::open(&cfg.sessions_dir).expect("store"));
     let (bus, _) = broadcast::channel::<ServerMsg>(4096);

@@ -32,6 +32,10 @@ pub struct Cli {
     /// Только отдать UI и работать с сессиями, не поднимая мост.
     #[arg(long)]
     pub no_bridge: bool,
+    /// Режим сбора: `full` (каждый вызов и кадр) или `compact` (длинный прогон,
+    /// пустые опросы и SOF агрегируются — docs/09 §4).
+    #[arg(long, default_value = "full")]
+    pub capture_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,8 @@ pub struct Config {
     pub no_bridge: bool,
     pub discovery_ms: u64,
     pub max_event_bytes: usize,
+    /// `full` | `compact` — режим сбора; уходит в attach-команду `options.mode`.
+    pub capture_mode: String,
 }
 
 impl Config {
@@ -90,6 +96,12 @@ impl Config {
             no_bridge: cli.no_bridge,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            // Неизвестное значение трактуем как full: терять данные хуже, чем
+            // получить большой файл.
+            capture_mode: match cli.capture_mode.trim().to_ascii_lowercase().as_str() {
+                "compact" => "compact".to_string(),
+                _ => "full".to_string(),
+            },
             root,
         })
     }

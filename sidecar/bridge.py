@@ -220,6 +220,18 @@ class Bridge:
         with open(script_path, "r", encoding="utf-8") as handle:
             source = handle.read()
 
+        # Конфигурация должна быть видна агенту ДО первой установки хуков: режим
+        # сбора (full/compact) и карта ABI читаются на загрузке скрипта, а не
+        # после. Поэтому префикс в исходник, а не RPC-вызов после load().
+        options = cmd.get("options")
+        if isinstance(options, dict) and options:
+            source = (
+                "var __FTDI_CONFIG__ = "
+                + json.dumps(options, ensure_ascii=False, separators=(",", ":"))
+                + ";\n"
+                + source
+            )
+
         with self._lock:
             self._buffer = []
             self._load_probe = {}
@@ -317,8 +329,41 @@ class Bridge:
         else:
             self.log("info", "mark %s: %s" % (action or "?", title))
 
+    def emit_counters(self, script) -> None:
+        """Последняя строка сессии: счётчики потерь агента (docs/09 §4).
+
+        Неполный лог нельзя выдавать за полный, поэтому dropped/truncated
+        попадают в `# counters` даже при аварийном закрытии.
+        """
+        try:
+            exports = getattr(script, "exports_sync", None)
+            if exports is None:
+                exports = getattr(script, "exports", None)
+            if exports is None:
+                return
+            data = exports.counters()
+        except Exception as exc:  # noqa: BLE001 - счётчики не должны мешать закрытию
+            self.log("warn", "counters недоступны: %s: %s" % (type(exc).__name__, exc))
+            return
+        if not isinstance(data, dict):
+            return
+        parts = []
+        for key in ("dropped_events", "truncated_payloads", "decode_errors", "rx_sof", "calls"):
+            try:
+                parts.append("%s=%d" % (key, int(data.get(key) or 0)))
+            except (TypeError, ValueError):
+                continue
+        line = "# counters " + " ".join(parts)
+        mode = data.get("mode")
+        if mode:
+            line += " mode=%s" % mode
+        self.emit_event(line)
+
     def stop_capture(self, emit_bye: bool = False) -> None:
         script, session = self.script, self.session
+        # Счётчики — до unload: после него RPC уже недоступен.
+        if script is not None:
+            self.emit_counters(script)
         self.script = None
         self.session = None
         self._closing = True

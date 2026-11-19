@@ -456,6 +456,24 @@ impl CaptureManager {
                 tracing::warn!("raw.log: баннер не записан: {err}");
             }
         }
+        // Шапка (§7): чем снимали и как подключились. `# api:` дописывает сам
+        // агент, как только подтвердит ABI — до первого вызова DLL его не знает
+        // никто, и придумывать версию нельзя.
+        let attach_kind = attach_mode_for(&detail.proc);
+        let agent_name = self
+            .cfg
+            .script
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for line in [
+            format!("# agent: {agent_name} mode={}", self.cfg.capture_mode),
+            format!("# attach: {attach_kind}"),
+        ] {
+            if let Err(err) = writer.write_raw_line(&line) {
+                tracing::warn!("raw.log: шапка не записана: {err}");
+            }
+        }
 
         // Общее состояние для status().
         *self.shared.active.lock() = Some(meta.clone());
@@ -510,7 +528,7 @@ impl CaptureManager {
         // Старт Frida-моста (attach-команда отправляется внутри bridge.start()).
         if let Err(err) = self
             .bridge
-            .start(pid, &label, self.bridge_tx.clone())
+            .start(pid, &label, attach_kind, self.bridge_tx.clone())
             .await
         {
             return Err(self
@@ -1089,6 +1107,12 @@ struct SessionWriterTask {
     raw_fallback_t: f64,
     /// Когда `session.json` последний раз писали «на живую» (см. `persist_meta`).
     last_meta_save: Instant,
+    /// Счётчики потерь (docs/09 §4): неполный лог нельзя выдавать за полный.
+    dropped_events: u64,
+    truncated_payloads: u64,
+    decode_errors: u64,
+    /// Последний `# counters` от Frida-агента (`rx_sof`, `calls`, его потери).
+    agent_counters: Option<serde_json::Value>,
 }
 
 impl SessionWriterTask {
@@ -1127,6 +1151,10 @@ impl SessionWriterTask {
             raw_t0_epoch,
             raw_fallback_t: 0.0,
             last_meta_save: Instant::now(),
+            dropped_events: 0,
+            truncated_payloads: 0,
+            decode_errors: 0,
+            agent_counters: None,
         }
     }
 
@@ -1368,13 +1396,33 @@ impl SessionWriterTask {
         // SessionWriter сам ведёт counts (включая tx/rx байты) — зеркалим их в UI.
         *self.shared.counts.lock() = self.writer.meta.counts.clone();
 
+        // Учёт потерь (§4): счётчики агента (`# counters`) и усечённые payload'ы.
+        if ev.api == "COUNTERS" {
+            self.agent_counters = Some(ev.meta.clone());
+        }
+        let cut = ev
+            .meta
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || ev
+                .meta
+                .get("short")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        if cut {
+            self.truncated_payloads = self.truncated_payloads.saturating_add(1);
+        }
+
         // Буфер шага (для decode::summarize_step); StepStart кладётся первым.
+        let mut dropped_now = 0u64;
         if let Some(open) = &mut self.open {
             if open.buffer.len() >= STEP_EVENT_CAP {
                 // Режем старую половину пачкой, сохраняя StepStart в [0].
                 let drop_to = (STEP_EVENT_CAP / 2).max(2);
                 open.buffer.drain(1..drop_to);
-                open.dropped += (drop_to - 1) as u64;
+                dropped_now = (drop_to - 1) as u64;
+                open.dropped += dropped_now;
                 let _ = self.bus.send(ServerMsg::Toast {
                     level: "warn".into(),
                     text: format!(
@@ -1385,6 +1433,7 @@ impl SessionWriterTask {
             }
             open.buffer.push(ev.clone());
         }
+        self.dropped_events = self.dropped_events.saturating_add(dropped_now);
         self.push_pending(ev.clone());
         Ok(ev)
     }
@@ -1832,6 +1881,36 @@ impl SessionWriterTask {
                 text: format!("отчёты не сформированы: {err}"),
             });
         }
+        // Счётчики потерь и явная метка неполноты (§4, §7). Счётчики агента
+        // (rx_sof/calls) приходят его собственной строкой `# counters`, здесь —
+        // то, что знает движок, плюс зеркало агентских чисел.
+        let agent = self.agent_counters.clone().unwrap_or(serde_json::Value::Null);
+        let pick = |key: &str| -> u64 {
+            agent
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        let dropped = self.dropped_events;
+        let counters_line = format!(
+            "# counters dropped_events={} truncated_payloads={} decode_errors={} rx_sof={} calls={}",
+            dropped,
+            self.truncated_payloads,
+            self.decode_errors,
+            pick("rx_sof"),
+            pick("calls")
+        );
+        if let Err(err) = self.writer.write_raw_line(&counters_line) {
+            tracing::warn!("raw.log: counters не записаны: {err}");
+        }
+        if dropped > 0 {
+            let incomplete = format!(
+                "# session incomplete: reason=step_buffer_overflow dropped={dropped}"
+            );
+            if let Err(err) = self.writer.write_raw_line(&incomplete) {
+                tracing::warn!("raw.log: session incomplete не записана: {err}");
+            }
+        }
         // Итоги в конец raw.log (`# totals: events=N tx=P/TxB rx=Q/RxB steps=S`) — как в
         // старом CLI-логере; legacy-скриптам удобно, на разбор не влияет.
         let c = &self.writer.meta.counts;
@@ -2049,6 +2128,27 @@ fn raw_banner(label: &str, detail: &crate::models::ProcessDetail) -> Vec<String>
         .unwrap_or_else(|_| "?".into());
     lines.push(format!("# host: user={user} computer={computer}"));
     lines
+}
+
+/// `early` | `late` — насколько рано мы подключились к цели (docs/09 §7).
+///
+/// `late` означает: часть жизни процесса (и, возможно, открытие канала) прошла
+/// без захвата, поэтому `chan-miss` — предупреждение, а не дефект. `spawn`
+/// появится, когда логгер научится сам запускать инструмент.
+fn attach_mode_for(proc: &crate::models::ToolProcess) -> &'static str {
+    let Some(started) = proc
+        .started_at
+        .as_deref()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+    else {
+        return "late";
+    };
+    let age = chrono::Utc::now().signed_duration_since(started.with_timezone(&chrono::Utc));
+    if age.num_seconds() <= 3 {
+        "early"
+    } else {
+        "late"
+    }
 }
 
 /// RFC3339 (UTC, как в `exe_meta.mtime`) → локальное `%Y-%m-%d %H:%M:%S`.
@@ -2500,6 +2600,7 @@ mod tests {
             no_bridge: false,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            capture_mode: "full".into(),
         })
     }
 
@@ -2664,6 +2765,7 @@ for line in sys.stdin:
             no_bridge: false,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            capture_mode: "full".into(),
         });
         std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
         let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());
@@ -2822,6 +2924,7 @@ for line in sys.stdin:
             no_bridge: false,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            capture_mode: "full".into(),
         });
         std::fs::create_dir_all(&cfg.sessions_dir).unwrap();
         let store = Arc::new(SessionStore::open(&cfg.sessions_dir).unwrap());

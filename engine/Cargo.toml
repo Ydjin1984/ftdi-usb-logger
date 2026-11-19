@@ -1,6 +1,6 @@
 [package]
 name = "ftdi-logger"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "FTDI/USB logger engine: capture, storage, replay and reporting for Quickflash-family tools"
 default-run = "ftdi-logger"

@@ -185,6 +185,8 @@ export class Inspector {
     prop(props, t("тип"), `${ev.kind} · ${ev.transport}`);
     prop(props, t("время"), `${fmtTime(ev.t)} · ${fmtDate(ev.wall)}`);
     prop(props, "api", ev.api || "—");
+    // Номер вызова, индекс сообщения, счётчики и тайминги J2534 (контракт 0.3.3).
+    for (const [label, value] of j2534CallProps(ev)) prop(props, label, value);
     if (ev.len) prop(props, t("длина"), fmtBytes(ev.len));
     if (ev.rc != null) prop(props, "rc", String(ev.rc));
     if (ev.step != null) prop(props, t("шаг"), String(ev.step));
@@ -563,6 +565,59 @@ function subTitle(text: string): HTMLElement {
   d.style.margin = "10px 0 6px";
   d.textContent = text;
   return d;
+}
+
+/**
+ * Поля вызова J2534 из `meta` (контракт `docs/11-capture-grammar.md`, 0.3.3).
+ *
+ * Возвращает готовые пары «подпись → значение» в порядке грамматики. Движок
+ * кладёт короткие имена (`dur`, `th`), но старые сборки писали длинные
+ * (`duration`, `thread`) — принимаем обе формы. Длительность всегда в
+ * микросекундах: `dur` в логе — мкс, не секунды.
+ */
+function j2534CallProps(ev: Event): Array<[string, string]> {
+  const m = ev.meta;
+  if (!m) return [];
+  const pick = (...names: string[]): unknown => {
+    for (const name of names) {
+      const v = m[name];
+      if (v != null && v !== "") return v;
+    }
+    return undefined;
+  };
+  const out: Array<[string, string]> = [];
+
+  const call = pick("call");
+  if (call != null) out.push([t("вызов"), String(call)]);
+
+  const idx = pick("i");
+  if (idx != null) out.push([t("сообщение"), String(idx)]);
+
+  const nIn = pick("n_in");
+  if (nIn != null) out.push([t("запрошено"), String(nIn)]);
+
+  const nOut = pick("n_out");
+  if (nOut != null) out.push([t("получено"), String(nOut)]);
+
+  const dur = pick("duration", "dur");
+  if (dur != null) {
+    const n = typeof dur === "number" ? dur : Number(dur);
+    if (Number.isFinite(n)) out.push([t("длительность, мкс"), String(Math.round(n))]);
+  }
+
+  const th = pick("thread", "th");
+  if (th != null) out.push([t("поток"), String(th)]);
+
+  const ts = pick("ts");
+  if (ts != null) out.push([t("время драйвера"), String(ts)]);
+
+  const sof = pick("sof");
+  if (sof != null) {
+    const on = sof === true || sof === 1 || sof === "1" || sof === "true";
+    out.push([t("начало сообщения"), on ? t("да") : t("нет")]);
+  }
+
+  return out;
 }
 
 function prop(box: HTMLElement, key: string, value: string, cls = ""): void {

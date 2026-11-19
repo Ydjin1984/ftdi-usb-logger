@@ -622,6 +622,10 @@ pub struct J2534Driver {
     pub dll_present: bool,
     #[serde(default)]
     pub version: String,
+    /// Ветка реестра, в которой зарегистрирован драйвер: `04.04`, `05.00`
+    /// или `ambiguous`, если библиотека объявлена в обеих (docs/09 §5).
+    #[serde(default)]
+    pub api: String,
 }
 
 /// Возможности окружения (что реально доступно на этой машине).

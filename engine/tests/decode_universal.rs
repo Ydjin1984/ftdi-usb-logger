@@ -425,3 +425,404 @@ fn com_initial_state_and_timeouts_logged() {
     assert_eq!(e.meta.get("read_total_const").and_then(Value::as_i64), Some(1000));
     assert_eq!(e.meta.get("write_total_const").and_then(Value::as_i64), Some(1000));
 }
+
+// ───────── docs/11-capture-grammar.md: кейс на каждый новый формат ─────────
+
+#[test]
+fn grammar_api_banner() {
+    // `# api: 04.04 dll="…" ver="…" path="…" pid=8120 bits=32 dec=1`
+    let e = ev(r#"# api: 04.04 dll="smj2534.dll" ver="1.0.0.120" path="C:\PCMflash\smj2534.dll" pid=8120 bits=32 dec=1"#);
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "API");
+    assert_eq!(e.meta.get("api_version").and_then(Value::as_str), Some("04.04"));
+    assert_eq!(e.meta.get("dll").and_then(Value::as_str), Some("smj2534.dll"));
+    assert_eq!(e.meta.get("ver").and_then(Value::as_str), Some("1.0.0.120"));
+    assert_eq!(
+        e.meta.get("path").and_then(Value::as_str),
+        Some(r"C:\PCMflash\smj2534.dll")
+    );
+    assert_eq!(e.meta.get("pid").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("bits").and_then(Value::as_i64), Some(32));
+    assert_eq!(e.meta.get("dec").and_then(Value::as_i64), Some(1));
+
+    // ABI не подтверждён: `dec=0` и причина.
+    let e = ev(r#"# api: unknown dll="x.dll" ver="" path="C:\x\x.dll" pid=8120 bits=32 dec=0 reason=ambiguous"#);
+    assert_eq!(e.api, "API");
+    assert_eq!(e.meta.get("api_version").and_then(Value::as_str), Some("unknown"));
+    assert_eq!(e.meta.get("dec").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("reason").and_then(Value::as_str), Some("ambiguous"));
+}
+
+#[test]
+fn grammar_hooks_and_hook_names() {
+    let e = ev(r#"# hooks mod="smj2534.dll" base=0x6d830000 load=1 exports=14 attached=14 dup=0 failed=0"#);
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "HOOKS");
+    assert_eq!(e.meta.get("mod").and_then(Value::as_str), Some("smj2534.dll"));
+    assert_eq!(e.meta.get("base").and_then(Value::as_str), Some("0x6d830000"));
+    assert_eq!(e.meta.get("load").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("exports").and_then(Value::as_i64), Some(14));
+    assert_eq!(e.meta.get("attached").and_then(Value::as_i64), Some(14));
+    assert_eq!(e.meta.get("dup").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("failed").and_then(Value::as_i64), Some(0));
+
+    let e = ev(r#"# hooks-names mod="smj2534.dll" names="PassThruOpen,PassThruClose,PassThruConnect""#);
+    assert_eq!(e.api, "HOOKS-NAMES");
+    assert_eq!(e.meta.get("mod").and_then(Value::as_str), Some("smj2534.dll"));
+    assert_eq!(
+        e.meta.get("names").and_then(Value::as_str),
+        Some("PassThruOpen,PassThruClose,PassThruConnect")
+    );
+}
+
+#[test]
+fn grammar_counters_and_session_incomplete() {
+    let e = ev("# counters dropped_events=0 truncated_payloads=0 decode_errors=0 rx_sof=0 calls=0");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "COUNTERS");
+    for (key, want) in [
+        ("dropped_events", 0),
+        ("truncated_payloads", 0),
+        ("decode_errors", 0),
+        ("rx_sof", 0),
+        ("calls", 0),
+    ] {
+        assert_eq!(e.meta.get(key).and_then(Value::as_i64), Some(want), "нет {key}");
+    }
+
+    let e = ev("# session incomplete: reason=queue_overflow dropped=12");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "SESSION-INCOMPLETE");
+    assert_eq!(e.meta.get("reason").and_then(Value::as_str), Some("queue_overflow"));
+    assert_eq!(e.meta.get("dropped").and_then(Value::as_i64), Some(12));
+}
+
+#[test]
+fn grammar_agent_and_attach_banner() {
+    let e = ev("# agent: universal_capture.js mode=full");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "AGENT");
+    assert_eq!(
+        e.meta.get("agent").and_then(Value::as_str),
+        Some("universal_capture.js")
+    );
+    assert_eq!(e.meta.get("mode").and_then(Value::as_str), Some("full"));
+
+    let e = ev("# attach: spawn");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "ATTACH");
+    assert_eq!(e.meta.get("attach").and_then(Value::as_str), Some("spawn"));
+    assert_eq!(e.text.as_deref(), Some("spawn"));
+}
+
+#[test]
+fn grammar_open_dev_and_thread() {
+    let e = ev(r#"[+1.200000s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" dev=1 rc=0 th=8120"#);
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::J2534);
+    assert_eq!(e.api, "J2534 open");
+    assert_eq!(
+        e.meta.get("device").and_then(Value::as_str),
+        Some("Scanmatik - SM2 USB")
+    );
+    assert_eq!(e.meta.get("vendor").and_then(Value::as_str), Some("Scanmatik"));
+    assert_eq!(e.meta.get("dll").and_then(Value::as_str), Some("smj2534.dll"));
+    assert_eq!(e.meta.get("dev").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.rc, Some(0));
+}
+
+#[test]
+fn grammar_connect_enter_and_connect_gen() {
+    // Вход Connect пишется до вызова (docs/11 §3).
+    let e = ev("[+31.850000s] J2534 connect-enter dev=1 proto=0x8003 flags=0x0 baud=250000 th=8120");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::J2534);
+    assert_eq!(e.api, "J2534 connect-enter");
+    assert_eq!(e.meta.get("device").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("protocol").and_then(Value::as_str), Some("0x8003"));
+    assert_eq!(e.meta.get("flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("baud").and_then(Value::as_str), Some("250000"));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+
+    // Выход Connect: + gen / th / dur (gen растёт после успешного connect).
+    let e = ev("[+31.907431s] J2534 connect dev=1 ch=1 proto=0x8003 flags=0x0 baud=250000 rc=0 gen=1 th=8120 dur=57431");
+    assert_eq!(e.api, "J2534 connect");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("device").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("gen").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(57431));
+    assert_eq!(e.rc, Some(0));
+    assert_eq!(e.meta.get("rc").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.text.as_deref(), Some("connect proto=0x8003 ch=1"));
+}
+
+#[test]
+fn grammar_call_line() {
+    let e = ev("[+32.100000s] J2534 call ch=1 call=1247 op=ReadMsgs n_in=10 n_out=3 rc=0 th=8120 dur=20134");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.transport, Transport::J2534);
+    assert_eq!(e.api, "J2534 call");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1247));
+    assert_eq!(e.meta.get("op").and_then(Value::as_str), Some("ReadMsgs"));
+    assert_eq!(e.meta.get("n_in").and_then(Value::as_i64), Some(10));
+    assert_eq!(e.meta.get("n_out").and_then(Value::as_i64), Some(3));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(20134));
+    assert_eq!(e.rc, Some(0));
+    assert!(e.text.as_deref().unwrap().contains("ReadMsgs"));
+
+    // Ошибка вызова приходит hex-кодом: `rc=0x11`.
+    let e = ev("[+33.000000s] J2534 call ch=1 call=1248 op=ReadMsgs n_in=10 n_out=0 rc=0x11 th=8120 dur=20001");
+    assert_eq!(e.meta.get("n_out").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.rc, Some(0x11));
+    assert_eq!(e.meta.get("rc").and_then(Value::as_i64), Some(0x11));
+
+    let e = ev("[+33.100000s] J2534 call ch=1 call=1249 op=WriteMsgs n_in=5 n_out=2 rc=0 th=8120 dur=812");
+    assert_eq!(e.meta.get("op").and_then(Value::as_str), Some("WriteMsgs"));
+    assert_eq!(e.meta.get("n_in").and_then(Value::as_i64), Some(5));
+    assert_eq!(e.meta.get("n_out").and_then(Value::as_i64), Some(2));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(812));
+}
+
+#[test]
+fn grammar_tx_rx_single_message_fields() {
+    let e = ev("[+32.100000s] J2534 RX ch=1 call=1247 i=1/1 n_in=10 n_out=1 th=8120 ts=0 rxs=0x0 proto=ISO15765 id=0x7E8 svc=0x50 len=8 dur=20134 rc=0 : 06 50 03 00 00 00 00 00");
+    assert_eq!(e.kind, EventKind::Rx);
+    assert_eq!(e.direction, Some(Direction::Rx));
+    assert_eq!(e.api, "J2534 RX");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1247));
+    assert_eq!(e.meta.get("i").and_then(Value::as_str), Some("1/1"));
+    assert_eq!(e.meta.get("n_in").and_then(Value::as_i64), Some(10));
+    assert_eq!(e.meta.get("n_out").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("ts").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(20134));
+    assert_eq!(e.meta.get("rxs").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("can_id").and_then(Value::as_str), Some("0x7E8"));
+    assert_eq!(e.meta.get("svc").and_then(Value::as_str), Some("0x50"));
+    assert!(e.meta.get("sof").is_none(), "обычный кадр не SOF");
+    assert_eq!(e.len, 8);
+    assert_eq!(e.payload()[0..3], [0x06, 0x50, 0x03]);
+    assert_eq!(e.text.as_deref(), Some("ISO15765 0x7E8"));
+
+    let e = ev("[+32.000000s] J2534 TX ch=1 call=1246 i=1/1 n_in=1 n_out=1 th=8120 ts=0 flags=0x0 proto=0x8003 svc=0x27 len=4 dur=812 rc=0 : 00 02 27 7f");
+    assert_eq!(e.kind, EventKind::Tx);
+    assert_eq!(e.direction, Some(Direction::Tx));
+    assert_eq!(e.api, "J2534 TX");
+    assert_eq!(e.meta.get("flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1246));
+    assert_eq!(e.meta.get("n_out").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(812));
+    assert_eq!(e.len, 4);
+    assert_eq!(e.payload(), vec![0x00, 0x02, 0x27, 0x7f]);
+
+    // `ts=` присутствует всегда, включая нулевой; лишний неизвестный ключ не мешает.
+    let e = ev("[+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 extra_key=7 len=2 : 01 3e");
+    assert_eq!(e.meta.get("ts"), None);
+    assert_eq!(e.len, 2);
+    assert_eq!(e.payload(), vec![0x01, 0x3e]);
+}
+
+#[test]
+fn grammar_sof_frame_and_multi_message_call() {
+    // Несколько сообщений: общие поля — на строке вызова, на сообщениях `call` и `i`.
+    let call = ev("[+32.100000s] J2534 call ch=1 call=1247 op=ReadMsgs n_in=10 n_out=2 rc=0 th=8120 dur=20134");
+    assert_eq!(call.api, "J2534 call");
+    assert_eq!(call.meta.get("n_out").and_then(Value::as_i64), Some(2));
+
+    // SOF-кадр: rxs=0x2 START_OF_MESSAGE, DataSize=0, без секции `: hex`.
+    let e = ev("[+32.100000s] J2534 RX ch=1 call=1247 i=1/2 ts=0 rxs=0x2 proto=0x8003 sof=1 len=0");
+    assert_eq!(e.kind, EventKind::Rx);
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1247));
+    assert_eq!(e.meta.get("i").and_then(Value::as_str), Some("1/2"));
+    assert_eq!(e.meta.get("sof").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("rxs").and_then(Value::as_str), Some("0x2"));
+    assert_eq!(e.len, 0);
+    assert!(e.payload().is_empty());
+
+    let e = ev("[+32.100010s] J2534 RX ch=1 call=1247 i=2/2 ts=0 rxs=0x0 proto=0x8003 svc=0x50 len=5 : 00 03 67 7f 34");
+    assert_eq!(e.meta.get("i").and_then(Value::as_str), Some("2/2"));
+    assert!(e.meta.get("sof").is_none());
+    assert_eq!(e.len, 5);
+    assert_eq!(e.payload(), vec![0x00, 0x03, 0x67, 0x7f, 0x34]);
+}
+
+#[test]
+fn grammar_ioctl_fast_init_and_raw_forms() {
+    // FAST_INIT: оба указателя — PASSTHRU_MSG, `in=`/`out=` — Data[DataSize].
+    let e = ev("[+31.900000s] J2534 ioctl ch=1 call=88 id=0x0005 (FAST_INIT) rc=0 th=8120 dur=1520 in_proto=0x8003 in_rxs=0x0 in_flags=0x0 in_ts=0 in_edi=0 in_size=6 in=0002277f out_proto=0x8003 out_rxs=0x0 out_flags=0x0 out_ts=0 out_edi=0 out_size=3 out=0003677f34");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "J2534 ioctl");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("ioctl_id").and_then(Value::as_str), Some("0x0005"));
+    assert_eq!(e.meta.get("ioctl_name").and_then(Value::as_str), Some("FAST_INIT"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(88));
+    assert_eq!(e.meta.get("in").and_then(Value::as_str), Some("0002277f"));
+    assert_eq!(e.meta.get("out").and_then(Value::as_str), Some("0003677f34"));
+    assert_eq!(e.meta.get("in_size").and_then(Value::as_i64), Some(6));
+    assert_eq!(e.meta.get("out_size").and_then(Value::as_i64), Some(3));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(1520));
+    assert_eq!(e.rc, Some(0));
+    assert_eq!(e.text.as_deref(), Some("ioctl 0x0005 ch=1"));
+
+    // Только выход: READ_VBATT.
+    let e = ev("[+31.910000s] J2534 ioctl ch=1 call=89 id=0x0003 (READ_VBATT) rc=0 th=8120 dur=300 out=00000c1a");
+    assert_eq!(e.meta.get("ioctl_name").and_then(Value::as_str), Some("READ_VBATT"));
+    assert_eq!(e.meta.get("out").and_then(Value::as_str), Some("00000c1a"));
+    assert!(e.meta.get("in").is_none());
+
+    // Только вход: SET_CONFIG.
+    let e = ev("[+31.920000s] J2534 ioctl ch=1 call=90 id=0x0002 (SET_CONFIG) rc=0 th=8120 dur=200 in=0c000000f4010000");
+    assert_eq!(e.meta.get("ioctl_name").and_then(Value::as_str), Some("SET_CONFIG"));
+    assert_eq!(e.meta.get("in").and_then(Value::as_str), Some("0c000000f4010000"));
+    assert!(e.meta.get("out").is_none());
+
+    // Неизвестный id: содержимое не читается, видны только указатели и dec=0.
+    let e = ev("[+31.930000s] J2534 ioctl ch=1 call=91 id=0x0123 rc=0 th=8120 dur=100 in_ptr=1 out_ptr=0 dec=0");
+    assert_eq!(e.meta.get("in_ptr").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("out_ptr").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("dec").and_then(Value::as_i64), Some(0));
+    assert!(e.meta.get("ioctl_name").is_none());
+    assert!(e.meta.get("in").is_none());
+    assert!(e.meta.get("out").is_none());
+
+    // Выход недоступен/невалиден: `out=none` + причина, а не hex.
+    let e = ev("[+31.940000s] J2534 ioctl ch=1 call=92 id=0x0005 (FAST_INIT) rc=0 th=8120 dur=120 in_ptr=1 out_ptr=1 out=none reason=len_invalid dec=1 len_invalid=1 in_size=4130");
+    assert_eq!(e.meta.get("out").and_then(Value::as_str), Some("none"));
+    assert_eq!(e.meta.get("reason").and_then(Value::as_str), Some("len_invalid"));
+    assert_eq!(e.meta.get("len_invalid").and_then(Value::as_i64), Some(1));
+    assert_eq!(e.meta.get("in_size").and_then(Value::as_i64), Some(4130));
+}
+
+#[test]
+fn grammar_filter_and_periodic() {
+    let e = ev("[+31.800000s] J2534 filter ch=1 call=90 type=0x0001 (PASS_FILTER) rc=0 th=8120 dur=410 mask=ffffffff pattern=000007e0 flow=- mask_proto=0x8003 mask_flags=0x0 pattern_proto=0x8003 pattern_flags=0x0 proto=ISO15765 flags=0x0 id=0x1");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "J2534 filter");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(90));
+    assert_eq!(e.meta.get("filter_type").and_then(Value::as_str), Some("0x0001"));
+    assert_eq!(e.meta.get("mask").and_then(Value::as_str), Some("ffffffff"));
+    assert_eq!(e.meta.get("pattern").and_then(Value::as_str), Some("000007e0"));
+    assert_eq!(e.meta.get("flow").and_then(Value::as_str), Some("-"));
+    assert_eq!(e.meta.get("mask_proto").and_then(Value::as_str), Some("0x8003"));
+    assert_eq!(e.meta.get("mask_flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("pattern_proto").and_then(Value::as_str), Some("0x8003"));
+    assert_eq!(e.meta.get("pattern_flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("proto").and_then(Value::as_str), Some("ISO15765"));
+    assert_eq!(e.meta.get("flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("filter_id").and_then(Value::as_str), Some("0x1"));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(410));
+    assert_eq!(e.rc, Some(0));
+
+    let e = ev("[+31.810000s] J2534 filter-stop ch=1 call=91 id=0x1 rc=0 th=8120 dur=90");
+    assert_eq!(e.api, "J2534 filter-stop");
+    assert_eq!(e.meta.get("filter_id").and_then(Value::as_str), Some("0x1"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(91));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(90));
+    assert_eq!(e.rc, Some(0));
+
+    let e = ev("[+31.820000s] J2534 periodic-start ch=1 call=92 id=0x1 ms=1000 proto=0x8003 flags=0x0 len=8 rc=0 th=8120 dur=140 : 00 06 3e 00 00 00 00 00");
+    assert_eq!(e.api, "J2534 periodic-start");
+    assert_eq!(e.meta.get("filter_id").and_then(Value::as_str), Some("0x1"));
+    assert_eq!(e.meta.get("interval").and_then(Value::as_i64), Some(1000));
+    assert_eq!(e.meta.get("protocol").and_then(Value::as_str), Some("0x8003"));
+    assert_eq!(e.meta.get("flags").and_then(Value::as_str), Some("0x0"));
+    assert_eq!(e.meta.get("dur").and_then(Value::as_i64), Some(140));
+    assert_eq!(e.len, 8);
+    assert_eq!(e.payload()[0..3], [0x00, 0x06, 0x3e]);
+
+    let e = ev("[+31.830000s] J2534 periodic-stop ch=1 call=93 id=0x1 rc=0 th=8120 dur=60");
+    assert_eq!(e.api, "J2534 periodic-stop");
+    assert_eq!(e.meta.get("filter_id").and_then(Value::as_str), Some("0x1"));
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(93));
+    assert_eq!(e.rc, Some(0));
+}
+
+#[test]
+fn grammar_file_read_descriptor_form() {
+    // Новый формат без пути (docs/11 §8).
+    let e = ev("[+5.000000s] FILE read h=0xe10 off=0x1F0000 len=0x1000 total=0x400000");
+    assert_eq!(e.kind, EventKind::File);
+    assert_eq!(e.transport, Transport::File);
+    assert_eq!(e.api, "FILE read");
+    assert_eq!(e.meta.get("handle").and_then(Value::as_str), Some("0xe10"));
+    assert_eq!(e.meta.get("offset").and_then(Value::as_i64), Some(0x1F0000));
+    assert_eq!(e.meta.get("len").and_then(Value::as_i64), Some(0x1000));
+    assert_eq!(e.meta.get("total").and_then(Value::as_i64), Some(0x400000));
+    assert_eq!(e.len, 0x1000);
+    assert!(e.meta.get("path").is_none(), "у строки h=… пути нет");
+    assert!(e.text.as_deref().unwrap().contains("h=0xe10"));
+
+    // Старая форма с путём обязана читаться по-прежнему.
+    let e = ev(r"[+1.000000s] FILE read C:\tmp\tune.bin offset=0 n=4096 len=4096");
+    assert_eq!(e.api, "FILE read");
+    assert_eq!(e.text.as_deref(), Some(r"C:\tmp\tune.bin"));
+    assert_eq!(e.meta.get("path").and_then(Value::as_str), Some(r"C:\tmp\tune.bin"));
+    assert_eq!(e.meta.get("n").and_then(Value::as_u64), Some(4096));
+    assert_eq!(e.meta.get("offset").and_then(Value::as_i64), Some(0));
+    assert_eq!(e.meta.get("len").and_then(Value::as_i64), Some(4096));
+    assert_eq!(e.len, 4096);
+
+    // `handle=` — старое имя того же ключа.
+    let e = ev("[+1.100000s] FILE read handle=0x1a4 off=0 len=16 total=65536");
+    assert_eq!(e.meta.get("handle").and_then(Value::as_str), Some("0x1a4"));
+    assert_eq!(e.meta.get("total").and_then(Value::as_i64), Some(65536));
+}
+
+#[test]
+fn grammar_channel_diag_and_loss_stats() {
+    // Рассинхронизация канала.
+    let e = ev("[+31.907500s] J2534 chan-miss ch=1 gen=2 first_op=filter th=8120");
+    assert_eq!(e.kind, EventKind::Error);
+    assert_eq!(e.api, "J2534 chan-miss");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("gen").and_then(Value::as_i64), Some(2));
+    assert_eq!(e.meta.get("first_op").and_then(Value::as_str), Some("filter"));
+    assert_eq!(e.meta.get("thread").and_then(Value::as_i64), Some(8120));
+
+    let e = ev("[+40.000000s] J2534 chan-possibly-open ch=1 gen=2 reason=resume");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "J2534 chan-possibly-open");
+    assert_eq!(e.meta.get("gen").and_then(Value::as_i64), Some(2));
+    assert_eq!(e.meta.get("reason").and_then(Value::as_str), Some("resume"));
+
+    // SOF в компактном режиме — только счётчик.
+    let e = ev("[+41.000000s] J2534 rx-sof-stat ch=1 n=33777");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "J2534 rx-sof-stat");
+    assert_eq!(e.meta.get("n").and_then(Value::as_i64), Some(33777));
+
+    // Агрегаты пустых опросов и ошибок записи (docs/11 §11).
+    let e = ev("[+33.000000s] J2534 rx-empty ch=1 call=1248 n=10 timeout_ms=20000 last_rc=0x11");
+    assert_eq!(e.kind, EventKind::Error);
+    assert_eq!(e.api, "J2534 rx-empty");
+    assert_eq!(e.meta.get("call").and_then(Value::as_i64), Some(1248));
+    assert_eq!(e.meta.get("n").and_then(Value::as_i64), Some(10));
+    assert_eq!(e.meta.get("timeout_ms").and_then(Value::as_i64), Some(20000));
+    assert_eq!(e.meta.get("last_rc").and_then(Value::as_i64), Some(0x11));
+    assert_eq!(e.rc, Some(0x11));
+
+    let e = ev("[+33.100000s] J2534 tx-err-stat ch=1 call=1249 n=5 timeout_ms=20000 last_rc=0x10");
+    assert_eq!(e.kind, EventKind::Error);
+    assert_eq!(e.api, "J2534 tx-err-stat");
+    assert_eq!(e.meta.get("n").and_then(Value::as_i64), Some(5));
+    assert_eq!(e.meta.get("last_rc").and_then(Value::as_i64), Some(0x10));
+}
+
+#[test]
+fn grammar_unknown_operation_and_keys_do_not_break() {
+    let e = ev("[+9.000000s] J2534 weird-op ch=1 foo=42 bar=baz");
+    assert_eq!(e.kind, EventKind::Sys);
+    assert_eq!(e.api, "J2534 weird-op");
+    assert_eq!(e.meta.get("channel").and_then(Value::as_str), Some("1"));
+    assert_eq!(e.meta.get("foo").and_then(Value::as_i64), Some(42));
+    assert_eq!(e.meta.get("bar").and_then(Value::as_str), Some("baz"));
+    assert!(e.text.as_deref().unwrap().contains("foo=42"));
+}

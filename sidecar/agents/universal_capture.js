@@ -13,7 +13,51 @@
 
 const T0 = Date.now();
 const MAXDUMP = 16384;
-function ts() { return '+' + ((Date.now() - T0) / 1000).toFixed(3) + 's'; }
+
+// ── конфигурация attach: движок кладёт `var __FTDI_CONFIG__ = {…};` ────────
+// перед исходником агента (sidecar/bridge.py), поэтому она доступна до
+// installUniversalHooks() — режим сбора нельзя менять «после старта».
+const CFG = (typeof __FTDI_CONFIG__ !== 'undefined' && __FTDI_CONFIG__) ? __FTDI_CONFIG__ : {};
+const MODE = CFG.mode === 'compact' ? 'compact' : 'full';
+const BITS = Process.arch === 'ia32' ? 32 : 64;
+let CALL_SEQ = 0;
+function threadId() { try { return Process.getCurrentThreadId(); } catch (e) { return 0; } }
+const counters = { calls: 0, rx_sof: 0, truncated_payloads: 0, decode_errors: 0, dropped_events: 0, file_reads: 0 };
+
+// ── QPC: 6 знаков после точки и длительность вызова в микросекундах ───────
+// Date.now() даёт миллисекунды — для `dur` этого мало. QueryPerformanceCounter
+// читаем через NativeFunction: два вызова на запись, сама QPC — десятки нс.
+// Если QPC недоступна, деградируем до прежних трёх знаков (старый формат).
+let qpcFreq = 0, qpcT0 = 0, qpcBuf = null, qpcCount = null;
+(function initQpc() {
+  try {
+    const pFreq = globalExport('QueryPerformanceFrequency');
+    const pCnt = globalExport('QueryPerformanceCounter');
+    if (!pFreq || !pCnt) return;
+    qpcBuf = Memory.alloc(16);
+    const freqFn = new NativeFunction(pFreq, 'int', ['pointer']);
+    const cntFn = new NativeFunction(pCnt, 'int', ['pointer']);
+    if (freqFn(qpcBuf) === 0) return;
+    qpcFreq = qpcBuf.readU64().toNumber();
+    if (!qpcFreq) return;
+    if (cntFn(qpcBuf) === 0) { qpcFreq = 0; return; }
+    qpcT0 = qpcBuf.readU64().toNumber();
+    qpcCount = cntFn;
+  } catch (e) { qpcCount = null; qpcFreq = 0; }
+})();
+
+function qpcNow() {
+  if (!qpcCount) return 0;
+  try { qpcCount(qpcBuf); return qpcBuf.readU64().toNumber(); } catch (e) { return 0; }
+}
+function qpcUs(from, to) {
+  if (!qpcFreq || !from || !to || to < from) return 0;
+  return Math.round((to - from) * 1e6 / qpcFreq);
+}
+function ts() {
+  if (qpcCount && qpcFreq) return '+' + (qpcUs(qpcT0, qpcNow()) / 1e6).toFixed(6) + 's';
+  return '+' + ((Date.now() - T0) / 1000).toFixed(3) + 's';
+}
 function log(msg) { send('[' + ts() + '] ' + msg); }
 
 function hexDump(ptr, len) {
@@ -149,6 +193,9 @@ function resumeHooks() {
   resumeUniversalHooks();
   ovlHooked = false;
   installOverlappedHooks();
+  // Каналы могли открыться, пока хуков не было: помечаем разрыв захвата, а не
+  // «канал не открывался» (docs/09 D1, приёмка pause → открытие → resume).
+  try { markChannelsPossiblyOpen('resume'); } catch (e) {}
   log('hookctl: возобновление — хуки поставлены заново');
 }
 
@@ -312,6 +359,35 @@ function installVcpHooks() {
   const pWrite = globalExport('WriteFile');
   const pClose = globalExport('CloseHandle');
 
+  // D6: чтение входного файла. Раньше был виден только open/close, поэтому
+  // «какими блоками PCMflash читает .bin» из лога не следовало. Не более
+  // FILE_READ_LIMIT строк на сессию, дальше — только агрегат в # counters.
+  const FILE_READ_LIMIT = 4096;
+  let fileSizeFn = null;
+  function fileSizeOf(handle) {
+    try {
+      if (fileSizeFn === null) {
+        const p = globalExport('GetFileSizeEx');
+        fileSizeFn = p ? new NativeFunction(p, 'int', ['pointer', 'pointer']) : false;
+      }
+      if (!fileSizeFn) return 0;
+      const buf = Memory.alloc(8);
+      if (fileSizeFn(handle, buf) === 0) return 0;
+      return buf.readU64().toNumber();
+    } catch (e) { return 0; }
+  }
+  function logFileRead(f, hkey, pN) {
+    try {
+      let n = 0;
+      try { n = pN.readU32() >>> 0; } catch (e) { n = 0; }
+      if (counters.file_reads >= FILE_READ_LIMIT) { f.readAgg = (f.readAgg || 0) + n; return; }
+      counters.file_reads += 1;
+      f.rpos = (f.rpos || 0) + n;
+      const off = Math.max(0, f.rpos - n);
+      log('FILE read h=' + hkey + ' off=0x' + off.toString(16) + ' len=' + n + ' total=' + (f.size || 0));
+    } catch (e) { hookError('file read', e); }
+  }
+
   function notePath(api, path, access, ret) {
     if (!path) return;
     if (/com\d+/i.test(path)) {
@@ -325,7 +401,7 @@ function installVcpHooks() {
       // CreateFileA внутри вызывает CreateFileW — без этой проверки каждый файл
       // попадал в лог 2–3 раза (та же ручка, тот же путь), и счётчик files врал.
       if (fileHandles[key] && fileHandles[key].path === path) return;
-      fileHandles[key] = { path: path, access: access, bytes: 0, writes: 0 };
+      fileHandles[key] = { path: path, access: access, bytes: 0, writes: 0, reads: 0, rpos: 0, size: fileSizeOf(ret) };
       log('FILE open ' + path + ' access=0x' + access.toString(16) + ' handle=' + key);
     }
   }
@@ -394,6 +470,11 @@ function installVcpHooks() {
         try { ovlRemember(args, true); } catch (e) {}
         try { this.ovlKey = this.ovl ? ovlKeyOf(this.hkey, args[4]) : null; } catch (e) { this.ovlKey = null; }
         if (comHandles[this.hkey]) { this.com = true; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; commStateOnce(this.hkey); }
+        else if (fileHandles[this.hkey]) {
+          // D6: чтение входного .bin — единственное место, где видно, какими
+          // блоками PCMflash читает прошивку. Писали только open/close.
+          this.fentR = fileHandles[this.hkey]; this.len = args[2].toInt32(); this.pr = args[3];
+        }
         else { try { if (typeof usbHandles !== 'undefined' && usbHandles[this.hkey]) { this.usbEnt = usbHandles[this.hkey]; this.buf = args[1]; this.len = args[2].toInt32(); this.pr = args[3]; } } catch (e) {} }
       },
       onLeave(ret) {
@@ -410,6 +491,7 @@ function installVcpHooks() {
         let lerrEarly = 0;
         try { lerrEarly = (this.ovl && this.com) ? ovlLastError() : 0; } catch (e) { lerrEarly = 0; }
         try { ovlOnIoLeave(this, ret); } catch (e) {}
+        if (this.fentR) { logFileRead(this.fentR, this.hkey, this.pr); return; }
         if (!this.com) return;
         let n = 0; try { n = this.pr.readU32(); } catch (e) {}
         // overlapped-I/O: при pending (n=0) буфер ещё не заполнен — short-строка без hex,
@@ -695,7 +777,7 @@ function classifyExistingHandle(hkey) {
       return 'usb';
     }
     if (typeof FILE_RE !== 'undefined' && norm && FILE_RE.test(norm)) {
-      try { fileHandles[hkey] = { path: norm, access: 0, bytes: 0, writes: 0 }; } catch (e) {}
+      try { fileHandles[hkey] = { path: norm, access: 0, bytes: 0, writes: 0, reads: 0, rpos: 0, size: 0 }; } catch (e) {}
       log('FILE open ' + norm + ' access=0x0 handle=' + hkey);
       clsCache[hkey] = 'file';
       return 'file';
@@ -1249,17 +1331,6 @@ function j2534Vendor(modName) {
   return '';
 }
 
-function readPtMsg(base, idx) {
-  const p = base.add(idx * PT_MSG_SIZE);
-  return {
-    proto: u32(p),
-    rxs: u32(p.add(4)),
-    flags: u32(p.add(8)),
-    size: u32(p.add(16)),
-    dataPtr: p.add(24)
-  };
-}
-
 // ISO15765/CAN: Data[0..3] = CAN ID (big-endian), дальше ISO-TP payload.
 // Вендорные протоколы (PCMflash/Scanmatik 0x8003 и подобные) шлют 2-байтовый
 // BE-префикс длины — его не срезаем (лог должен остаться байт-в-байт), но по нему
@@ -1287,40 +1358,313 @@ function ptServiceByte(proto, ptr, size, svcOff) {
     return ptr.add(svcOff).readU8();
   } catch (e) { return null; }
 }
-function emitPtMsg(dir, ch, m) {
-  let size = m.size >>> 0;
-  if (size > 4128) size = 4128;              // защита от мусорного DataSize
-  let off = 0;
-  let canId = -1;
-  const isCan = (m.proto === 5 || m.proto === 6);
-  if (isCan) {                               // CAN / ISO15765
-    if (size >= 4) { canId = readBe32(m.dataPtr); off = 4; }
-  }
-  const svcOff = isCan ? off : ptStripLength(m.dataPtr, size);
-  const svc = ptServiceByte(m.proto, m.dataPtr, size, svcOff);
-  const len = size - off;
-  const hex = hx(m.dataPtr.add(off), len);
-  const tail = dir === 'TX' ? (' flags=' + hexLow(m.flags)) : (' rxs=' + hexLow(m.rxs));
-  const idPart = canId >= 0 ? (' id=0x' + canId.toString(16).toUpperCase()) : '';
-  const svcPart = svc === null ? '' : (' svc=0x' + (svc < 16 ? '0' : '') + svc.toString(16));
-  log('J2534 ' + dir + ' ch=' + ch + ' proto=' + ptProtoName(m.proto) + idPart + tail + svcPart +
-    ' len=' + len + ' : ' + hex);
+// ── J2534: полнота вызова, каналы, ABI (docs/09 §3, §5; docs/11) ─────────
+// Ключ канала: pid | module_load_id | ch | gen. module_load_id — счётчик
+// загрузок ИМЕНИ модуля, а не адрес базы: база повторяется после выгрузки,
+// и без счётчика события двух сессий склеились бы (D1). gen растёт только
+// после успешного Connect.
+const chanState = {};   // "pid|load|ch" -> {ch, load, gen, open, missLogged}
+const modLoadSeq = {};  // name.lower -> сколько раз имя загружалось (монотонно, не сбрасывается)
+const modLoads = {};    // name.lower -> {base, id}: id растёт только при РЕАЛЬНОЙ перезагрузке
+
+// `module_load_id` идентифицирует загрузку модуля, а не установку хуков:
+// после pause → resume тот же модуль по тому же base остаётся той же загрузкой,
+// иначе канал выглядел бы «не открывавшимся» и появлялся ложный chan-miss.
+// При выгрузке вход из modLoads удаляется, но счётчик seq продолжает расти —
+// иначе повторная загрузка снова получила бы id=1 и склеилась с прошлой сессией.
+function loadIdFor(mod) {
+  const name = String((mod && mod.name) || '').toLowerCase();
+  const base = String((mod && mod.base) || '');
+  const cur = modLoads[name];
+  if (cur && cur.base === base) return cur.id;
+  modLoadSeq[name] = (modLoadSeq[name] || 0) + 1;
+  modLoads[name] = { base: base, id: modLoadSeq[name] };
+  return modLoadSeq[name];
 }
 
-function installJ2534Hook(name, addr, mod) {
+function chanKey(load, ch) { return Process.id + '|' + load + '|' + ch; }
+
+function chanTouch(load, ch, op) {
+  const k = chanKey(load, ch);
+  let st = chanState[k];
+  if (!st) st = chanState[k] = { ch: ch, load: load, gen: 0, open: false, missLogged: false };
+  if (!st.open && !st.missLogged) {
+    st.missLogged = true;
+    log('J2534 chan-miss ch=' + ch + ' gen=' + (st.gen + 1) + ' first_op=' + op + ' th=' + threadId());
+  }
+  return st;
+}
+
+function chanOpen(load, ch) {
+  const k = chanKey(load, ch);
+  let st = chanState[k];
+  if (!st) st = chanState[k] = { ch: ch, load: load, gen: 0, open: false, missLogged: false };
+  st.gen += 1;
+  st.open = true;
+  st.missLogged = false;
+  return st;
+}
+
+function chanClose(load, ch) {
+  const st = chanState[chanKey(load, ch)];
+  if (st) st.open = false;
+}
+
+// Пауза захвата: каналы могли открыться, пока хуков не было. Не выдаём их
+// за открытые сейчас — помечаем разрыв, а не «канал не открывался» (D1).
+function markChannelsPossiblyOpen(reason) {
+  for (const k in chanState) {
+    const st = chanState[k];
+    if (!st.open) continue;
+    log('J2534 chan-possibly-open ch=' + st.ch + ' gen=' + st.gen + ' reason=' + reason);
+  }
+}
+
+// ── подавленные таймауты (D3) ────────────────────────────────────────────
+// ERR_BUFFER_EMPTY (0x10) и ERR_TIMEOUT (0x11) — штатные ответы опроса.
+// Построчно их писать нельзя (поток забивается), но и терять нельзя: считаем
+// и печатаем агрегат раз в 5 с и на disconnect.
+const emptyStat = {};   // ch -> {n, timeout_ms, last_rc}
+const txErrStat = {};   // ch -> {n, last_rc}
+let emptyTimer = null;
+
+function emptyPoll(ch, rc, timeoutMs) {
+  const k = String(ch);
+  let st = emptyStat[k];
+  if (!st) st = emptyStat[k] = { n: 0, timeout_ms: timeoutMs, last_rc: rc };
+  st.n += 1;
+  st.timeout_ms = timeoutMs;
+  st.last_rc = rc;
+}
+
+function txErr(ch, rc) {
+  const k = String(ch);
+  let st = txErrStat[k];
+  if (!st) st = txErrStat[k] = { n: 0, last_rc: rc };
+  st.n += 1;
+  st.last_rc = rc;
+}
+
+function flushIoStats() {
+  for (const k in emptyStat) {
+    const st = emptyStat[k];
+    if (!st.n) continue;
+    log('J2534 rx-empty ch=' + k + ' n=' + st.n + ' timeout_ms=' + st.timeout_ms +
+        ' last_rc=0x' + (st.last_rc >>> 0).toString(16));
+    st.n = 0;
+  }
+  for (const k in txErrStat) {
+    const st = txErrStat[k];
+    if (!st.n) continue;
+    log('J2534 tx-err-stat ch=' + k + ' n=' + st.n + ' last_rc=0x' + (st.last_rc >>> 0).toString(16));
+    st.n = 0;
+  }
+}
+
+function startIoStatsTimer() {
+  if (emptyTimer) return;
+  try {
+    emptyTimer = setInterval(function () { try { flushIoStats(); } catch (e) {} }, 5000);
+  } catch (e) { emptyTimer = null; }
+}
+
+// ── ABI: 04.04 разбираем, 05.00 только регистрируем (docs/09 §5) ──────────
+// Карта dll→api приходит от движка (он читает реестр PassThruSupport.04.04
+// и .05.00). Если DLL в обеих ветках и версия не прочитана — dec=0.
+const ABI_HINTS = (CFG.j2534_api && typeof CFG.j2534_api === 'object') ? CFG.j2534_api : {};
+const ABI_KNOWN = Object.keys(ABI_HINTS).length > 0;
+const modAbi = {};      // load -> {api, dec, ver, reason, dll, logged}
+
+function abiFor(load, dll) {
+  if (modAbi[load]) return modAbi[load];
+  const hint = ABI_HINTS[String(dll || '').toLowerCase()];
+  let api = '04.04', dec = 1, reason = '';
+  if (hint === '05.00') { api = '05.00'; dec = 0; }
+  else if (hint === 'ambiguous') { api = 'unknown'; dec = 0; reason = 'ambiguous'; }
+  else if (hint === undefined && ABI_KNOWN) { api = 'unknown'; dec = 0; reason = 'unregistered'; }
+  // Карты нет (реестр недоступен) — сохраняем прежнее поведение: 04.04.
+  const st = modAbi[load] = { api: api, dec: dec, ver: '', reason: reason, dll: dll || '', logged: false };
+  return st;
+}
+
+function emitApiLine(st, mod) {
+  try {
+    log('# api: ' + st.api + ' dll="' + ((mod && mod.name) || st.dll) + '" ver="' + (st.ver || '') +
+        '" path="' + String((mod && mod.path) || '') + '" pid=' + Process.id + ' bits=' + BITS +
+        ' dec=' + st.dec + (st.reason ? ' reason=' + st.reason : ''));
+  } catch (e) { hookError('api line', e); }
+}
+
+// ── PASSTHRU_MSG 04.04: разбор и форматирование ──────────────────────────
+const PT_DATA_MAX = 4128;      // Data[4128] в PASSTHRU_MSG; 05.00 — другая модель
+
+const PT_IOCTL_NAMES = {
+  0x01: 'GET_CONFIG', 0x02: 'SET_CONFIG', 0x03: 'READ_VBATT', 0x05: 'FAST_INIT',
+  0x07: 'CLEAR_TX_BUFFER', 0x08: 'CLEAR_RX_BUFFER', 0x09: 'CLEAR_RX_MSGS',
+  0x0A: 'CLEAR_MSG_FILTERS', 0x0B: 'CLEAR_PERIODIC_MSGS', 0x0C: 'CLEAR_EXTRA_MSGS',
+  0x0D: 'CLEAR_ISO15765_FLOW_CONTROL', 0x0E: 'CLEAR_ISO15765_BUFFERS'
+};
+const PT_FILTER_NAMES = { 0x01: 'PASS_FILTER', 0x02: 'BLOCK_FILTER', 0x03: 'FLOW_CONTROL_FILTER' };
+
+// Слитный hex (без пробелов) — для in=/out=/mask=/pattern=.
+function hxc(ptr, len) {
+  try {
+    if (!ptr || len <= 0) return '-';
+    const n = Math.min(len, MAXDUMP);
+    const b = new Uint8Array(ptr.readByteArray(n));
+    let s = '';
+    for (let i = 0; i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+    return s || '-';
+  } catch (e) { return '-'; }
+}
+
+// Снимок сообщения в обычный объект: читаем ДО возврата из вызова, чтобы
+// буфер, который драйвер меняет на месте, не исказил запись.
+function ptRecord(base, idx) {
+  const p = base.add(idx * PT_MSG_SIZE);
+  const proto = u32(p);
+  const rxs = u32(p.add(4));
+  const flags = u32(p.add(8));
+  const tsv = u32(p.add(12));
+  const size = u32(p.add(16)) >>> 0;
+  const dataPtr = p.add(24);
+  let len = 0, canId = -1, svc = null, hex = '';
+  if (size <= PT_DATA_MAX) {
+    const isCan = (proto === 5 || proto === 6);
+    let off = 0;
+    if (isCan && size >= 4) { canId = readBe32(dataPtr); off = 4; }
+    len = size - off;
+    if (size > 0) {
+      const svcOff = isCan ? off : ptStripLength(dataPtr, size);
+      svc = ptServiceByte(proto, dataPtr, size, svcOff);
+    }
+    // Горячий путь (§8): hexDump только для непустых буферов.
+    if (len > 0) hex = hx(dataPtr.add(off), len);
+  }
+  return { proto: proto, rxs: rxs, flags: flags, ts: tsv, size: size,
+           len: len, canId: canId, svc: svc, hex: hex };
+}
+
+// c.common=1 — все общие поля на строке сообщения (одиночный вызов);
+// иначе на строке только call и i, а общие поля — в строке J2534 call.
+function ptLine(dir, ch, r, c) {
+  const sof = dir === 'RX' && (r.rxs & 0x02) !== 0 ? 1 : 0;
+  let s = 'J2534 ' + dir + ' ch=' + ch + ' call=' + c.call + ' i=' + c.i + '/' + c.n;
+  if (c.common) s += ' n_in=' + c.nIn + ' n_out=' + c.nOut + ' th=' + c.th;
+  s += ' ts=' + r.ts;
+  s += dir === 'TX' ? ' flags=' + hexLow(r.flags) : ' rxs=' + hexLow(r.rxs);
+  if (sof) s += ' sof=1';
+  s += ' proto=' + ptProtoName(r.proto);
+  if (r.canId >= 0) s += ' id=0x' + r.canId.toString(16).toUpperCase();
+  if (r.svc !== null) s += ' svc=' + hex2(r.svc);
+  s += ' len=' + r.len;
+  if (c.common) s += ' dur=' + c.dur + ' rc=' + c.rc;
+  if (sof) return s;                       // SOF: короткая строка без hex (D2)
+  if (r.len > 0) s += ' : ' + r.hex;
+  return s;
+}
+
+function filtMsg(p) {
+  if (!p || p.isNull()) return null;
+  try {
+    const size = u32(p.add(16)) >>> 0;
+    return {
+      proto: u32(p),
+      flags: u32(p.add(8)),
+      size: size,
+      hex: (size > 0 && size <= PT_DATA_MAX) ? hxc(p.add(24), size) : '-'
+    };
+  } catch (e) { return null; }
+}
+
+// PASSTHRU_MSG как аргумент ioctl: in=/out= (docs/09 D4: FAST_INIT — не 4 байта).
+function ptMsgArg(prefix, p, st) {
+  if (!p || p.isNull()) return prefix + '_ptr=0';
+  if (st && st.dec === 0) return prefix + '_ptr=1 ' + prefix + '=none reason=abi';
+  const size = u32(p.add(16)) >>> 0;
+  if (size > PT_DATA_MAX) {
+    return prefix + '_size=' + size + ' len_invalid=1 ' + prefix + '=none reason=len_invalid';
+  }
+  const data = p.add(24);
+  return prefix + '_proto=' + hex4(u32(p)) +
+    ' ' + prefix + '_rxs=' + hexLow(u32(p.add(4))) +
+    ' ' + prefix + '_flags=' + hexLow(u32(p.add(8))) +
+    ' ' + prefix + '_ts=' + (u32(p.add(12)) >>> 0) +
+    ' ' + prefix + '_edi=' + (u32(p.add(20)) >>> 0) +
+    ' ' + prefix + '_size=' + size +
+    ' ' + prefix + '=' + hxc(data, size);
+}
+
+// SCONFIG_LIST { ulNumOfParams; SCONFIG* ConfigPtr } → слитный hex.
+function sconfigHex(p, st) {
+  if (!p || p.isNull()) return '';
+  if (st && st.dec === 0) return '';
+  try {
+    const n = p.readU32();
+    if (!n || n > 64) return '';
+    const off = Process.pointerSize === 8 ? 8 : 4;
+    const hdr = new Uint8Array(p.readByteArray(off));
+    let s = '';
+    for (let i = 0; i < hdr.length; i++) s += (hdr[i] < 16 ? '0' : '') + hdr[i].toString(16);
+    const arr = p.add(off).readPointer();
+    if (!arr.isNull()) {
+      const cnt = Math.min(n, 16);
+      const bytes = new Uint8Array(arr.readByteArray(cnt * 8));
+      for (let i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+    }
+    return s;
+  } catch (e) { return ''; }
+}
+
+function ioctlInput(id, p, st) {
+  if (id >= 0x07 && id <= 0x0E) return 'in_ptr=0';      // CLEAR_*: буферов нет
+  if (!p || p.isNull()) return 'in_ptr=0';
+  if (id === 0x05) return ptMsgArg('in', p, st);
+  if (id === 0x01 || id === 0x02) {
+    const h = sconfigHex(p, st);
+    return h ? ('in=' + h) : ('in_ptr=1' + (st && st.dec === 0 ? ' dec=0' : ''));
+  }
+  return 'in_ptr=1 dec=0';                               // неизвестный id: не читаем
+}
+
+function ioctlOutput(id, p, st) {
+  if (!p || p.isNull()) return 'out_ptr=0';
+  if (id === 0x03) {                                     // READ_VBATT: unsigned long
+    return (st && st.dec === 0) ? 'out_ptr=1 out=none reason=abi' : ('out=' + hxc(p, 4));
+  }
+  if (id === 0x05) return ptMsgArg('out', p, st);
+  if (id === 0x01) {
+    const h = sconfigHex(p, st);
+    return h ? ('out=' + h) : 'out_ptr=1';
+  }
+  return 'out_ptr=1';
+}
+
+// ── обработчики PassThru* ────────────────────────────────────────────────
+function installJ2534Hook(name, addr, mod, load) {
   const dll = mod.name || '';
   const vendor = j2534Vendor(dll);
+  const abi = abiFor(load, dll);
+
   if (name === 'PassThruOpen') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         this.pDev = args[1];
         this.name = args[0].isNull() ? '' : str8(args[0]);
+        this.th = threadId();
       }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 open name="' + quote(this.name) + '" vendor="' + vendor + '" dll="' + dll + '" rc=' + ret.toInt32());
+        const rc = ret.toInt32();
+        // DeviceID валиден только при успехе; при ошибке пишем dev=-1.
+        const dev = rc === 0 ? (u32(this.pDev) >>> 0) : -1;
+        log('J2534 open name="' + quote(this.name) + '" vendor="' + vendor + '" dll="' + dll +
+            '" dev=' + dev + ' rc=' + rc + ' th=' + this.th);
       })
     });
-  } else if (name === 'PassThruConnect') {
+    return;
+  }
+
+  if (name === 'PassThruConnect') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         this.dev = args[0].toInt32();
@@ -1328,97 +1672,317 @@ function installJ2534Hook(name, addr, mod) {
         this.flags = args[2].toInt32();
         this.baud = args[3].toInt32();
         this.pCh = args[4];
+        this.th = threadId();
+        this.t0 = qpcNow();
+        // Вход пишется ДО вызова: connect-enter без строки результата доказывает
+        // только то, что выход в лог не попал (docs/09 D1), и это разные вещи.
+        log('J2534 connect-enter dev=' + this.dev + ' proto=' + ptProtoName(this.proto) +
+            ' flags=' + hexLow(this.flags) + ' baud=' + this.baud + ' th=' + this.th);
       }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 connect dev=' + this.dev + ' ch=' + u32(this.pCh) + ' proto=' + ptProtoName(this.proto) +
-            ' flags=' + hexLow(this.flags) + ' baud=' + this.baud + ' rc=' + ret.toInt32());
+        const rc = ret.toInt32();
+        const ch = u32(this.pCh) >>> 0;
+        const dur = qpcUs(this.t0, qpcNow());
+        let gen = 0;
+        if (rc === 0) gen = chanOpen(load, ch).gen;
+        log('J2534 connect dev=' + this.dev + ' ch=' + ch + ' proto=' + ptProtoName(this.proto) +
+            ' flags=' + hexLow(this.flags) + ' baud=' + this.baud + ' rc=' + rc +
+            ' gen=' + gen + ' th=' + this.th + ' dur=' + dur);
       })
     });
-  } else if (name === 'PassThruDisconnect') {
+    return;
+  }
+
+  if (name === 'PassThruDisconnect') {
     attachHook(addr, {
-      onEnter: enterSafe(function (args) { this.ch = args[0].toInt32(); }),
-      onLeave: leaveSafe(function (ret) { log('J2534 disconnect ch=' + this.ch + ' rc=' + ret.toInt32()); })
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.th = threadId();
+        this.t0 = qpcNow();
+      }),
+      onLeave: leaveSafe(function (ret) {
+        chanClose(load, this.ch);
+        flushIoStats();          // D3: агрегат опросов при disconnect
+        log('J2534 disconnect ch=' + this.ch + ' rc=' + ret.toInt32() +
+            ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+      })
     });
-  } else if (name === 'PassThruReadMsgs') {
+    return;
+  }
+
+  if (name === 'PassThruReadMsgs') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         this.ch = args[0].toInt32();
         this.pMsg = args[1];
         this.pNum = args[2];
-        this.want = u32(args[2]);
+        this.nIn = u32(args[2]) >>> 0;
+        try { this.timeoutMs = args[3].toInt32(); } catch (e) { this.timeoutMs = 0; }
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'ReadMsgs');
       }),
       onLeave: leaveSafe(function (ret) {
         const rc = ret.toInt32();
-        const n = u32(this.pNum);
-        if (rc !== 0) {
-          // 0x10 ERR_BUFFER_EMPTY и 0x11 ERR_TIMEOUT — штатные ответы опроса,
-          // их не пишем (иначе поток забивается пустыми строками).
-          if (rc !== 0x10 && rc !== 0x11) {
-            log('J2534 rx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=ReadMsgs');
+        const dur = qpcUs(this.t0, qpcNow());
+        const nOut = u32(this.pNum) >>> 0;
+        counters.calls += 1;
+
+        if (rc === 0x10 || rc === 0x11) {          // ERR_BUFFER_EMPTY / ERR_TIMEOUT
+          emptyPoll(this.ch, rc, this.timeoutMs);
+          if (MODE === 'full') {
+            log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+                ' n_out=' + nOut + ' rc=0x' + (rc >>> 0).toString(16) + ' th=' + this.th + ' dur=' + dur);
           }
           return;
         }
-        if (n > 0) {
-          const cap = Math.min(n, 64);
-          for (let i = 0; i < cap; i++) emitPtMsg('RX', this.ch, readPtMsg(this.pMsg, i));
-          if (n > cap) {
-            log('J2534 rx-truncated ch=' + this.ch + ' returned=' + n + ' logged=' + cap);
-          }
+        if (rc !== 0) {
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' rc=0x' + (rc >>> 0).toString(16) + ' th=' + this.th + ' dur=' + dur);
+          log('J2534 rx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=ReadMsgs');
+          return;
+        }
+        if (nOut === 0) {
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+              ' n_out=0 rc=0 th=' + this.th + ' dur=' + dur);
+          return;
+        }
+        if (abi.dec === 0) {
+          // ABI не подтверждён (05.00 или ambiguous): раскладку PASSTHRU_MSG не
+          // угадываем — фиксируем факт вызова и счётчики, структуру не читаем.
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' rc=0 th=' + this.th + ' dur=' + dur + ' dec=0');
+          return;
+        }
+
+        const cap = Math.min(nOut, 256);
+        const recs = [];
+        for (let i = 0; i < cap; i++) recs.push(ptRecord(this.pMsg, i));
+        if (nOut > cap) {
+          counters.truncated_payloads += 1;
+          log('J2534 rx-truncated ch=' + this.ch + ' returned=' + nOut + ' logged=' + cap);
+        }
+        const single = (nOut === 1 && cap === 1);
+        if (!single) {
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=ReadMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' rc=0 th=' + this.th + ' dur=' + dur);
+        }
+        for (let i = 0; i < recs.length; i++) {
+          const r = recs[i];
+          const isSof = (r.rxs & 0x02) !== 0;
+          if (isSof) counters.rx_sof += 1;
+          // Компактный режим: SOF построчно не пишется, только счётчик (§4).
+          if (MODE === 'compact' && isSof) continue;
+          log(ptLine('RX', this.ch, r, {
+            call: this.call, i: i + 1, n: recs.length, common: single,
+            nIn: this.nIn, nOut: nOut, th: this.th, dur: dur, rc: rc
+          }));
         }
       })
     });
-  } else if (name === 'PassThruWriteMsgs') {
+    return;
+  }
+
+  if (name === 'PassThruWriteMsgs') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
-        const ch = args[0].toInt32();
-        this.ch = ch;
-        const n = u32(args[2]);           // pNumMsgs — указатель на число сообщений
-        const pMsg = args[1];
-        if (pMsg.isNull()) return;
-        const cap = Math.min(n, 16);
-        for (let i = 0; i < cap; i++) emitPtMsg('TX', ch, readPtMsg(pMsg, i));
-        if (n > cap) log('J2534 tx-truncated ch=' + ch + ' queued=' + n + ' logged=' + cap);
+        this.ch = args[0].toInt32();
+        this.pMsg = args[1];
+        this.pNum = args[2];
+        this.nIn = u32(args[2]) >>> 0;
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'WriteMsgs');
+        // Снимок ДО вызова: драйвер правит массив и *pNumMsgs на месте.
+        this.recs = [];
+        this.cap = 0;
+        if (!this.pMsg.isNull() && abi.dec !== 0) {
+          this.cap = Math.min(this.nIn, 256);
+          for (let i = 0; i < this.cap; i++) this.recs.push(ptRecord(this.pMsg, i));
+        }
       }),
       onLeave: leaveSafe(function (ret) {
         const rc = ret.toInt32();
+        const dur = qpcUs(this.t0, qpcNow());
+        const nOut = u32(this.pNum) >>> 0;   // сколько драйвер реально принял
+        counters.calls += 1;
+        if (this.nIn > this.cap && this.cap > 0) {
+          counters.truncated_payloads += 1;
+          log('J2534 tx-truncated ch=' + this.ch + ' queued=' + this.nIn + ' logged=' + this.cap);
+        }
         if (rc !== 0) {
+          txErr(this.ch, rc);
           log('J2534 tx-error ch=' + this.ch + ' rc=0x' + (rc >>> 0).toString(16) + ' op=WriteMsgs');
+        }
+        if (!this.recs.length) {
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=WriteMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur +
+              (abi.dec === 0 ? ' dec=0' : ''));
+          return;
+        }
+        const single = (this.recs.length === 1 && this.nIn === 1);
+        if (!single) {
+          log('J2534 call ch=' + this.ch + ' call=' + this.call + ' op=WriteMsgs n_in=' + this.nIn +
+              ' n_out=' + nOut + ' rc=' + rc + ' th=' + this.th + ' dur=' + dur);
+        }
+        // Полнота TX: сохраняются ВСЕ n_in входных сообщений, n_out — ответ драйвера.
+        for (let i = 0; i < this.recs.length; i++) {
+          log(ptLine('TX', this.ch, this.recs[i], {
+            call: this.call, i: i + 1, n: this.recs.length, common: single,
+            nIn: this.nIn, nOut: nOut, th: this.th, dur: dur, rc: rc
+          }));
         }
       })
     });
-  } else if (name === 'PassThruStartMsgFilter') {
+    return;
+  }
+
+  if (name === 'PassThruStartMsgFilter') {
     attachHook(addr, {
-      onEnter: enterSafe(function (args) { this.ch = args[0].toInt32(); this.type = args[1].toInt32(); }),
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.type = args[1].toInt32();
+        this.pMask = args[2];
+        this.pPattern = args[3];
+        this.pFlow = args[4];
+        this.pId = args[5];
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'filter');
+        this.mask = abi.dec ? filtMsg(this.pMask) : null;
+        this.pat = abi.dec ? filtMsg(this.pPattern) : null;
+        this.flow = (this.pFlow && !this.pFlow.isNull() && abi.dec) ? filtMsg(this.pFlow) : null;
+      }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 filter ch=' + this.ch + ' type=' + hex4(this.type) + ' rc=' + ret.toInt32());
+        let s = 'J2534 filter ch=' + this.ch + ' call=' + this.call + ' type=' + hex4(this.type);
+        const nm = PT_FILTER_NAMES[this.type];
+        if (nm) s += ' (' + nm + ')';
+        s += ' mask=' + (this.mask ? this.mask.hex : '-');
+        s += ' pattern=' + (this.pat ? this.pat.hex : '-');
+        s += ' flow=' + (this.flow ? this.flow.hex : '-');
+        if (this.mask) s += ' mask_proto=' + hex4(this.mask.proto) + ' mask_flags=' + hexLow(this.mask.flags);
+        if (this.pat) s += ' pattern_proto=' + hex4(this.pat.proto) + ' pattern_flags=' + hexLow(this.pat.flags);
+        if (this.pat) s += ' proto=' + ptProtoName(this.pat.proto) + ' flags=' + hexLow(this.pat.flags);
+        if (abi.dec === 0) s += ' dec=0';
+        s += ' id=' + hexLow(u32(this.pId)) +
+             ' rc=' + ret.toInt32() + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow());
+        log(s);
       })
     });
-  } else if (name === 'PassThruIoctl') {
+    return;
+  }
+
+  if (name === 'PassThruStopMsgFilter') {
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.pId = args[1];
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'filter-stop');
+      }),
+      onLeave: leaveSafe(function (ret) {
+        log('J2534 filter-stop ch=' + this.ch + ' call=' + this.call + ' id=' + hexLow(u32(this.pId)) +
+            ' rc=' + ret.toInt32() + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+      })
+    });
+    return;
+  }
+
+  if (name === 'PassThruStartPeriodicMsg') {
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.pMsg = args[1];
+        this.pId = args[2];
+        try { this.ms = args[3].toInt32(); } catch (e) { this.ms = 0; }
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'periodic');
+        this.rec = (this.pMsg && !this.pMsg.isNull() && abi.dec) ? ptRecord(this.pMsg, 0) : null;
+      }),
+      onLeave: leaveSafe(function (ret) {
+        let s = 'J2534 periodic-start ch=' + this.ch + ' call=' + this.call +
+                ' id=' + hexLow(u32(this.pId)) + ' ms=' + this.ms;
+        if (this.rec) {
+          s += ' proto=' + ptProtoName(this.rec.proto) + ' flags=' + hexLow(this.rec.flags) +
+               ' len=' + this.rec.len;
+        }
+        s += ' rc=' + ret.toInt32() + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow());
+        if (this.rec && this.rec.len > 0) s += ' : ' + this.rec.hex;
+        log(s);
+      })
+    });
+    return;
+  }
+
+  if (name === 'PassThruStopPeriodicMsg') {
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.ch = args[0].toInt32();
+        this.pId = args[1];
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'periodic-stop');
+      }),
+      onLeave: leaveSafe(function (ret) {
+        log('J2534 periodic-stop ch=' + this.ch + ' call=' + this.call + ' id=' + hexLow(u32(this.pId)) +
+            ' rc=' + ret.toInt32() + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+      })
+    });
+    return;
+  }
+
+  if (name === 'PassThruIoctl') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         this.ch = args[0].toInt32();
         this.id = args[1].toInt32();
-        this.input = args[2];
+        this.pIn = args[2];
+        this.pOut = args[3];
+        this.call = ++CALL_SEQ;
+        this.th = threadId();
+        this.t0 = qpcNow();
+        chanTouch(load, this.ch, 'ioctl');
+        // Вход копируется ДО вызова: ioctl может менять буфер на месте.
+        this.inStr = ioctlInput(this.id, this.pIn, abi);
+        this.cfg = (this.id === 0x02 && this.pIn && !this.pIn.isNull()) ? ptConfigList(this.pIn) : null;
       }),
       onLeave: leaveSafe(function (ret) {
         const rc = ret.toInt32();
-        log('J2534 ioctl ch=' + this.ch + ' id=' + hex4(this.id) + ' rc=' + rc);
-        // SET_CONFIG (0x02): список параметров, включая DATA_RATE (битрейт CAN/ISO).
-        if (this.id === 2 && this.input && !this.input.isNull()) {
-          const cfg = ptConfigList(this.input);
-          if (cfg) log('J2534 config ch=' + this.ch + ' ' + cfg + ' rc=' + rc);
-        }
+        const dur = qpcUs(this.t0, qpcNow());
+        let s = 'J2534 ioctl ch=' + this.ch + ' call=' + this.call + ' id=' + hex4(this.id);
+        const nm = PT_IOCTL_NAMES[this.id];
+        if (nm) s += ' (' + nm + ')';
+        s += ' rc=' + rc + ' th=' + this.th + ' dur=' + dur + ' ' + this.inStr +
+             ' ' + ioctlOutput(this.id, this.pOut, abi);
+        log(s);
+        // SET_CONFIG: параметры списком (DATA_RATE, тайминги W1..W5, BS/STMIN).
+        if (this.cfg) log('J2534 config ch=' + this.ch + ' ' + this.cfg + ' rc=' + rc);
       })
     });
-  } else if (name === 'PassThruClose') {
+    return;
+  }
+
+  if (name === 'PassThruClose') {
     attachHook(addr, {
-      onEnter: enterSafe(function (args) { this.dev = args[0].toInt32(); }),
+      onEnter: enterSafe(function (args) {
+        this.dev = args[0].toInt32();
+        this.th = threadId();
+        this.t0 = qpcNow();
+      }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 close dev=' + this.dev + ' rc=' + ret.toInt32());
-        // Сразу после close приложение обычно выгружает драйвер: PCMflash так и
-        // делает (PassThruClose -> FreeLibrary -> LoadLibrary для следующего
-        // действия). Если Frida не пришлёт onRemoved, проверим сами — модуль уже
-        // пропал из адресного пространства, значит хуки с него снимаем.
+        log('J2534 close dev=' + this.dev + ' rc=' + ret.toInt32() +
+            ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+        // PassThruClose закрывает ЭКЗЕМПЛЯР устройства, DLL остаётся загруженной:
+        // хуки НЕ снимаем, иначе после Close → Open теряется вся следующая сессия.
+        // Проверяем только реальную выгрузку модуля.
         const modName = mod.name;
         try {
           setTimeout(function () {
@@ -1430,63 +1994,107 @@ function installJ2534Hook(name, addr, mod) {
         } catch (e) {}
       })
     });
-  } else if (name === 'PassThruGetLastError') {
+    return;
+  }
+
+  if (name === 'PassThruGetLastError') {
     attachHook(addr, {
-      onEnter: enterSafe(function (args) { this.pText = args[0]; }),
+      onEnter: enterSafe(function (args) {
+        this.pText = args[0];
+        this.th = threadId();
+        this.t0 = qpcNow();
+      }),
       onLeave: leaveSafe(function (ret) {
-        log('J2534 error text="' + quote(str8(this.pText)) + '" rc=' + ret.toInt32());
+        log('J2534 error text="' + quote(str8(this.pText)) + '" rc=' + ret.toInt32() +
+            ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
       })
     });
-  } else if (name === 'PassThruSetProgrammingVoltage') {
+    return;
+  }
+
+  if (name === 'PassThruSetProgrammingVoltage') {
     // PassThruSetProgrammingVoltage(DeviceID, Pin, Voltage)
     // Voltage — это не только милливольты: 0xFFFFFFFF = OFF,
     // 0xFFFFFFFE = SHORT_TO_GROUND, 0xFFFFFFFD = SHORT_TO_VBAT.
-    // Значение печатаем как unsigned, иначе -1 вместо OFF.
     attachHook(addr, {
       onEnter: enterSafe(function (args) {
         this.dev = args[0].toInt32();
         this.pin = args[1].toInt32();
         this.mv = args[2];
+        this.th = threadId();
+        this.t0 = qpcNow();
       }),
       onLeave: leaveSafe(function (ret) {
         const raw = this.mv.toUInt32();
         const val = raw === 0xFFFFFFFF ? 'OFF'
           : raw === 0xFFFFFFFE ? 'SHORT_TO_GROUND'
             : raw === 0xFFFFFFFD ? 'SHORT_TO_VBAT' : raw + ' mV';
-        log('J2534 voltage dev=' + this.dev + ' pin=' + this.pin + ' ' + val + ' rc=' + ret.toInt32());
+        log('J2534 voltage dev=' + this.dev + ' pin=' + this.pin + ' ' + val +
+            ' rc=' + ret.toInt32() + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
       })
     });
-  } else if (name === 'PassThruReadVersion') {
-    attachHook(addr, {
-      onEnter: enterSafe(function (args) {
-        this.pFw = args[1]; this.pDll = args[2]; this.pApi = args[3];
-      }),
-      onLeave: leaveSafe(function (ret) {
-        log('J2534 version fw="' + quote(str8(this.pFw)) + '" dll="' + quote(str8(this.pDll)) +
-          '" api="' + quote(str8(this.pApi)) + '" rc=' + ret.toInt32());
-      })
-    });
-  } else {
-    // Неизвестный PassThru*-экспорт (PassThruStopMsgFilter, PassThruSetConfig,
-    // PassThruLogicalConnect, PassThruQueuedWriteMsgs, вендорные расширения):
-    // ставим generic-трассу. Без этого часть API-вызовов молча выпадала из лога —
-    // именно так пропадал PassThruConnect у Scanmatik (в логе PCMflash не было
-    // ни одной строки `J2534 connect`, хотя канал 1 работал).
-    attachHook(addr, {
-      onEnter: enterSafe(function (args) {
-        const parts = [];
-        for (let i = 0; i < 6; i++) {
-          let v = '?';
-          try { v = '0x' + args[i].toUInt32().toString(16); } catch (e) { v = '?'; }
-          parts.push(v);
-        }
-        this.argdump = parts.join(',');
-      }),
-      onLeave: leaveSafe(function (ret) {
-        log('J2534 ' + name + ' args=[' + this.argdump + '] rc=' + ret.toInt32());
-      })
-    });
+    return;
   }
+
+  if (name === 'PassThruReadVersion') {
+    attachHook(addr, {
+      onEnter: enterSafe(function (args) {
+        this.pFw = args[1];
+        this.pDll = args[2];
+        this.pApi = args[3];
+        this.th = threadId();
+        this.t0 = qpcNow();
+      }),
+      onLeave: leaveSafe(function (ret) {
+        const rc = ret.toInt32();
+        const apiStr = str8(this.pApi);
+        const dllStr = str8(this.pDll);
+        log('J2534 version fw="' + quote(str8(this.pFw)) + '" dll="' + quote(dllStr) +
+            '" api="' + quote(apiStr) + '" rc=' + rc +
+            ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+        // Версия API — подтверждение ABI. От неё зависит, можно ли вообще
+        // разбирать PASSTHRU_MSG: для 05.00 раскладка другая (dec=0).
+        let api = '';
+        if (/^0?5\./.test(apiStr)) api = '05.00';
+        else if (/^0?4\./.test(apiStr)) api = '04.04';
+        if (api) {
+          const changed = (abi.api !== api) || (abi.ver !== dllStr);
+          abi.api = api;
+          abi.dec = api === '05.00' ? 0 : 1;
+          abi.reason = '';
+          abi.ver = dllStr;
+          if (changed || !abi.logged) { abi.logged = true; emitApiLine(abi, mod); }
+        } else if (!abi.logged) {
+          abi.logged = true;
+          abi.ver = dllStr;
+          emitApiLine(abi, mod);
+        }
+      })
+    });
+    return;
+  }
+
+  // Неизвестный PassThru*-экспорт (PassThruSetConfig, PassThruLogicalConnect,
+  // PassThruQueuedWriteMsgs, вендорные расширения): generic-трасса, чтобы
+  // вызов не выпадал из лога — именно так пропадал PassThruConnect.
+  attachHook(addr, {
+    onEnter: enterSafe(function (args) {
+      const parts = [];
+      for (let i = 0; i < 6; i++) {
+        let v = '?';
+        try { v = '0x' + args[i].toUInt32().toString(16); } catch (e) { v = '?'; }
+        parts.push(v);
+      }
+      this.argdump = parts.join(',');
+      this.call = ++CALL_SEQ;
+      this.th = threadId();
+      this.t0 = qpcNow();
+    }),
+    onLeave: leaveSafe(function (ret) {
+      log('J2534 ' + name + ' args=[' + this.argdump + '] rc=' + ret.toInt32() +
+          ' call=' + this.call + ' th=' + this.th + ' dur=' + qpcUs(this.t0, qpcNow()));
+    })
+  });
 }
 
 function hookJ2534Module(mod) {
@@ -1494,7 +2102,9 @@ function hookJ2534Module(mod) {
   const key = modKey(mod);
   if (j2534Hooked[key]) return;
   setOwner(key);
-  let installed = 0;
+  const load = loadIdFor(mod);
+  let total = 0, attached = 0, dup = 0, failed = 0;
+  const names = [];
   // Хукаем КАЖДЫЙ экспорт `PassThru*`, а не фиксированный список: набор функций
   // у вендоров разный (Scanmatik/CHIPSOFT/Tactrix/VXDIAG/MDI), и пропущенная
   // функция = дырка в логе.
@@ -1504,13 +2114,33 @@ function hookJ2534Module(mod) {
     const ex = exports[i];
     if (!ex || ex.type !== 'function' || !/^PassThru/i.test(ex.name)) continue;
     if (!ex.address) continue;
-    try { installJ2534Hook(ex.name, ex.address, mod); installed++; } catch (e) { hookError('j2534 ' + ex.name, e); }
+    total += 1;
+    names.push(ex.name);
+    const before = listeners.length;
+    try {
+      installJ2534Hook(ex.name, ex.address, mod, load);
+    } catch (e) {
+      hookError('j2534 ' + ex.name, e);
+      failed += 1;
+      continue;
+    }
+    // attached растёт ТОЛЬКО при реально установленном хуке (D1): attachHook
+    // возвращает null на уже занятый адрес, поэтому считаем по listeners.
+    if (listeners.length > before) attached += 1; else dup += 1;
   }
   j2534Hooked[key] = true;
-  if (installed > 0) {
+  if (attached > 0) {
     j2534ModulesHooked++;
-    log('J2534 module: ' + mod.name + ' ' + (mod.path || '') + ' base=' + mod.base + ' exports=' + installed);
+    log('J2534 module: ' + mod.name + ' ' + (mod.path || '') + ' base=' + mod.base + ' exports=' + attached);
+    startIoStatsTimer();
   }
+  // Диагностика установки: одна строка на модуль + список имён.
+  log('# hooks mod="' + mod.name + '" base=' + mod.base + ' load=' + load +
+      ' exports=' + total + ' attached=' + attached + ' dup=' + dup + ' failed=' + failed);
+  if (names.length) log('# hooks-names mod="' + mod.name + '" names="' + names.join(',') + '"');
+  const st = abiFor(load, mod.name);
+  st.logged = true;
+  emitApiLine(st, mod);
 }
 
 // ── LAN: Winsock (ws2_32) ──────────────────────────────────────────────────
@@ -2147,6 +2777,8 @@ function invalidateModule(name) {
   const lower = String(name || '').toLowerCase();
   if (!lower) return 0;
   let flags = 0;
+  // Реальная выгрузка: следующая загрузка этого имени — новая (новый load id).
+  try { delete modLoads[lower]; } catch (e) {}
   const keys = Object.keys(j2534Hooked);
   for (let i = 0; i < keys.length; i++) {
     if (keys[i].toLowerCase().indexOf(lower + '|') === 0) { delete j2534Hooked[keys[i]]; flags++; }
@@ -2319,7 +2951,25 @@ rpc.exports = {
     return 'unknown';
   },
   status: function () {
-    try { return universalStatus(); } catch (e) { return { error: String(e) }; }
+    try {
+      const st = universalStatus();
+      st.mode = MODE;
+      return st;
+    } catch (e) { return { error: String(e) }; }
+  },
+  // Счётчики потерь: движок дописывает их в `# counters` при остановке сессии
+  // (docs/09 §4). Неполный лог нельзя выдавать за полный.
+  counters: function () {
+    try { flushIoStats(); } catch (e) {}
+    return {
+      mode: MODE,
+      calls: counters.calls,
+      rx_sof: counters.rx_sof,
+      truncated_payloads: counters.truncated_payloads,
+      decode_errors: counters.decode_errors,
+      dropped_events: counters.dropped_events,
+      file_reads: counters.file_reads
+    };
   },
   ping: function () {
     return 'pong';

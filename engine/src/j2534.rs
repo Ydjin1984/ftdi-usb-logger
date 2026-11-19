@@ -8,11 +8,53 @@
 
 use crate::models::J2534Driver;
 
-/// Ветки реестра PassThruSupport 04.04: (путь, человекочитаемый вид).
-const PASSTHRU_BRANCHES: &[(&str, &str)] = &[
-    (r"SOFTWARE\WOW6432Node\PassThruSupport.04.04", "32-bit"),
-    (r"SOFTWARE\PassThruSupport.04.04", "64-bit"),
+/// Ветки реестра PassThruSupport: (путь, человекочитаемый вид, версия API).
+///
+/// Обе версии обязательны: драйвер 05.00 регистрируется только в своей ветке,
+/// и без неё он не попал бы в список вовсе (docs/09 §5).
+const PASSTHRU_BRANCHES: &[(&str, &str, &str)] = &[
+    (r"SOFTWARE\WOW6432Node\PassThruSupport.04.04", "32-bit", "04.04"),
+    (r"SOFTWARE\PassThruSupport.04.04", "64-bit", "04.04"),
+    (r"SOFTWARE\WOW6432Node\PassThruSupport.05.00", "32-bit", "05.00"),
+    (r"SOFTWARE\PassThruSupport.05.00", "64-bit", "05.00"),
 ];
+
+/// Карта `имя_файла.dll` → `04.04` | `05.00` | `ambiguous` для Frida-агента.
+///
+/// Агент получает её в attach-команде: до `PassThruReadVersion` иначе нельзя
+/// решить, разбирать ли `PASSTHRU_MSG`. Раскладка 04.04 (24 + `Data[4128]`) и
+/// 05.00 (полезная нагрузка по указателю) разная — угадывать запрещено, поэтому
+/// библиотека, зарегистрированная в обеих ветках, помечается `ambiguous`
+/// и разбирается с `dec=0` до подтверждения версией.
+pub fn api_map() -> std::collections::BTreeMap<String, String> {
+    let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for driver in list_drivers() {
+        let dll = driver.dll.trim();
+        if dll.is_empty() {
+            continue;
+        }
+        let base = std::path::Path::new(dll)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if base.is_empty() {
+            continue;
+        }
+        let api = if driver.api.is_empty() {
+            "04.04".to_string()
+        } else {
+            driver.api.clone()
+        };
+        out.entry(base)
+            .and_modify(|value| {
+                if !value.eq_ignore_ascii_case(&api) {
+                    *value = "ambiguous".to_string();
+                }
+            })
+            .or_insert(api);
+    }
+    out
+}
 
 /// Все зарегистрированные J2534-драйверы (Scanmatik SM2/SM3, CHIPSOFT, OpenPort, VXDIAG, …).
 ///
@@ -22,15 +64,18 @@ pub fn list_drivers() -> Vec<J2534Driver> {
     #[cfg(windows)]
     {
         let mut out: Vec<J2534Driver> = Vec::new();
-        for (path, _view) in PASSTHRU_BRANCHES {
-            for driver in drivers_from_branch(path) {
-                // Один и тот же драйвер может быть зарегистрирован в 32- и 64-битной ветке.
-                let duplicate = out.iter().any(|existing| {
+        for (path, _view, api) in PASSTHRU_BRANCHES {
+            for driver in drivers_from_branch(path, api) {
+                // Один и тот же драйвер может быть зарегистрирован в 32- и 64-битной
+                // ветке. Если он при этом объявлен и в 04.04, и в 05.00 — какой ABI
+                // реально используется, по реестру не установить: помечаем ambiguous.
+                if let Some(existing) = out.iter_mut().find(|existing| {
                     existing.name.eq_ignore_ascii_case(&driver.name)
-                        && (existing.dll.eq_ignore_ascii_case(&driver.dll)
-                            || driver.dll.is_empty())
-                });
-                if duplicate {
+                        && (existing.dll.eq_ignore_ascii_case(&driver.dll) || driver.dll.is_empty())
+                }) {
+                    if !existing.api.eq_ignore_ascii_case(&driver.api) {
+                        existing.api = "ambiguous".to_string();
+                    }
                     continue;
                 }
                 out.push(driver);
@@ -78,7 +123,7 @@ pub fn is_j2534_module(name: &str) -> bool {
 // ───────────────────────── реестр PassThruSupport ────────────────────────
 
 #[cfg(windows)]
-fn drivers_from_branch(branch: &str) -> Vec<J2534Driver> {
+fn drivers_from_branch(branch: &str, api: &str) -> Vec<J2534Driver> {
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
     let mut out = Vec::new();
@@ -103,6 +148,7 @@ fn drivers_from_branch(branch: &str) -> Vec<J2534Driver> {
             dll,
             dll_present,
             version,
+            api: api.to_string(),
         });
     }
     out

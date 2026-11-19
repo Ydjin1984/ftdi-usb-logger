@@ -359,28 +359,55 @@ Bosch MDI, UCDS и т.д.).
 
 ### 11.3 Грамматика новых строк захвата
 
-Формат тот же — `[+<t>s] <текст>` (совместим со старым логом), новые префиксы:
+Формат тот же — `[+<t>s] <текст>`; метка времени теперь берётся с QPC и несёт
+**шесть** знаков после точки (`[+31.907431s]`), старые три знака читаются
+по-прежнему. Полный контракт (кто пишет, кто читает, что обязано попасть в
+`meta`) — [11-capture-grammar.md](11-capture-grammar.md); ниже — сводка.
 
 ```
-[+1.234s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" rc=0
-[+1.300s] J2534 connect dev=1 ch=1 proto=ISO15765 flags=0x0 baud=500000 rc=0
-[+2.100s] J2534 TX ch=1 proto=ISO15765 id=0x7E0 flags=0x0 len=8 : 02 10 03 00 00 00 00 00
-[+2.150s] J2534 RX ch=1 proto=ISO15765 id=0x7E8 rxs=0x0 len=8 : 06 50 03 00 00 00 00 00
-[+2.200s] J2534 RX ch=1 proto=0x8003 rxs=0x2 len=0 :
-[+2.250s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x27 len=4 : 00 02 27 7f
-[+2.300s] J2534 voltage dev=1 pin=12 5000 mV rc=0
-[+2.310s] J2534 version fw="FW:1060 HW:02 SN:A62122" dll="1.0.0.120" api="04.04" rc=0
-[+3.000s] J2534 ioctl ch=1 id=0x0701 rc=0
-[+3.100s] J2534 disconnect ch=1 rc=0
-[+4.000s] USB open path="\\?\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4
-[+4.100s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3 reads=1
-[+4.200s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b
-[+4.250s] WINUSB RX pipe=0x81 len=64 : ...
-[+4.300s] HID TX report=0x02 len=9 : ...
-[+4.350s] HID RX report=0x01 len=9 : ...
-[+4.400s] LIBUSB TX ep=0x01 len=8 : ...
-[+4.450s] LIBUSB RX ep=0x81 len=8 : ...
+[+1.200000s] J2534 open name="Scanmatik - SM2 USB" vendor="Scanmatik" dll="smj2534.dll" dev=1 rc=0 th=8120
+[+1.250000s] J2534 connect-enter dev=1 proto=0x8003 flags=0x0 baud=500000 th=8120
+[+1.307431s] J2534 connect dev=1 ch=1 proto=0x8003 flags=0x0 baud=500000 rc=0 gen=1 th=8120 dur=57431
+[+2.100000s] J2534 call ch=1 call=1247 op=ReadMsgs n_in=10 n_out=3 rc=0 th=8120 dur=20134
+[+2.101000s] J2534 RX ch=1 call=1247 i=1/3 n_in=10 n_out=1 th=8120 ts=0 rxs=0x0 proto=ISO15765 id=0x7E8 svc=0x50 len=8 dur=20134 rc=0 : 06 50 03 00 00 00 00 00
+[+2.102000s] J2534 RX ch=1 call=1247 i=2/3 ts=0 rxs=0x2 proto=0x8003 sof=1 len=0
+[+2.150000s] J2534 TX ch=1 call=1246 i=1/1 n_in=1 n_out=1 th=8120 ts=0 flags=0x0 proto=0x8003 svc=0x27 len=4 dur=812 rc=0 : 00 02 27 7f
+[+2.200000s] J2534 rx-empty ch=1 n=10 timeout_ms=20 last_rc=0x11
+[+2.210000s] J2534 tx-err-stat ch=1 n=5 last_rc=0x10
+[+2.220000s] J2534 chan-miss ch=1 gen=2 first_op=filter th=8120
+[+2.300000s] J2534 filter ch=1 call=90 type=0x0001 (PASS_FILTER) rc=0 th=8120 dur=410 mask=ffffffff pattern=000007e0 flow=- mask_proto=0x8003 mask_flags=0x0 pattern_proto=0x8003 pattern_flags=0x0 proto=ISO15765 flags=0x0 id=0x1
+[+2.310000s] J2534 ioctl ch=1 call=88 id=0x0005 (FAST_INIT) rc=0 th=8120 dur=1520 in_proto=0x8003 in_rxs=0x0 in_flags=0x0 in_ts=0 in_edi=0 in_size=6 in=0002277f out_proto=0x8003 out_rxs=0x0 out_flags=0x0 out_ts=0 out_edi=0 out_size=3 out=0003677f34
+[+2.320000s] J2534 version fw="FW:1060 HW:02 SN:A62122" dll="1.0.0.120" api="04.04" rc=0
+[+2.400000s] J2534 voltage dev=1 pin=12 5000 mV rc=0
+[+3.100000s] J2534 disconnect ch=1 rc=0
+[+4.000000s] FILE read h=0xe10 off=0x1F0000 len=0x1000 total=0x400000
+[+4.050000s] USB open path="\\?\hid#vid_046d&pid_c52b" kind=hid handle=0x2b4
+[+4.100000s] USB close path="\\?\hid#vid_046d&pid_c52b" bytes=64 writes=3 reads=1
+[+4.200000s] WINUSB TX pipe=0x01 len=8 : 12 04 0d 1b
+[+4.300000s] HID TX report=0x02 len=9 : ...
+[+4.400000s] LIBUSB TX ep=0x01 len=8 : ...
 ```
+
+Ключи вызова J2534 (новые в 0.3.3):
+
+| Ключ | Смысл |
+|---|---|
+| `call` | сквозной номер вызова `PassThru*` в сессии; связывает строку `call` с её сообщениями |
+| `i` | индекс сообщения в пачке, `k/N` (`1/1` — одно сообщение) |
+| `n_in` | сколько элементов запрошено на входе вызова |
+| `n_out` | сколько вернул драйвер на выходе |
+| `dur` (`duration`) | длительность вызова в **микросекундах** |
+| `th` | id потока, в котором был вызов |
+| `ts` | `Timestamp` из `PASSTHRU_MSG` — время драйвера, не время лога |
+| `sof` | маркер начала сообщения (`START_OF_MESSAGE`) |
+
+Когда сообщений нет, их несколько или вызов завершился ошибкой — пишется
+отдельная строка `J2534 call` с общими полями (`call`, `op`, `n_in`, `n_out`,
+`dur`, `th`), а на сообщениях остаются только `call` и `i`. Одно сообщение —
+все общие поля прямо на строке `TX`/`RX`. Вход `connect` пишется до вызова
+(`connect-enter`), исход — после; `gen` растёт только после успешного
+`connect` и вместе с `pid | module_load_id | ch` образует ключ канала.
+`chan-miss` фиксирует операцию, пришедшую на канал в неизвестной генерации.
 
 Маппинг `transport`: `FT_*`→`ftd2xx`, `VCP`→`vcp`, `J2534`→`j2534`,
 `USB/WINUSB/HID/LIBUSB`→`usb`, `LAN`→`lan` (§11.6).
@@ -395,15 +422,42 @@ Bosch MDI, UCDS и т.д.).
 * Вендорные протоколы (`proto=0x8003` у PCMflash/Scanmatik) не имеют CAN-id, зато
   несут 2-байтовый BE-префикс длины: агент находит сервисный байт и добавляет `svc=0xNN`.
   Payload при этом остаётся байт-в-байт.
-* `RX … rxs=0x2 len=0` — это `RX_STATUS`/`START_OF_MESSAGE`, а не ответ: в сводку шага
-  такие строки не идут, иначе один ответ считался дважды.
-* `PassThruReadMsgs`/`WriteMsgs` с ошибкой дают `J2534 rx-error|tx-error … rc=0x…`
-  (штатные `ERR_BUFFER_EMPTY 0x10` / `ERR_TIMEOUT 0x11` не пишутся — это опрос).
+* `RX … rxs=0x2 len=0` — это `RX_STATUS`/`START_OF_MESSAGE`, а не ответ. Такая строка
+  пишется коротко, с `sof=1`, **без** секции `: hex`, в счётчик полезных сообщений не
+  входит, иначе один ответ считался дважды. В режиме `compact` SOF построчно не
+  пишется вовсе — только агрегат `rx-sof-stat ch=… n=…` и счётчик `rx_sof`.
+* Ошибки `PassThruReadMsgs`/`WriteMsgs` пишутся строкой `J2534 rx-error|tx-error … rc=0x…`.
+  Штатные `ERR_BUFFER_EMPTY 0x10` / `ERR_TIMEOUT 0x11` — это опрос, а не сбой: отдельными
+  строками они **подавляются**, но не теряются — свёрнуты в `rx-empty`/`tx-err-stat`
+  (`ch`, `n`, `timeout_ms`, `last_rc`, при наличии `call`) и учтены в `# counters`.
+* `ioctl` пишет имя операции из таблицы `PT_IOCTL_NAMES` — `id=0x0005 (FAST_INIT)`, —
+  и буферы целиком: `in=`/`out=` слитным hex. Для `FAST_INIT` это разложенные
+  `PASSTHRU_MSG` (04.04), поэтому видны и заголовок (`in_proto`, `in_rxs`, `in_size`,
+  `in_edi`), и `Data`. Для 05.00 и неизвестного `id` структура не декодируется:
+  `in_ptr/out_ptr` и `dec=0`.
+* `filter` пишет `type=0x0001 (PASS_FILTER)` вместе с `mask=`/`pattern=` слитным hex,
+  `flow=-` при `pFlowControlMsg = NULL` и `proto`/`flags` из `pPatternMsg`.
+* `FILE read` — короткая форма `h=… off=… len=… total=…` (не более 4096 строк на
+  сессию, дальше только агрегат в `# counters`); старая форма
+  `FILE read <path> offset=… n=… len=…` продолжает читаться.
+* Служебные строки шапки: `# api:` (`api`, `dll`, `ver`, `path`, `pid`, `bits`,
+  `dec`), `# hooks` (`mod`, `base`, `load`, `exports`, `attached`, `dup`, `failed`)
+  и итоговый `# counters` (`dropped_events`, `truncated_payloads`, `decode_errors`,
+  `rx_sof`, `calls`).
+* ABI подтверждается до разбора структур: `PT_MSG_SIZE = 4152` (24 + `Data[4128]`)
+  верен только для 04.04. Если DLL зарегистрирована лишь в ветке `PassThruSupport.05.00`
+  либо версия не прочитана и DLL есть в обеих ветках, вызовы и сырые указатели
+  по-прежнему регистрируются, но структура не декодируется — `dec=0`.
+* Два режима сбора: `full` — каждый вызов, каждый элемент массива сообщений, SOF
+  отдельной строкой; `compact` — пустые опросы агрегируются по `ch`, `rc`,
+  `timeout`, SOF идёт в счётчик. Режим выбирается при старте агента и виден в
+  баннере `# agent: … mode=…`.
 
 ### 11.4 Разбор
 
 `decode::parse_capture_line` понимает новые префиксы; для J2534 кладёт в `meta`:
-`{channel, protocol, can_id, flags, rxs, svc, svc_resp}` и `text` вида `ISO15765 0x7E0`.
+`{channel, protocol, can_id, flags, rxs, svc, svc_resp}` плюс поля вызова
+`{call, i, n_in, n_out, dur, th, ts, sof}` (см. §11.3), и `text` вида `ISO15765 0x7E0`.
 Ключ гистограммы шага — `{proto} {can_id} {cmd|resp} 0xNN {ServiceName}`; если сервис
 не читается (многофреймовый ISO-TP), остаётся `{proto} {can_id}`.
 Инспектор дополнительно декодирует CAN/ISOTP: длина кадра, PCI-тип (SF/FF/CF/FC),

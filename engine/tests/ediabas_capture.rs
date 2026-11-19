@@ -204,6 +204,7 @@ fn ediabas_traces_are_attributed_to_steps() {
         no_bridge: false,
         discovery_ms: 2000,
         max_event_bytes: 64 * 1024,
+        capture_mode: "full".into(),
     });
     let store = Arc::new(SessionStore::open(&cfg.sessions_dir).expect("store"));
     let (bus, _) = broadcast::channel::<ServerMsg>(4096);

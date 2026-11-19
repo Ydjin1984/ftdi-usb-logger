@@ -64,6 +64,7 @@ impl BridgeManager {
         &self,
         pid: u32,
         label: &str,
+        attach_mode: &str,
         tx: broadcast::Sender<BridgeMsg>,
     ) -> anyhow::Result<()> {
         use anyhow::{bail, Context};
@@ -137,11 +138,18 @@ impl BridgeManager {
         tokio::spawn(watch_child(self.inner.clone(), tx.clone()));
 
         // ── attach ────────────────────────────────────────────────────────
+        // options уходят в source агента как `var __FTDI_CONFIG__`: режим сбора
+        // и карта ABI нужны ДО установки хуков, а не после load().
         let attach = serde_json::json!({
             "cmd": "attach",
             "pid": pid,
             "script": cfg.script.to_string_lossy(),
             "label": label,
+            "options": {
+                "mode": cfg.capture_mode,
+                "attach": attach_mode,
+                "j2534_api": crate::j2534::api_map(),
+            },
         });
         if let Err(err) = self.command(attach).await {
             let _ = self.stop().await;
@@ -359,6 +367,7 @@ mod tests {
             no_bridge: false,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            capture_mode: "full".into(),
         });
         let bridge = BridgeManager::new(cfg);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -426,12 +435,13 @@ for line in sys.stdin:
             no_bridge: false,
             discovery_ms: 2000,
             max_event_bytes: 64 * 1024,
+            capture_mode: "full".into(),
         });
         let bridge = BridgeManager::new(cfg);
         let (tx, mut rx) = broadcast::channel::<BridgeMsg>(64);
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            bridge.start(4242, "test", tx).await.expect("мост стартует");
+            bridge.start(4242, "test", "late", tx).await.expect("мост стартует");
             assert!(bridge.is_running());
             assert_eq!(bridge.pid(), Some(4242));
 

@@ -311,6 +311,116 @@ fn parse_comment(body: &str, t: f64, raw: &str) -> Event {
         }
     }
 
+    // ── расширенная шапка универсального захвата (docs/11 §1) ────────────
+    // `# api: 04.04 dll="smj2534.dll" ver="1.0.0.120" path="…" pid=8120 bits=32 dec=1`
+    if let Some(rest) = c.strip_prefix("api:") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "API".into();
+        let tail = rest.trim_start();
+        // Версия ABI — первый токен строки. Ключ meta `api_version`, потому что
+        // `ev.api` уже занят маркером "API".
+        let version = tail.split_whitespace().next().unwrap_or("");
+        if !version.is_empty() {
+            set_meta(&mut ev, "api_version", json!(version));
+        }
+        set_meta_str(&mut ev, "dll", tag_quoted(tail, "dll"));
+        set_meta_str(&mut ev, "ver", tag_quoted(tail, "ver"));
+        set_meta_str(&mut ev, "path", tag_quoted(tail, "path"));
+        // `reason=ambiguous` — ABI не подтверждён, декодировать нельзя (dec=0).
+        set_meta_str(&mut ev, "reason", tag_quoted(tail, "reason"));
+        set_num_pairs(
+            &mut ev,
+            tail,
+            &[("pid", "pid"), ("bits", "bits"), ("dec", "dec")],
+        );
+        ev.text = Some(tail.to_string());
+        return ev;
+    }
+
+    // `# hooks-names mod="smj2534.dll" names="PassThruOpen,PassThruClose,…"`
+    if let Some(rest) = c.strip_prefix("hooks-names ") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "HOOKS-NAMES".into();
+        set_meta_str(&mut ev, "mod", tag_quoted(rest, "mod"));
+        set_meta_str(&mut ev, "names", tag_quoted(rest, "names"));
+        ev.text = Some(rest.trim().to_string());
+        return ev;
+    }
+
+    // `# hooks mod="smj2534.dll" base=0x6d830000 load=1 exports=14 attached=14 dup=0 failed=0`
+    // `load=` — module_load_id (счётчик загрузок имени), а не адрес базы.
+    if let Some(rest) = c.strip_prefix("hooks ") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "HOOKS".into();
+        set_meta_str(&mut ev, "mod", tag_quoted(rest, "mod"));
+        // `base` — hex-адрес как пришёл: он нужен для сверки с `MODULE … base=`.
+        set_meta_str(&mut ev, "base", tag_quoted(rest, "base"));
+        set_num_pairs(
+            &mut ev,
+            rest,
+            &[
+                ("load", "load"),
+                ("exports", "exports"),
+                ("attached", "attached"),
+                ("dup", "dup"),
+                ("failed", "failed"),
+            ],
+        );
+        let module = tag_quoted(rest, "mod").unwrap_or_default();
+        ev.text = Some(format!("hooks {module}").trim_end().to_string());
+        return ev;
+    }
+
+    // `# counters dropped_events=0 truncated_payloads=0 decode_errors=0 rx_sof=0 calls=0`
+    if let Some(rest) = c.strip_prefix("counters ") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "COUNTERS".into();
+        // Ключи берём как есть: набор счётчиков может расти, meta не должна отставать.
+        apply_kv_meta(&mut ev, rest);
+        ev.text = Some(rest.trim().to_string());
+        return ev;
+    }
+
+    // `# session incomplete: reason=queue_overflow dropped=12`
+    if let Some(rest) = c.strip_prefix("session incomplete:") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "SESSION-INCOMPLETE".into();
+        set_meta_str(&mut ev, "reason", tag_quoted(rest, "reason"));
+        set_num_pairs(&mut ev, rest, &[("dropped", "dropped")]);
+        ev.text = Some(rest.trim().to_string());
+        return ev;
+    }
+
+    // `# agent: universal_capture.js mode=full`
+    if let Some(rest) = c.strip_prefix("agent:") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "AGENT".into();
+        let tail = rest.trim_start();
+        let script = tail.split_whitespace().next().unwrap_or("");
+        if !script.is_empty() {
+            set_meta(&mut ev, "agent", json!(script));
+        }
+        apply_kv_meta(&mut ev, tail);
+        ev.text = Some(tail.to_string());
+        return ev;
+    }
+
+    // `# attach: spawn` / `# attach: early` / `# attach: late`
+    if let Some(rest) = c.strip_prefix("attach:") {
+        let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
+        ev.api = "ATTACH".into();
+        let tail = rest.trim_start();
+        let mode = tail.split_whitespace().next().unwrap_or("");
+        if !mode.is_empty() {
+            // `attach` — как в строке; `mode` — для тех, кто читает режим по имени.
+            set_meta(&mut ev, "attach", json!(mode));
+            set_meta(&mut ev, "mode", json!(mode));
+        }
+        apply_kv_meta(&mut ev, tail);
+        ev.text = Some(tail.to_string());
+        return ev;
+    }
+
     // Общий вид `# ключ: значение` → api = КЛЮЧ.
     if let Some((key, value)) = c.split_once(':') {
         let mut ev = make_event(EventKind::Sys, Transport::None, t, raw);
@@ -688,7 +798,16 @@ fn parse_file_line(rest: &str, t: f64, raw: &str) -> Event {
         "open" => split_file_attrs(body, &[" access="]),
         "close" => split_file_attrs(body, &[" bytes="]),
         "write" => split_file_attrs(body, &[" offset=", " n=", " len=", " total="]),
-        "read" => split_file_attrs(body, &[" offset=", " n=", " len="]),
+        // Новый формат без пути: `FILE read h=0xe10 off=0x1F0000 len=0x1000 total=0x400000`
+        // (docs/11 §8). Путь пустой, дескриптор и смещения — в attrs.
+        "read" => {
+            let head = body.trim_start();
+            if head.starts_with("h=") || head.starts_with("handle=") {
+                ("", head)
+            } else {
+                split_file_attrs(body, &[" offset=", " n=", " len=", " total="])
+            }
+        }
         "hash" => split_file_attrs(body, &[" size=", " sha256="]),
         _ => split_file_attrs(body, &[" access=", " bytes=", " size="]),
     };
@@ -709,13 +828,18 @@ fn parse_file_line(rest: &str, t: f64, raw: &str) -> Event {
 
     let mut ev = make_event(EventKind::File, Transport::File, t, raw);
     ev.api = format!("FILE {op}");
-    ev.text = Some(path.to_string());
+    // У нового `FILE read h=…` пути нет: в text кладём остаток строки с ключами.
+    let head = if path.is_empty() { attrs.trim() } else { path };
+    ev.text = Some(head.to_string());
     set_meta(&mut ev, "op", json!(op));
-    set_meta(&mut ev, "path", json!(path));
+    if !path.is_empty() {
+        set_meta(&mut ev, "path", json!(path));
+    }
     if let Some(access) = tag_value(attrs, "access") {
         set_meta(&mut ev, "access", json!(access));
     }
-    if let Some(handle) = tag_value(attrs, "handle") {
+    // Дескриптор: `handle=` (старая форма) или `h=` (docs/11 §8).
+    if let Some(handle) = tag_value(attrs, "handle").or_else(|| tag_value(attrs, "h")) {
         set_meta(&mut ev, "handle", json!(handle));
     }
     if let Some(bytes) = tag_u64(attrs, "bytes") {
@@ -728,7 +852,20 @@ fn parse_file_line(rest: &str, t: f64, raw: &str) -> Event {
     if let Some(n) = tag_u64(attrs, "n") {
         set_meta(&mut ev, "n", json!(n));
     }
-    if let Some(total) = tag_u64(attrs, "total") {
+    // `offset=`/`off=` и `len=` — смещение и длина чтения/записи (docs/11 §8).
+    set_num_pairs(
+        &mut ev,
+        attrs,
+        &[("offset", "offset"), ("off", "offset"), ("len", "len")],
+    );
+    if let Some(len) = num_value(tag_value(attrs, "len").unwrap_or("")) {
+        // Для чтения len — фактический объём, он же длина события.
+        if op == "read" {
+            ev.len = len.clamp(0, u32::MAX as i64) as u32;
+        }
+    }
+    if let Some(total) = tag_value(attrs, "total").and_then(num_value) {
+        // `total=` бывает и десятичным (старая форма), и `0x400000` (docs/11 §8).
         set_meta(&mut ev, "total", json!(total));
     }
     if let Some(size) = tag_u64(attrs, "size") {
@@ -803,7 +940,49 @@ fn set_meta_str(ev: &mut Event, key: &str, value: Option<String>) {
     }
 }
 
-/// `J2534 open/connect/TX/RX/ioctl/disconnect/err` (docs/02 §11.3).
+/// Разобрать число как `123`, `-1` или `0x1F0000`.
+fn num_value(raw: &str) -> Option<i64> {
+    let v = raw.trim();
+    if let Ok(n) = v.parse::<i64>() {
+        return Some(n);
+    }
+    let hex = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X"))?;
+    i64::from_str_radix(hex, 16).ok()
+}
+
+/// Разложить пары `(тег в строке, ключ в meta)` числами: числовые значения —
+/// `json!(n)`, всё остальное (hex-id, `1/2`, имена) — строкой как пришло.
+///
+/// Нужно, чтобы новые ключи контракта (docs/11 §11) попадали в `meta` без
+/// дублирования одного и того же `if let Some(...)` на каждый ключ.
+fn set_num_pairs(ev: &mut Event, text: &str, pairs: &[(&str, &str)]) {
+    for (tag, key) in pairs {
+        let Some(raw) = tag_value(text, tag) else {
+            continue;
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        match num_value(raw) {
+            Some(n) => set_meta(ev, key, json!(n)),
+            None => set_meta(ev, key, json!(raw)),
+        }
+    }
+}
+
+/// `rc=` → поле `ev.rc` и дубль в `meta` (контракт docs/11 §11 требует `rc` в meta).
+/// Код возврата бывает и десятичным, и hex (`rc=0x11` в docs/11 §4).
+fn set_rc(ev: &mut Event, text: &str) {
+    if let Some(rc) = tag_value(text, "rc").and_then(num_value) {
+        ev.rc = Some(rc as i32);
+        set_meta(ev, "rc", json!(rc));
+    }
+}
+
+/// `J2534 open/connect-enter/connect/call/TX/RX/ioctl/filter/periodic/disconnect/err`
+/// плюс агрегаты компактного режима (`rx-empty`, `tx-err-stat`, `rx-sof-stat`,
+/// `chan-miss`, `chan-possibly-open`) — docs/11 (контракт грамматики).
 fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
     let after = rest.strip_prefix("J2534").unwrap_or(rest).trim_start();
     let op_raw = after.split_whitespace().next().unwrap_or("");
@@ -828,6 +1007,25 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "can_id", can_id.clone());
             set_meta_str(&mut ev, "flags", tag_quoted(kv, "flags"));
             set_meta_str(&mut ev, "rxs", tag_quoted(kv, "rxs"));
+            // Поля вызова (docs/11 §5, §11): сквозной номер вызова, индекс сообщения
+            // `i=k/n`, счётчики n_in/n_out, поток, метка драйвера `ts` (всегда,
+            // включая нулевую), длительность `dur` и признак SOF-кадра `sof=1`.
+            // Любого из них может не быть — строка всё равно разбирается.
+            set_num_pairs(
+                &mut ev,
+                kv,
+                &[
+                    ("call", "call"),
+                    ("n_in", "n_in"),
+                    ("n_out", "n_out"),
+                    ("th", "thread"),
+                    ("ts", "ts"),
+                    ("dur", "dur"),
+                    ("sof", "sof"),
+                ],
+            );
+            // `i=1/2` — строка как пришла: это не число, а «k из n».
+            set_meta_str(&mut ev, "i", tag_quoted(kv, "i"));
             // Сервисный байт кадра: агент вытаскивает его из вендорной обёртки
             // (PCMflash/Scanmatik `0x8003`) или из ISO-TP SF, чтобы сводка шага
             // показывала `0x27 SecurityAccess`, а не `0x8003 ?`.
@@ -859,10 +1057,64 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "device", name.clone());
             set_meta_str(&mut ev, "vendor", tag_quoted(body, "vendor"));
             set_meta_str(&mut ev, "dll", tag_quoted(body, "dll"));
+            // `dev=` — DeviceID из выходного параметра (-1 при ошибке), `th=` — поток.
+            set_num_pairs(&mut ev, body, &[("dev", "dev"), ("th", "thread")]);
             if let Some(rc) = tag_i32(body, "rc") {
                 ev.rc = Some(rc);
             }
             ev.text = Some(format!("J2534 open {}", name.unwrap_or_default()).trim_end().to_string());
+            ev
+        }
+        // Вход Connect пишется до вызова, выход — после (docs/11 §3).
+        "connect-enter" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 connect-enter".into();
+            let protocol = tag_quoted(body, "proto").or_else(|| tag_quoted(body, "protocol"));
+            let baud = tag_quoted(body, "baud");
+            set_meta_str(&mut ev, "device", tag_quoted(body, "dev"));
+            set_meta_str(&mut ev, "protocol", protocol.clone());
+            set_meta_str(&mut ev, "flags", tag_quoted(body, "flags"));
+            set_meta_str(&mut ev, "baud", baud.clone());
+            set_num_pairs(&mut ev, body, &[("th", "thread")]);
+            ev.text = Some(format!(
+                "connect-enter proto={} baud={}",
+                protocol.unwrap_or_else(|| "?".into()),
+                baud.unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        // Строка вызова (docs/11 §4): когда сообщений нет, их несколько или
+        // вызов завершился ошибкой — общие поля живут здесь, а не на сообщениях.
+        "call" => {
+            let (kv, _hex) = split_payload(body);
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 call".into();
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(kv, "ch").or_else(|| tag_quoted(kv, "channel")),
+            );
+            set_meta_str(&mut ev, "op", tag_quoted(kv, "op"));
+            set_num_pairs(
+                &mut ev,
+                kv,
+                &[
+                    ("call", "call"),
+                    ("n_in", "n_in"),
+                    ("n_out", "n_out"),
+                    ("th", "thread"),
+                    ("dur", "dur"),
+                ],
+            );
+            set_rc(&mut ev, kv);
+            ev.text = Some(format!(
+                "{} ch={} call={} n_in={} n_out={}",
+                tag_quoted(kv, "op").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "ch").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "call").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "n_in").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "n_out").unwrap_or_else(|| "?".into()),
+            ));
             ev
         }
         "connect" => {
@@ -875,9 +1127,14 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "protocol", protocol.clone());
             set_meta_str(&mut ev, "flags", tag_quoted(body, "flags"));
             set_meta_str(&mut ev, "baud", tag_quoted(body, "baud"));
-            if let Some(rc) = tag_i32(body, "rc") {
-                ev.rc = Some(rc);
-            }
+            // `gen` растёт после успешного connect этого канала (ключ канала:
+            // pid | module_load_id | ch | gen), `th` — поток, `dur` — длительность.
+            set_num_pairs(
+                &mut ev,
+                body,
+                &[("gen", "gen"), ("th", "thread"), ("dur", "dur")],
+            );
+            set_rc(&mut ev, body);
             ev.text = Some(format!(
                 "connect proto={} ch={}",
                 protocol.unwrap_or_else(|| "?".into()),
@@ -892,14 +1149,161 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             let ioctl_id = tag_quoted(body, "id").or_else(|| tag_quoted(body, "ioctl"));
             set_meta_str(&mut ev, "channel", channel.clone());
             set_meta_str(&mut ev, "ioctl_id", ioctl_id.clone());
-            if let Some(rc) = tag_i32(body, "rc") {
-                ev.rc = Some(rc);
-            }
+            // `(FAST_INIT)` — имя IOCTL из таблицы PT_IOCTL_NAMES (docs/11 §6).
+            set_meta_str(&mut ev, "ioctl_name", paren_arg(body).map(|s| s.trim().to_string()));
+            // `in=`/`out=` — Data[DataSize] слитным hex; `out=none` — содержимое
+            // недоступно (есть только причина в `reason=`).
+            set_meta_str(&mut ev, "in", tag_quoted(body, "in"));
+            set_meta_str(&mut ev, "out", tag_quoted(body, "out"));
+            set_meta_str(&mut ev, "reason", tag_quoted(body, "reason"));
+            set_num_pairs(
+                &mut ev,
+                body,
+                &[
+                    ("call", "call"),
+                    ("in_size", "in_size"),
+                    ("out_size", "out_size"),
+                    ("dec", "dec"),
+                    ("len_invalid", "len_invalid"),
+                    ("in_ptr", "in_ptr"),
+                    ("out_ptr", "out_ptr"),
+                    ("th", "thread"),
+                    ("dur", "dur"),
+                ],
+            );
+            set_rc(&mut ev, body);
             ev.text = Some(format!(
                 "ioctl {} ch={}",
                 ioctl_id.unwrap_or_else(|| "?".into()),
                 channel.unwrap_or_else(|| "?".into())
             ));
+            ev
+        }
+        // Фильтр (docs/11 §7, F3): маска и паттерн — Data[DataSize] слитным hex,
+        // `flow=-` при pFlowControlMsg = NULL, `id=` — FilterID из выхода.
+        "filter" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 filter".into();
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel")),
+            );
+            set_meta_str(&mut ev, "filter_type", tag_quoted(body, "type"));
+            set_meta_str(&mut ev, "mask", tag_quoted(body, "mask"));
+            set_meta_str(&mut ev, "pattern", tag_quoted(body, "pattern"));
+            set_meta_str(&mut ev, "flow", tag_quoted(body, "flow"));
+            set_meta_str(&mut ev, "mask_proto", tag_quoted(body, "mask_proto"));
+            set_meta_str(&mut ev, "mask_flags", tag_quoted(body, "mask_flags"));
+            set_meta_str(&mut ev, "pattern_proto", tag_quoted(body, "pattern_proto"));
+            set_meta_str(&mut ev, "pattern_flags", tag_quoted(body, "pattern_flags"));
+            // `proto`/`flags` в хвосте — из pPatternMsg.
+            set_meta_str(&mut ev, "proto", tag_quoted(body, "proto"));
+            set_meta_str(&mut ev, "flags", tag_quoted(body, "flags"));
+            set_meta_str(&mut ev, "filter_id", tag_quoted(body, "id"));
+            set_num_pairs(&mut ev, body, &[("call", "call"), ("th", "thread"), ("dur", "dur")]);
+            set_rc(&mut ev, body);
+            ev.text = Some(format!(
+                "filter type={} id={} ch={}",
+                tag_quoted(body, "type").unwrap_or_else(|| "?".into()),
+                tag_quoted(body, "id").unwrap_or_else(|| "?".into()),
+                tag_quoted(body, "ch").unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        // `filter-stop` / `periodic-stop`: снятие фильтра и периодики.
+        "filter-stop" | "periodic-stop" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = format!("J2534 {op}");
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel")),
+            );
+            set_meta_str(&mut ev, "filter_id", tag_quoted(body, "id"));
+            set_num_pairs(&mut ev, body, &[("call", "call"), ("th", "thread"), ("dur", "dur")]);
+            set_rc(&mut ev, body);
+            ev.text = Some(format!(
+                "{op} id={} ch={}",
+                tag_quoted(body, "id").unwrap_or_else(|| "?".into()),
+                tag_quoted(body, "ch").unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        // Периодическая посылка (docs/11 §7): `ms=` — интервал, payload — `: hex`.
+        "periodic-start" => {
+            let (kv, hex) = split_payload(body);
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = "J2534 periodic-start".into();
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(kv, "ch").or_else(|| tag_quoted(kv, "channel")),
+            );
+            set_meta_str(&mut ev, "filter_id", tag_quoted(kv, "id"));
+            set_meta_str(&mut ev, "protocol", tag_quoted(kv, "proto"));
+            set_meta_str(&mut ev, "flags", tag_quoted(kv, "flags"));
+            set_num_pairs(
+                &mut ev,
+                kv,
+                &[("call", "call"), ("ms", "interval"), ("th", "thread"), ("dur", "dur")],
+            );
+            set_rc(&mut ev, kv);
+            set_payload(&mut ev, hex, tag_u64(kv, "len"));
+            ev.text = Some(format!(
+                "periodic-start id={} ms={} ch={}",
+                tag_quoted(kv, "id").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "ms").unwrap_or_else(|| "?".into()),
+                tag_quoted(kv, "ch").unwrap_or_else(|| "?".into())
+            ));
+            ev
+        }
+        // Агрегаты компактного режима и диагностика рассинхронизации канала
+        // (docs/11 §3, §5): это индикаторы потерь, а не обмен.
+        "rx-empty" | "tx-err-stat" | "chan-miss" => {
+            let mut ev = make_event(EventKind::Error, Transport::J2534, t, raw);
+            ev.api = format!("J2534 {op}");
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel")),
+            );
+            set_meta_str(&mut ev, "first_op", tag_quoted(body, "first_op"));
+            // `timeout_ms=` в контракте, `timeout=` — запасное имя того же поля.
+            set_num_pairs(
+                &mut ev,
+                body,
+                &[
+                    ("call", "call"),
+                    ("n", "n"),
+                    ("gen", "gen"),
+                    ("th", "thread"),
+                    ("timeout_ms", "timeout_ms"),
+                    ("timeout", "timeout_ms"),
+                    ("last_rc", "last_rc"),
+                ],
+            );
+            // `last_rc` уже разложен выше числами; здесь только дубль в поле `rc`.
+            // Для этих строк `rc=` — код прошлого вызова, а не результат строки.
+            if let Some(rc) =
+                tag_value(body, "last_rc").or_else(|| tag_value(body, "rc")).and_then(num_value)
+            {
+                ev.rc = Some(rc as i32);
+            }
+            ev.text = Some(body.to_string());
+            ev
+        }
+        "chan-possibly-open" | "rx-sof-stat" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            ev.api = format!("J2534 {op}");
+            set_meta_str(
+                &mut ev,
+                "channel",
+                tag_quoted(body, "ch").or_else(|| tag_quoted(body, "channel")),
+            );
+            set_meta_str(&mut ev, "reason", tag_quoted(body, "reason"));
+            set_num_pairs(&mut ev, body, &[("gen", "gen"), ("n", "n")]);
+            ev.text = Some(body.to_string());
             ev
         }
         // SET_CONFIG: параметры канала, включая DATA_RATE (битрейт CAN/ISO15765),
@@ -949,7 +1353,7 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
         // PassThruSetProgrammingVoltage: питание на пине (BitBox/Scanmatik включают 12 В им),
         // PassThruReadVersion: версии FW/DLL/API. Оба — SYS, к обмену не относятся,
         // но без них в логе слепые зоны (почему адаптер молчит 5 секунд и т.п.).
-        "voltage" | "version" | "filter" | "close" | "config-get" | "select" => {
+        "voltage" | "version" | "close" | "config-get" | "select" => {
             let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
             ev.api = format!(
                 "J2534 {}",
@@ -977,6 +1381,9 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             if let Some(rc) = tag_i32(body, "rc") {
                 ev.rc = Some(rc);
             }
+            // Незнакомая операция не теряется: все её `ключ=значение` уходят в meta
+            // (docs/11, общие правила), а строка целиком — в text и raw.
+            apply_kv_meta(&mut ev, body);
             ev.text = Some(body.to_string());
             ev
         }
