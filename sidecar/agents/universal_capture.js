@@ -83,10 +83,21 @@ const WANTED = ['FT_Open', 'FT_OpenEx', 'FT_Close', 'FT_Read', 'FT_Write', 'FT_S
   'FT_GetComPortNumber', 'FT_SetUSBParameters', 'FT_SetEventNotification'];
 
 const hooked = {};
-const listeners = [];      // наши InvocationListener-ы: пауза снимает только их (detachAll убивает recv)
+// Наши InvocationListener-ы: пауза снимает только их (detachAll убивает recv).
+// Каждый помнит ещё адрес и «владельца» — модуль, в чьём коде стоит патч.
+// Зачем: при FreeLibrary код DLL исчезает вместе с нашими байтами, а при
+// повторной загрузке Windows часто кладёт её по ТОМУ ЖЕ base. Пока ключ
+// `j2534Hooked[модуль|base]` не снят, повторный onAdded ранний выход — и второй
+// проход писался в пустоту. Именно так у PCMflash логировался только первый
+// шаг («Идентификация»), а «Чтение фулл флеш» после close давал 0 строк.
+const listeners = [];      // [{ l, addr, owner }]
+const hookedAddrs = new Set();  // адреса, на которых уже стоит наш listener
+let currentOwner = '';     // чей код хукаем сейчас (ставится hook*Module)
 let ftMod = null;          // модуль ftd2xx: нужен для повторной установки после паузы
 let PAUSED = false;        // пауза хуков (логер может снять их на время критичной операции)
-const hookedAddrs = new Set();  // адреса, на которых уже стоит наш listener
+
+function setOwner(owner) { currentOwner = owner || ''; }
+function modKey(mod) { return mod ? (mod.name + '|' + String(mod.base)) : ''; }
 
 // Идемпотентно: повторная установка на тот же адрес (повторный dispatch модуля,
 // повторный onAdded от наблюдателя) давала ВТОРОЙ listener — и каждая строка
@@ -96,8 +107,23 @@ function attachHook(target, cbs) {
   if (hookedAddrs.has(key)) return null;
   const l = Interceptor.attach(target, cbs);
   hookedAddrs.add(key);
-  listeners.push(l);
+  listeners.push({ l: l, addr: key, owner: currentOwner });
   return l;
+}
+
+// Снять хуки одного владельца (его DLL выгружается) и освободить адреса:
+// иначе повторная загрузка по тому же base не поставит хуки заново.
+function detachOwner(owner) {
+  let n = 0;
+  for (let i = listeners.length - 1; i >= 0; i--) {
+    const e = listeners[i];
+    if (owner && e.owner !== owner) continue;
+    try { e.l.detach(); } catch (err) {}
+    hookedAddrs.delete(e.addr);
+    listeners.splice(i, 1);
+    n++;
+  }
+  return n;
 }
 
 function pauseHooks() {
@@ -105,7 +131,7 @@ function pauseHooks() {
   PAUSED = true;
   let n = 0;
   for (let i = 0; i < listeners.length; i++) {
-    try { listeners[i].detach(); n++; } catch (e) {}
+    try { listeners[i].l.detach(); n++; } catch (e) {}
   }
   listeners.length = 0;
   hookedAddrs.clear();  // после detach адреса свободны — resume поставит хуки заново
@@ -228,6 +254,7 @@ function installFtHook(name, addr) {
 
 function hookFtModule(mod) {
   ftMod = mod;
+  setOwner(modKey(mod));
   if (PAUSED) { log('hookctl: ftd2xx загружен, но хуки на паузе — пропускаю'); return; }
   let n = 0;
   try {
@@ -276,6 +303,7 @@ const fileHandles = {};
 const FILE_RE = /\.(bin|csv|cal|hex|0pa|0da|0ka|dat|his|prg|ipo|da2|eng|bsu)$/i;
 let vcpOn = false;   // kernel32-хуки поставлены (после паузы ставим заново)
 function installVcpHooks() {
+  setOwner('');
   if (vcpOn) return;
   vcpOn = true;
   const pCreate = globalExport('CreateFileW');
@@ -480,6 +508,7 @@ function commFlowName(flags) {
 }
 
 function installCommSettingsHooks() {
+  setOwner('');
   if (commHooked) return;
   commHooked = true;
   const pSetState = globalExport('SetCommState');
@@ -1009,6 +1038,7 @@ function ovlSweep() {
 }
 
 function installOverlappedHooks() {
+  setOwner('');
   if (PAUSED || ovlHooked) return;
   ovlHooked = true;
 
@@ -1383,7 +1413,22 @@ function installJ2534Hook(name, addr, mod) {
   } else if (name === 'PassThruClose') {
     attachHook(addr, {
       onEnter: enterSafe(function (args) { this.dev = args[0].toInt32(); }),
-      onLeave: leaveSafe(function (ret) { log('J2534 close dev=' + this.dev + ' rc=' + ret.toInt32()); })
+      onLeave: leaveSafe(function (ret) {
+        log('J2534 close dev=' + this.dev + ' rc=' + ret.toInt32());
+        // Сразу после close приложение обычно выгружает драйвер: PCMflash так и
+        // делает (PassThruClose -> FreeLibrary -> LoadLibrary для следующего
+        // действия). Если Frida не пришлёт onRemoved, проверим сами — модуль уже
+        // пропал из адресного пространства, значит хуки с него снимаем.
+        const modName = mod.name;
+        try {
+          setTimeout(function () {
+            try {
+              if (!Process.findModuleByName(modName)) invalidateModule(modName);
+              rescanDue = true;
+            } catch (e) {}
+          }, 250);
+        } catch (e) {}
+      })
     });
   } else if (name === 'PassThruGetLastError') {
     attachHook(addr, {
@@ -1446,8 +1491,9 @@ function installJ2534Hook(name, addr, mod) {
 
 function hookJ2534Module(mod) {
   if (PAUSED || !mod) return;
-  const key = mod.name + '|' + String(mod.base);
+  const key = modKey(mod);
   if (j2534Hooked[key]) return;
+  setOwner(key);
   let installed = 0;
   // Хукаем КАЖДЫЙ экспорт `PassThru*`, а не фиксированный список: набор функций
   // у вендоров разный (Scanmatik/CHIPSOFT/Tactrix/VXDIAG/MDI), и пропущенная
@@ -1612,6 +1658,7 @@ function lanAttach(mod, name, handlers) {
 function hookLanModule(mod) {
   if (PAUSED || !mod || lanHooked) return;
   lanHooked = true;
+  setOwner(modKey(mod));
   lanSeen = true;
   if (!lanPeerFn) {
     const p = exportAddr(mod, 'getpeername');
@@ -1845,6 +1892,7 @@ function sumBufs(bufs) {
 function hookWinUsbModule(mod) {
   if (PAUSED || !mod || winusbHooked) return;
   winusbHooked = true;
+  setOwner(modKey(mod));
   winusbSeen = true;
   const read = exportAddr(mod, 'WinUsb_ReadPipe');
   const write = exportAddr(mod, 'WinUsb_WritePipe');
@@ -1911,6 +1959,7 @@ function hookHidExport(mod, name, dir) {
 function hookHidModule(mod) {
   if (PAUSED || !mod || hidHooked) return;
   hidHooked = true;
+  setOwner(modKey(mod));
   hidSeen = true;
   hookHidExport(mod, 'HidD_GetFeature', 'RX');
   hookHidExport(mod, 'HidD_SetFeature', 'TX');
@@ -1942,6 +1991,7 @@ function hookLibusbTransfer(mod, name) {
 function hookLibusbModule(mod) {
   if (PAUSED || !mod || libusbHooked) return;
   libusbHooked = true;
+  setOwner(modKey(mod));
   libusbSeen = true;
   hookLibusbTransfer(mod, 'libusb_bulk_transfer');
   hookLibusbTransfer(mod, 'libusb_interrupt_transfer');
@@ -1991,6 +2041,7 @@ function emitUsbTransfer(dir, kind, buf, len, reportFirst) {
   }
 }
 function installUsbPathHooks() {
+  setOwner('');
   if (PAUSED || usbPathHooked) return;
   usbPathHooked = true;
 
@@ -2074,10 +2125,121 @@ function installUsbPathHooks() {
 }
 
 // ── установка/пауза ────────────────────────────────────────────────────────
+// ── перезагрузка модулей (FreeLibrary → LoadLibrary по тому же base) ───────
+// PCMflash закрывает устройство после своей операции: PassThruClose →
+// FreeLibrary(smj2534.dll), а для следующего действия загружает DLL заново —
+// как правило по тому же base. Вместе с кодом DLL исчезают и наши патчи, а
+// ключ `j2534Hooked["smj2534.dll|0x…"]` оставался, поэтому повторный dispatch
+// ранне выходил: второй шаг («Чтение фулл флеш») писал в лог НОЛЬ строк.
+// Теперь выгрузка снимает хуки и освобождает адреса, а загрузка — перевешивает.
+const CAPTURE_MODULE_RE = /(j2534|passthru|pass-thru|ptshim|op20pt|smj2534|vcxpt|evcucm|ucdsj2534|tactrix|scanmatik|chipsoft|^winusb\.dll$|^hid\.dll$|^libusb-1\.0|^ftd2xx\.dll$)/i;
+
+function moduleBaseName(path) {
+  const s = String(path || '');
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+  return (i >= 0 ? s.slice(i + 1) : s).toLowerCase();
+}
+
+// Забыть всё, что мы знали о модуле с таким именем (при любом base): и флаги
+// «уже хукали», и сами listeners. Адреса освобождаются — иначе attachHook
+// откажется ставить хуки на тот же адрес после перезагрузки.
+function invalidateModule(name) {
+  const lower = String(name || '').toLowerCase();
+  if (!lower) return 0;
+  let flags = 0;
+  const keys = Object.keys(j2534Hooked);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase().indexOf(lower + '|') === 0) { delete j2534Hooked[keys[i]]; flags++; }
+  }
+  if (lower === 'ftd2xx.dll') {
+    for (const k in hooked) delete hooked[k];
+    ftMod = null;
+  }
+  if (lower === 'winusb.dll') { winusbHooked = false; winusbSeen = false; }
+  if (lower === 'hid.dll') { hidHooked = false; hidSeen = false; }
+  if (lower.indexOf('libusb-1.0') === 0) { libusbHooked = false; libusbSeen = false; }
+
+  let n = 0;
+  for (let i = listeners.length - 1; i >= 0; i--) {
+    const own = String(listeners[i].owner || '').toLowerCase();
+    if (own.indexOf(lower + '|') !== 0) continue;
+    try { listeners[i].l.detach(); } catch (err) {}
+    hookedAddrs.delete(listeners[i].addr);
+    listeners.splice(i, 1);
+    n++;
+  }
+  if (n > 0 || flags > 0) {
+    log('MODULE ~ ' + name + ' выгружена/перезагружена — снято хуков ' + n +
+        (flags ? ', флагов ' + flags : '') + '; перевесим при загрузке');
+  }
+  return n;
+}
+
+// onRemoved от Frida: чистим сразу, а перевесит обычный dispatch по onAdded.
+function onModuleUnloaded(mod) {
+  if (PAUSED || !mod || !mod.name) return;
+  try { invalidateModule(mod.name); } catch (e) { hookError('module unload', e); }
+}
+
+// Страховка, если onRemoved не пришёл: слушаем сам загрузчик. Любая загрузка
+// DLL с «нашим» именем → забыть старые хуки и пересканировать модули.
+let dllLoadWatched = false;
+let rescanDue = false;
+let rescanTimer = null;
+
+function univRescan() {
+  if (PAUSED || !rescanDue) return;
+  rescanDue = false;
+  try {
+    const mods = Process.enumerateModules();
+    for (let i = 0; i < mods.length; i++) dispatchUniversalModule(mods[i]);
+  } catch (e) { hookError('rescan', e); }
+}
+
+function hookDllLoadWatch() {
+  if (dllLoadWatched) return;
+  const k32 = Process.findModuleByName('kernel32.dll');
+  if (!k32) return;
+  dllLoadWatched = true;
+  setOwner('');
+  const wide = ['LoadLibraryW', 'LoadLibraryExW'];
+  const ansi = ['LoadLibraryA', 'LoadLibraryExA'];
+  let n = 0;
+  function wrap(name, isWide) {
+    const addr = exportAddr(k32, name);
+    if (!addr) return;
+    try {
+      attachHook(addr, {
+        // Чистим ДО того, как модуль появится: наблюдатель Frida вызовет onAdded
+        // прямо внутри LoadLibrary, повесит хуки, и снимать их уже нельзя.
+        // Если же DLL сейчас нет в адресном пространстве — это и есть повторная
+        // загрузка после выгрузки, и старый ключ «модуль|base» надо забыть.
+        onEnter: enterSafe(function (args) {
+          const path = isWide ? str16(args[0]) : str8(args[0]);
+          const base = moduleBaseName(path);
+          if (!base || !CAPTURE_MODULE_RE.test(base)) return;
+          let loaded = null;
+          try { loaded = Process.findModuleByName(base); } catch (e) {}
+          if (!loaded) invalidateModule(base);
+          rescanDue = true;
+        })
+      });
+      n++;
+    } catch (e) { hookError('loadwatch ' + name, e); }
+  }
+  for (let i = 0; i < wide.length; i++) wrap(wide[i], true);
+  for (let i = 0; i < ansi.length; i++) wrap(ansi[i], false);
+  if (!rescanTimer && n > 0) {
+    try { rescanTimer = setInterval(univRescan, 200); } catch (e) { rescanTimer = null; }
+  }
+  if (n > 0) log('universal: сторож загрузки DLL активен (' + n + ' хуков) — перезагрузка адаптерных DLL не теряется');
+}
+
 function dispatchUniversalModule(mod) {
   if (!mod || !mod.name) return;
   try {
-    if (J2534_MODULE_RE.test(mod.name)) hookJ2534Module(mod);
+    if (/^ftd2xx\.dll$/i.test(mod.name)) { if (!ftMod) hookFtModule(mod); }
+    else if (J2534_MODULE_RE.test(mod.name)) hookJ2534Module(mod);
     else if (LAN_MODULE_RE.test(mod.name)) hookLanModule(mod);
     else if (/^winusb\.dll$/i.test(mod.name)) hookWinUsbModule(mod);
     else if (/^hid\.dll$/i.test(mod.name)) hookHidModule(mod);
@@ -2099,7 +2261,8 @@ function installUniversalHooks() {
         Process.attachModuleObserver({
           onAdded: function (mod) {
             try { if (!PAUSED) dispatchUniversalModule(mod); } catch (e) { hookError('observer', e); }
-          }
+          },
+          onRemoved: function (mod) { onModuleUnloaded(mod); }
         });
         log('universal: module observer armed (J2534/WinUSB/HID/libusb)');
       } else {
@@ -2107,6 +2270,7 @@ function installUniversalHooks() {
       }
     } catch (e) { hookError('module observer', e); }
   }
+  hookDllLoadWatch();
   log('universal hooks: ftdi2xx=' + (ftMod ? 1 : 0) + ' j2534=' + j2534ModulesHooked +
       ' lan=' + (lanSeen ? 1 : 0) +
       ' winusb=' + (winusbSeen ? 1 : 0) + ' hid=' + (hidSeen ? 1 : 0) + ' libusb=' + (libusbSeen ? 1 : 0) +
@@ -2116,6 +2280,8 @@ function installUniversalHooks() {
 // После паузы все Interceptor-хуки сняты: сбрасываем флаги и ставим заново.
 function resumeUniversalHooks() {
   j2534Hooked = {};
+  dllLoadWatched = false;   // после паузы сторож загрузки ставится заново
+  rescanDue = true;
   j2534ModulesHooked = 0;
   lanHooked = false; lanPeerFn = null; lanLocalFn = null;
   winusbHooked = false; hidHooked = false; libusbHooked = false; usbPathHooked = false;
