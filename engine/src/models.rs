@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 // ───────────────────────────── события потока ─────────────────────────────
 
@@ -245,6 +246,17 @@ pub struct SessionCounts {
     /// Холостые опросы (`J2534 rx-empty`): штатные таймауты, не ошибки.
     #[serde(default)]
     pub empty_polls: u64,
+    /// Каналы, замеченные в работе без `PassThruConnect` (`J2534 chan-miss`).
+    ///
+    /// Не ошибка: приложение может вообще не звать `PassThruConnect` (канал
+    /// открывает драйвер), и тогда все вызовы идут с `rc=0` — сессия успешна.
+    /// Держим отдельно, чтобы «Ошибок: 3» не появлялось в рабочем логе.
+    #[serde(default)]
+    pub untracked_channels: u64,
+    /// Протоколы, встреченные в TX: `"0x8003" -> 11096`. Считаем по запросам,
+    /// потому что только они задают протокол явно; в отчёт попадает верхний.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub protocols: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

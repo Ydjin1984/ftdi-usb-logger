@@ -288,10 +288,63 @@ fn empty_polls_are_counted_separately_from_errors() {
     w.append(&mut poll).unwrap();
 
     let mut err = Event::new(EventKind::Error, Transport::J2534, 2.0, "");
-    err.api = "J2534 chan-miss".into();
+    err.api = "J2534 dpdu-crc".into();
     w.append(&mut err).unwrap();
 
     let meta = w.meta.clone();
     assert_eq!(meta.counts.empty_polls, 3, "холостые опросы считаются по n");
-    assert_eq!(meta.counts.errors, 1, "ошибкой остаётся только chan-miss");
+    assert_eq!(meta.counts.errors, 1, "настоящая ошибка остаётся ошибкой");
+    assert_eq!(meta.counts.untracked_channels, 0);
+}
+
+#[test]
+fn chan_miss_is_untracked_channel_not_error() {
+    // Лог 20261119-173309-pcmflash: рабочий дамп флеша 4 МБ, все вызовы rc=0,
+    // но отчёт показывал «Ошибок: 3». Причина — приложение не зовёт
+    // PassThruConnect вовсе, канал открывает драйвер. Это не ошибка сессии.
+    let td = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(td.path()).unwrap();
+    let mut w = store.create(SessionMeta::new("chan-1", "chan")).unwrap();
+
+    for (i, load) in [1u64, 2, 3].iter().enumerate() {
+        let mut ev = Event::new(EventKind::Error, Transport::J2534, i as f64, "");
+        ev.api = "J2534 chan-miss".into();
+        ev.meta = serde_json::json!({"channel": "1", "gen": 1, "mod": load, "first_op": "ioctl"});
+        w.append(&mut ev).unwrap();
+    }
+
+    let meta = w.meta.clone();
+    assert_eq!(meta.counts.errors, 0, "chan-miss не ошибка сессии");
+    assert_eq!(meta.counts.untracked_channels, 3, "считается отдельно, по загрузкам DLL");
+    assert!(
+        meta.counts.error_samples.is_empty(),
+        "в расшифровку ошибок chan-miss не попадает"
+    );
+}
+
+#[test]
+fn protocols_are_counted_from_tx() {
+    // «Всё ли мы собираем»: протокол есть в каждом событии, но в отчёте о нём
+    // не было ни слова — bulk-сессия без шагов не говорила, по какой шине шла.
+    let td = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(td.path()).unwrap();
+    let mut w = store.create(SessionMeta::new("proto-1", "proto")).unwrap();
+
+    for i in 0..3 {
+        let mut tx = Event::new(EventKind::Tx, Transport::J2534, i as f64, "00 01");
+        tx.meta = serde_json::json!({"protocol": "0x8003"});
+        w.append(&mut tx).unwrap();
+    }
+    let mut iso = Event::new(EventKind::Tx, Transport::J2534, 9.0, "00 01");
+    iso.meta = serde_json::json!({"protocol": "0x8005"});
+    w.append(&mut iso).unwrap();
+
+    // Ответы протокол не двигают: иначе SOF-строки удваивали бы счётчик.
+    let mut rx = Event::new(EventKind::Rx, Transport::J2534, 9.5, "00 02");
+    rx.meta = serde_json::json!({"protocol": "0x8003"});
+    w.append(&mut rx).unwrap();
+
+    let meta = w.meta.clone();
+    assert_eq!(meta.counts.protocols.get("0x8003"), Some(&3));
+    assert_eq!(meta.counts.protocols.get("0x8005"), Some(&1));
 }

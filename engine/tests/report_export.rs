@@ -25,6 +25,8 @@ fn sample_meta() -> SessionMeta {
         errors: 0,
         error_samples: Vec::new(),
         empty_polls: 0,
+        untracked_channels: 0,
+        protocols: Default::default(),
     };
     meta
 }
@@ -179,4 +181,42 @@ fn empty_session_report_has_no_phase_but_valid_header() {
     let md = report::render_markdown(&meta, &[]);
     assert!(md.contains("flowchart TD"));
     assert!(md.contains("Шагов нет"));
+}
+
+#[test]
+fn bulk_session_without_steps_reports_counts_not_zeros() {
+    // Лог 20261119-173309-pcmflash: 11096 запросов чтения флеша прошли без
+    // «шагов», и «Итоги» показывали 0 при 132492 B TX в шапке того же отчёта.
+    let mut meta = SessionMeta::new("bulk-1", "pcmflash");
+    meta.status = "finished".into();
+    meta.transport = "j2534".into();
+    meta.counts = SessionCounts {
+        events: 33585,
+        tx: 11096,
+        rx: 22192,
+        tx_bytes: 132492,
+        rx_bytes: 2662699,
+        steps: 0,
+        files: 18,
+        errors: 0,
+        error_samples: Vec::new(),
+        empty_polls: 0,
+        untracked_channels: 3,
+        protocols: [("0x8003".to_string(), 11096u64)].into_iter().collect(),
+    };
+
+    let txt = report::render_text(&meta, &[]);
+    assert!(txt.contains("ИТОГО: шагов=0  посылок=11096  TX=132492B  RX=2662699B"), "{txt}");
+    assert!(txt.contains("шаги не распознаны"), "источник объёма назван");
+    assert!(txt.contains("0x8003 (ISO 14230"), "протокол виден в текстовом отчёте");    assert!(txt.contains("каналов без PassThruConnect: 3"), "{txt}");
+
+    let md = report::render_markdown(&meta, &[]);
+    assert!(md.contains("| Посылок | 11096 |"), "{md}");
+    assert!(md.contains("| TX, байт | 132492 |"), "{md}");
+    assert!(md.contains("| RX, байт | 2662699 |"), "{md}");
+    assert!(md.contains("по счётчикам сессии"), "источник объёма назван");
+    assert!(md.contains("| Протокол | 0x8003 (ISO 14230 KWP2000) · 11096 из 11096 |"), "{md}");
+    assert!(md.contains("| Каналов без Connect | 3 |"), "{md}");
+    // Ошибок нет — chan-miss в них не попадает.
+    assert!(md.contains("| Ошибок | 0 |"), "{md}");
 }

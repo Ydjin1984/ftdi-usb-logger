@@ -504,6 +504,13 @@ impl SessionWriter {
             EventKind::Tx => {
                 self.meta.counts.tx += 1;
                 self.meta.counts.tx_bytes += payload_len;
+                // Протокол сессии виден только по запросам: в ответах он тоже
+                // есть, но там же лежат SOF-строки без полезной нагрузки.
+                if let Some(proto) = ev.meta.get("protocol").and_then(|v| v.as_str()) {
+                    if !proto.is_empty() {
+                        *self.meta.counts.protocols.entry(proto.to_string()).or_insert(0) += 1;
+                    }
+                }
             }
             EventKind::Rx => {
                 self.meta.counts.rx += 1;
@@ -511,22 +518,30 @@ impl SessionWriter {
             }
             EventKind::File => self.meta.counts.files += 1,
             EventKind::Error => {
-                self.meta.counts.errors += 1;
-                // Счётчик без расшифровки бесполезен: «ошибок=1» в отчёте
-                // заставлял лезть в events.jsonl, чтобы узнать, что это.
-                if self.meta.counts.error_samples.len() < ERROR_SAMPLES_MAX {
-                    let step = match ev.step {
-                        Some(s) => format!("шаг {s} "),
-                        None => String::new(),
-                    };
-                    let api = if ev.api.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{} ", ev.api)
-                    };
-                    let text = ev.text.clone().unwrap_or_default();
-                    let line = format!("+{:.3}s {step}{api}{text}", ev.t);
-                    self.meta.counts.error_samples.push(line.trim_end().to_string());
+                // `chan-miss` — не ошибка сессии: канал, открытый мимо
+                // `PassThruConnect`, штатно встречается у приложений, которые
+                // не зовут его вовсе (лог 20261119-173309-pcmflash: 3 загрузки
+                // DLL, хуки свежие, все вызовы rc=0). Держим отдельным счётчиком.
+                if ev.api == "J2534 chan-miss" {
+                    self.meta.counts.untracked_channels += 1;
+                } else {
+                    self.meta.counts.errors += 1;
+                    // Счётчик без расшифровки бесполезен: «ошибок=1» в отчёте
+                    // заставлял лезть в events.jsonl, чтобы узнать, что это.
+                    if self.meta.counts.error_samples.len() < ERROR_SAMPLES_MAX {
+                        let step = match ev.step {
+                            Some(s) => format!("шаг {s} "),
+                            None => String::new(),
+                        };
+                        let api = if ev.api.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{} ", ev.api)
+                        };
+                        let text = ev.text.clone().unwrap_or_default();
+                        let line = format!("+{:.3}s {step}{api}{text}", ev.t);
+                        self.meta.counts.error_samples.push(line.trim_end().to_string());
+                    }
                 }
             }
             _ => {}

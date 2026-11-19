@@ -112,6 +112,15 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         "  транспорт(ы): {transport}   версия движка: {}   машина: {}\n",
         meta.engine_version, meta.host
     ));
+    if let Some(proto) = protocol_summary(meta) {
+        out.push_str(&format!("  протокол: {proto}\n"));
+    }
+    if meta.counts.untracked_channels > 0 {
+        out.push_str(&format!(
+            "  каналов без PassThruConnect: {} (не ошибка — см. docs/12 §10)\n",
+            meta.counts.untracked_channels
+        ));
+    }
     if let Some(tool) = &meta.tool_path {
         out.push_str(&format!("  инструмент: {tool}"));
         if let Some(pid) = meta.pid {
@@ -260,9 +269,25 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
 
     out.push_str(DASH);
     out.push('\n');
-    let tx: u64 = steps.iter().map(|s| s.tx_bytes).sum();
-    let rx: u64 = steps.iter().map(|s| s.rx_bytes).sum();
-    let exchanges: u64 = steps.iter().map(|s| s.exchanges).sum();
+    // Объём сессии берём из счётчиков: шаги распознаются не всегда (bulk-чтение
+    // флеша идёт как 11k обменов без шагов), и суммирование по шагам обнуляло
+    // «Итоги» — 0 при 132492 B TX в шапке того же отчёта.
+    let by_steps = !steps.is_empty();
+    let tx: u64 = if by_steps {
+        steps.iter().map(|s| s.tx_bytes).sum()
+    } else {
+        meta.counts.tx_bytes
+    };
+    let rx: u64 = if by_steps {
+        steps.iter().map(|s| s.rx_bytes).sum()
+    } else {
+        meta.counts.rx_bytes
+    };
+    let exchanges: u64 = if by_steps {
+        steps.iter().map(|s| s.exchanges).sum()
+    } else {
+        meta.counts.tx
+    };
     let denied: u64 = steps.iter().map(|s| s.verdict.denied).sum();
     let no_answer: u64 = steps.iter().map(|s| s.verdict.no_answer).sum();
     out.push_str(&format!(
@@ -274,6 +299,9 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         denied,
         no_answer,
     ));
+    if !by_steps {
+        out.push_str("  объём — по счётчикам сессии (шаги не распознаны)\n");
+    }
     if !meta.notes.is_empty() {
         out.push_str(DASH);
         out.push('\n');
@@ -286,6 +314,37 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
 }
 
 // ───────────────────────────── report.md ────────────────────────────────
+
+/// Читаемое имя протокола J2534 по `ProtocolID` из PASSTHRU_MSG.
+fn protocol_label(proto: &str) -> String {
+    let name = match proto.to_ascii_lowercase().as_str() {
+        "0x8001" => "J1850 PWM",
+        "0x8002" => "J1850 VPW",
+        "0x8003" => "ISO 14230 KWP2000",
+        "0x8004" => "ISO 9141",
+        "0x8005" => "CAN 11/500",
+        "0x8006" => "CAN 29/500",
+        "0x8007" => "CAN 11/250",
+        "0x8008" => "CAN 29/250",
+        "0x8009" => "ISO 15765 (CAN)",
+        _ => "",
+    };
+    if name.is_empty() {
+        proto.to_string()
+    } else {
+        format!("{proto} ({name})")
+    }
+}
+
+/// Основной протокол сессии: самый частый в TX и его доля.
+///
+/// Нужен, потому что в bulk-сессиях (чтение/запись флеша) шагов нет, и отчёт
+/// иначе вообще не говорил, по какой шине шёл обмен.
+fn protocol_summary(meta: &SessionMeta) -> Option<String> {
+    let (proto, n) = meta.counts.protocols.iter().max_by_key(|(_, n)| **n)?;
+    let total: u64 = meta.counts.protocols.values().sum();
+    Some(format!("{} · {} из {}", protocol_label(proto), n, total))
+}
 
 fn md_cell(text: &str) -> String {
     text.replace('|', "/").replace('\n', " ")
@@ -365,30 +424,42 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Отчёт сессии «{}»\n\n", meta.label));
     out.push_str("| Поле | Значение |\n|---|---|\n");
-    let rows: Vec<(String, String)> = vec![
-        ("ID".into(), meta.id.clone()),
-        ("Начало".into(), meta.started_at.clone()),
-        (
-            "Конец".into(),
-            meta.ended_at.clone().unwrap_or_else(|| "—".into()),
-        ),
-        ("Статус".into(), meta.status.clone()),
-        ("Транспорт".into(), meta.transport.clone()),
-        ("Машина".into(), meta.host.clone()),
-        (
-            "Инструмент".into(),
-            meta.tool_path.clone().unwrap_or_else(|| "—".into()),
-        ),
-        ("Событий".into(), meta.counts.events.to_string()),
-        ("Шагов".into(), steps.len().to_string()),
-        ("TX, байт".into(), meta.counts.tx_bytes.to_string()),
-        ("RX, байт".into(), meta.counts.rx_bytes.to_string()),
-        ("Ошибок".into(), meta.counts.errors.to_string()),
-        (
-            "Холостых опросов".into(),
-            meta.counts.empty_polls.to_string(),
-        ),
-    ];
+    let rows: Vec<(String, String)> = {
+        let mut rows = vec![
+            ("ID".into(), meta.id.clone()),
+            ("Начало".into(), meta.started_at.clone()),
+            (
+                "Конец".into(),
+                meta.ended_at.clone().unwrap_or_else(|| "—".into()),
+            ),
+            ("Статус".into(), meta.status.clone()),
+            ("Транспорт".into(), meta.transport.clone()),
+            ("Машина".into(), meta.host.clone()),
+            (
+                "Инструмент".into(),
+                meta.tool_path.clone().unwrap_or_else(|| "—".into()),
+            ),
+            ("Событий".into(), meta.counts.events.to_string()),
+            ("Шагов".into(), steps.len().to_string()),
+            ("TX, байт".into(), meta.counts.tx_bytes.to_string()),
+            ("RX, байт".into(), meta.counts.rx_bytes.to_string()),
+            ("Ошибок".into(), meta.counts.errors.to_string()),
+            (
+                "Холостых опросов".into(),
+                meta.counts.empty_polls.to_string(),
+            ),
+        ];
+        if let Some(proto) = protocol_summary(meta) {
+            rows.push(("Протокол".into(), proto));
+        }
+        if meta.counts.untracked_channels > 0 {
+            rows.push((
+                "Каналов без Connect".into(),
+                meta.counts.untracked_channels.to_string(),
+            ));
+        }
+        rows
+    };
     for (key, value) in rows {
         out.push_str(&format!("| {} | {} |\n", md_cell(&key), md_cell(&value)));
     }
@@ -437,9 +508,24 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     out.push_str("```\n\n");
 
     out.push_str("## Итоги\n\n| Метрика | Значение |\n|---|---|\n");
-    let exchanges: u64 = steps.iter().map(|s| s.exchanges).sum();
-    let tx: u64 = steps.iter().map(|s| s.tx_bytes).sum();
-    let rx: u64 = steps.iter().map(|s| s.rx_bytes).sum();
+    // См. render_text: без шагов объём считаем по счётчикам сессии, иначе
+    // «Итоги» обнулялись и противоречили шапке отчёта.
+    let by_steps = !steps.is_empty();
+    let exchanges: u64 = if by_steps {
+        steps.iter().map(|s| s.exchanges).sum()
+    } else {
+        meta.counts.tx
+    };
+    let tx: u64 = if by_steps {
+        steps.iter().map(|s| s.tx_bytes).sum()
+    } else {
+        meta.counts.tx_bytes
+    };
+    let rx: u64 = if by_steps {
+        steps.iter().map(|s| s.rx_bytes).sum()
+    } else {
+        meta.counts.rx_bytes
+    };
     let denied: u64 = steps.iter().map(|s| s.verdict.denied).sum();
     let no_answer: u64 = steps.iter().map(|s| s.verdict.no_answer).sum();
     let unparsed: u64 = steps.iter().map(|s| s.verdict.unparsed).sum();
@@ -447,6 +533,15 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         ("Посылок", exchanges.to_string()),
         ("TX, байт", tx.to_string()),
         ("RX, байт", rx.to_string()),
+        (
+            "Объём",
+            if by_steps {
+                "по шагам"
+            } else {
+                "по счётчикам сессии (шаги не распознаны)"
+            }
+            .to_string(),
+        ),
         ("denied", denied.to_string()),
         ("no-answer", no_answer.to_string()),
         ("unparsed", unparsed.to_string()),

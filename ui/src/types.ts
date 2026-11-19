@@ -46,6 +46,14 @@ export interface SessionCounts {
   steps: number;
   files: number;
   errors: number;
+  /** Первые ошибки с расшифровкой — в отчёте это раздел «Ошибки». */
+  error_samples?: string[];
+  /** Холостые опросы (`rx-empty`): штатные таймауты, не ошибки. */
+  empty_polls?: number;
+  /** Каналы, замеченные без `PassThruConnect` (`chan-miss`): тоже не ошибки. */
+  untracked_channels?: number;
+  /** Протоколы по запросам: `{"0x8003": 11096}`. */
+  protocols?: Record<string, number>;
 }
 
 export interface AdapterInfo {
