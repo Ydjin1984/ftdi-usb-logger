@@ -5,6 +5,49 @@ import { fmtDate, fmtNum, fmtBytesShort } from "../format";
 import { store } from "../store";
 import { openUsbpcapDialog } from "./dialogs";
 import type { FtdiDevice, J2534Driver, SessionMeta, ToolProcess, UsbDevice } from "../types";
+import { msg, t } from "../i18n";
+
+msg({
+  "СЕССИИ": "SESSIONS",
+  "USB-УСТРОЙСТВА": "USB DEVICES",
+  "ПРОГРАММЫ": "PROGRAMS",
+  "записать USB-шину (USBPcap)": "record USB bus (USBPcap)",
+  "сырой захват USB через драйвер USBPcap (нужны права администратора)":
+    "raw USB capture through the USBPcap driver (administrator rights required)",
+  "авто": "auto",
+  "окно + драйверы USB/FTDI/J2534 + известные инструменты":
+    "window + USB/FTDI/J2534 drivers + known tools",
+  "только процессы с USB/FTDI/J2534-модулями": "only processes with USB/FTDI/J2534 modules",
+  "окна": "windows",
+  "только процессы с видимым окном": "only processes with a visible window",
+  "все": "all",
+  "все процессы пользователя": "all user processes",
+  "прицепиться к процессу по PID вручную": "attach to a process by PID manually",
+  "подключиться к процессу с этим PID": "attach to the process with this PID",
+  "Демо-режим: сессия сгенерирована локально.": "Demo mode: the session is generated locally.",
+  "Сессий пока нет. Запустите программу, найдите её в «ПРОГРАММЫ» и нажмите «подключить» (или введите PID вручную).":
+    "No sessions yet. Start the tool, find it in \"PROGRAMS\" and press \"attach\" (or enter a PID manually).",
+  "импорт": "import",
+  "шагов": "steps",
+  "USB-устройства не найдены (или нет доступа к PnP-дереву).":
+    "No USB devices found (or no access to the PnP tree).",
+  "J2534-драйверы не зарегистрированы. Установите драйвер адаптера (Scanmatik, CHIPSOFT, OpenPort, VXDIAG…).":
+    "No J2534 drivers registered. Install the adapter driver (Scanmatik, CHIPSOFT, OpenPort, VXDIAG…).",
+  "J2534-драйвер подхватывается хуком, когда программа загрузит его DLL. Прицепитесь к программе и работайте как обычно.":
+    "A J2534 driver is captured by the hook when the tool loads its DLL. Attach to the tool and work as usual.",
+  "Опрос процессов…": "Scanning processes…",
+  "Процессов с USB/FTDI/J2534-модулями не видно. Переключите фильтр на «окна» или «все» и найдите программу вручную.":
+    "No processes with USB/FTDI/J2534 modules. Switch the filter to \"windows\" or \"all\" and find the tool manually.",
+  "Процессов нет. Запустите программу и обновите список; либо введите её PID вручную выше.":
+    "No processes. Start the tool and refresh the list, or enter its PID above.",
+  "подключить": "attach",
+  "нужен админ": "admin required",
+  "не удалось прочитать модули процесса — запустите логер от администратора":
+    "failed to read the process modules — start the logger as administrator",
+  "нет dll": "no dll",
+  "обновить": "refresh",
+  "окно": "window",
+});
 
 type UsbTab = "usb" | "j2534";
 
@@ -32,13 +75,13 @@ export class Rail {
   constructor() {
     this.el = el("aside", "rail");
 
-    const sessions = panel("СЕССИИ", () => void store.refreshSessions(), "refresh");
+    const sessions = panel(t("СЕССИИ"), () => void store.refreshSessions(), "refresh");
     this.sessionsBody = sessions.body;
     this.sessionsCount = sessions.count;
     sessions.root.classList.add("panel--grow");
 
     // USB / J2534 — один панель с табами
-    const usb = panel("USB-УСТРОЙСТВА", () => void store.refreshTargets(), "refresh");
+    const usb = panel(t("USB-УСТРОЙСТВА"), () => void store.refreshTargets(), "refresh");
     this.usbBody = usb.body;
     this.usbCount = usb.count;
     this.usbTabs = el("div", "tabs");
@@ -62,9 +105,9 @@ export class Rail {
     }
     const usbActions = el("div", "rail-controls");
     usbActions.style.padding = "5px 6px";
-    const raw = el("button", "btn btn--sm", "записать USB-шину (USBPcap)");
+    const raw = el("button", "btn btn--sm", t("записать USB-шину (USBPcap)"));
     raw.type = "button";
-    raw.title = "сырой захват USB через драйвер USBPcap (нужны права администратора)";
+    raw.title = t("сырой захват USB через драйвер USBPcap (нужны права администратора)");
     raw.addEventListener("click", () => {
       const caps = store.state.health?.capabilities;
       void openUsbpcapDialog(caps?.usbpcap_devices ?? []);
@@ -74,7 +117,7 @@ export class Rail {
     usb.root.insertBefore(this.usbTabs, usb.body);
     this.usbBody.classList.add("panel__body--short");
 
-    const tools = panel("ПРОГРАММЫ", () => void store.refreshTargets(), "refresh");
+    const tools = panel(t("ПРОГРАММЫ"), () => void store.refreshTargets(), "refresh");
     this.toolsBody = tools.body;
     this.toolsCount = tools.count;
     this.toolsBody.classList.add("panel__body--short");
@@ -84,10 +127,10 @@ export class Rail {
     this.toolsModes = el("div", "filters");
     this.toolsModes.style.flexWrap = "wrap";
     for (const [id, label, title] of [
-      ["auto", "авто", "окно + драйверы USB/FTDI/J2534 + известные инструменты"],
-      ["usb", "usb", "только процессы с USB/FTDI/J2534-модулями"],
-      ["window", "окна", "только процессы с видимым окном"],
-      ["all", "все", "все процессы пользователя"],
+      ["auto", t("авто"), t("окно + драйверы USB/FTDI/J2534 + известные инструменты")],
+      ["usb", t("usb"), t("только процессы с USB/FTDI/J2534-модулями")],
+      ["window", t("окна"), t("только процессы с видимым окном")],
+      ["all", t("все"), t("все процессы пользователя")],
     ] as Array<[typeof store.state.toolsMode, string, string]>) {
       const b = el("button", "chip", label);
       b.type = "button";
@@ -106,10 +149,10 @@ export class Rail {
     this.pidInput.type = "number";
     this.pidInput.min = "1";
     this.pidInput.placeholder = "PID";
-    this.pidInput.title = "прицепиться к процессу по PID вручную";
+    this.pidInput.title = t("прицепиться к процессу по PID вручную");
     const pidBtn = el("button", "btn btn--sm", "→");
     pidBtn.type = "button";
-    pidBtn.title = "подключиться к процессу с этим PID";
+    pidBtn.title = t("подключиться к процессу с этим PID");
     const doAttach = (): void => {
       const pid = Number(this.pidInput.value);
       void store.attachPid(pid);
@@ -163,8 +206,8 @@ export class Rail {
       this.sessionsBody.append(
         emptyBlock(
           s.mode === "demo"
-            ? "Демо-режим: сессия сгенерирована локально."
-            : "Сессий пока нет. Запустите программу, найдите её в «ПРОГРАММЫ» и нажмите «подключить» (или введите PID вручную).",
+            ? t("Демо-режим: сессия сгенерирована локально.")
+            : t("Сессий пока нет. Запустите программу, найдите её в «ПРОГРАММЫ» и нажмите «подключить» (или введите PID вручную)."),
         ),
       );
       return;
@@ -175,12 +218,12 @@ export class Rail {
       const title = el("div", "session-item__title");
       title.append(el("span", "", meta.label || meta.id));
       if (meta.status === "recording") title.append(el("span", "badge-rec", "REC"));
-      if (meta.transport === "import") title.append(el("span", "badge-tag", "импорт"));
+      if (meta.transport === "import") title.append(el("span", "badge-tag", t("импорт")));
       else if (meta.transport === "mixed") title.append(el("span", "badge-tag", "mix"));
       const time = el("div", "session-item__time", fmtDate(meta.started_at));
       const stats = el("div", "session-item__meta");
       stats.append(
-        spanBold("шагов", fmtNum(meta.counts?.steps ?? 0)),
+        spanBold(t("шагов"), fmtNum(meta.counts?.steps ?? 0)),
         spanBold("TX", fmtBytesShort(meta.counts?.tx_bytes ?? 0) + "B"),
         spanBold("RX", fmtBytesShort(meta.counts?.rx_bytes ?? 0) + "B"),
       );
@@ -216,7 +259,7 @@ export class Rail {
       const present = s.usbDevices.filter((d) => d.present);
       const absent = s.usbDevices.filter((d) => !d.present);
       if (!s.usbDevices.length) {
-        this.usbBody.append(emptyBlock("USB-устройства не найдены (или нет доступа к PnP-дереву)."));
+        this.usbBody.append(emptyBlock(t("USB-устройства не найдены (или нет доступа к PnP-дереву).")));
         return;
       }
       for (const d of [...present, ...absent]) this.usbBody.append(usbRow(d));
@@ -224,7 +267,7 @@ export class Rail {
       if (!s.j2534Drivers.length) {
         this.usbBody.append(
           emptyBlock(
-            "J2534-драйверы не зарегистрированы. Установите драйвер адаптера (Scanmatik, CHIPSOFT, OpenPort, VXDIAG…).",
+            t("J2534-драйверы не зарегистрированы. Установите драйвер адаптера (Scanmatik, CHIPSOFT, OpenPort, VXDIAG…)."),
           ),
         );
         return;
@@ -232,7 +275,7 @@ export class Rail {
       for (const drv of s.j2534Drivers) this.usbBody.append(j2534Row(drv));
       this.usbBody.append(
         emptyBlock(
-          "J2534-драйвер подхватывается хуком, когда программа загрузит его DLL. Прицепитесь к программе и работайте как обычно.",
+          t("J2534-драйвер подхватывается хуком, когда программа загрузит его DLL. Прицепитесь к программе и работайте как обычно."),
         ),
       );
     }
@@ -255,43 +298,43 @@ export class Rail {
       this.toolsBody.append(
         emptyBlock(
           store.state.loadingTargets
-            ? "Опрос процессов…"
+            ? t("Опрос процессов…")
             : store.state.toolsMode === "usb"
-              ? "Процессов с USB/FTDI/J2534-модулями не видно. Переключите фильтр на «окна» или «все» и найдите программу вручную."
-              : "Процессов нет. Запустите программу и обновите список; либо введите её PID вручную выше.",
+              ? t("Процессов с USB/FTDI/J2534-модулями не видно. Переключите фильтр на «окна» или «все» и найдите программу вручную.")
+              : t("Процессов нет. Запустите программу и обновите список; либо введите её PID вручную выше."),
         ),
       );
       return;
     }
-    for (const t of tools) {
+    for (const tool of tools) {
       const row = el("div", "device");
-      if (store.state.status?.target?.pid === t.pid) row.classList.add("is-target");
+      if (store.state.status?.target?.pid === tool.pid) row.classList.add("is-target");
       const ic = el("div", "device__icon");
-      ic.appendChild(icon(t.has_j2534 ? "chip" : "usb"));
+      ic.appendChild(icon(tool.has_j2534 ? "chip" : "usb"));
       const body = el("div");
       const title = el("div", "device__title");
-      title.append(el("span", "", t.known_tool || t.name));
-      const attach = el("button", "btn btn--sm", "подключить");
+      title.append(el("span", "", tool.known_tool || tool.name));
+      const attach = el("button", "btn btn--sm", t("подключить"));
       attach.type = "button";
       attach.style.marginTop = "3px";
       attach.addEventListener("click", (e) => {
         e.stopPropagation();
-        void store.attach(t.pid, t.known_tool || t.name.replace(/\.exe$/i, ""));
+        void store.attach(tool.pid, tool.known_tool || tool.name.replace(/\.exe$/i, ""));
       });
       const badges = el("div", "badges");
-      for (const cap of capBadges(t)) badges.append(el("span", "badge-tag", cap));
-      if (t.modules_denied) {
-        const denied = el("span", "badge-tag badge-tag--warn", "нужен админ");
-        denied.title = "не удалось прочитать модули процесса — запустите логер от администратора";
+      for (const cap of capBadges(tool)) badges.append(el("span", "badge-tag", cap));
+      if (tool.modules_denied) {
+        const denied = el("span", "badge-tag badge-tag--warn", t("нужен админ"));
+        denied.title = t("не удалось прочитать модули процесса — запустите логер от администратора");
         badges.append(denied);
       }
       const sub = el("div", "device__sub");
-      sub.textContent = `pid ${t.pid}${t.arch ? ` · ${t.arch}` : ""}${t.window_title ? ` · ${t.window_title}` : ""}`;
+      sub.textContent = `pid ${tool.pid}${tool.arch ? ` · ${tool.arch}` : ""}${tool.window_title ? ` · ${tool.window_title}` : ""}`;
       body.append(title, badges, sub);
-      if (t.exe) body.append(el("div", "device__sub", t.exe));
+      if (tool.exe) body.append(el("div", "device__sub", tool.exe));
       body.append(attach);
       row.append(ic, body);
-      row.title = [t.exe, t.cmdline].filter(Boolean).join("\n");
+      row.title = [tool.exe, tool.cmdline].filter(Boolean).join("\n");
       this.toolsBody.append(row);
     }
   }
@@ -299,13 +342,13 @@ export class Rail {
 
 /* ── элементы ───────────────────────────────────────────────────────────── */
 
-function capBadges(t: ToolProcess): string[] {
+function capBadges(tool: ToolProcess): string[] {
   const out: string[] = [];
-  if (t.has_ftd2xx) out.push("FTDI");
-  if (t.has_j2534) out.push("J2534");
-  if (t.has_usb) out.push("USB");
-  if (t.window_title) out.push("окно");
-  if (!out.length && t.capabilities?.length) out.push(...t.capabilities);
+  if (tool.has_ftd2xx) out.push("FTDI");
+  if (tool.has_j2534) out.push("J2534");
+  if (tool.has_usb) out.push("USB");
+  if (tool.window_title) out.push(t("окно"));
+  if (!out.length && tool.capabilities?.length) out.push(...tool.capabilities);
   return out;
 }
 
@@ -345,7 +388,7 @@ function j2534Row(d: J2534Driver): HTMLElement {
   const title = el("div", "device__title");
   title.append(el("span", "", d.name || d.registry_key));
   if (d.dll_present) title.append(el("span", "badge-tag", "dll"));
-  else title.append(el("span", "badge-tag badge-tag--warn", "нет dll"));
+  else title.append(el("span", "badge-tag badge-tag--warn", t("нет dll")));
   const sub = el("div", "device__sub");
   sub.textContent = [d.vendor, d.version].filter(Boolean).join(" · ");
   const sub2 = el("div", "device__sub", d.dll || "");
@@ -371,7 +414,7 @@ function panel(title: string, onRefresh: () => void, refreshIcon: string) {
   const root = el("section", "panel");
   const head = el("div", "panel__head");
   const count = el("span", "panel__count", "0");
-  head.append(el("span", "panel__title", title), count, iconButton(refreshIcon, "обновить", onRefresh));
+  head.append(el("span", "panel__title", title), count, iconButton(refreshIcon, t("обновить"), onRefresh));
   const body = el("div", "panel__body");
   root.append(head, body);
   return { root, body, count };

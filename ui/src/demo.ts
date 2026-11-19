@@ -2,6 +2,23 @@
  *  Нужен для проверки интерфейса, обучения и скриншотов. */
 
 import type { Event, J2534Driver, SessionCounts, SessionMeta, StepSummary, UsbDevice } from "./types";
+import { msg, t } from "./i18n";
+
+msg({
+  "запись": "write",
+  "цикл питания после записи": "power cycle after write",
+  "hooks: 36 установлено": "hooks: 36 installed",
+  "нажал идентификаторы": "pressed identifiers",
+  "чтение калибровки": "reading calibration",
+  "запись тюна": "tune write",
+  "нажал идентификаторы · 12.4 с · TX 26 / 22 026 B · RX 25 523 B":
+    "pressed identifiers · 12.4 s · TX 26 / 22 026 B · RX 25 523 B",
+  "чтение калибровки · 84.2 с · TX 512 / 18 432 B": "reading calibration · 84.2 s · TX 512 / 18 432 B",
+  "запись тюна · 290.2 с · TX 1204 / 61 200 B · скриншот":
+    "tune write · 290.2 s · TX 1204 / 61 200 B · screenshot",
+  "чтение {addr} блоками собрано в reads/": "read {addr} in blocks collected into reads/",
+  "Составное USB устройство": "Composite USB device",
+});
 
 const ID = "demo-20261109-120013-BMS46";
 
@@ -31,15 +48,15 @@ export function demoSession(): SessionMeta {
     adapter: { serial: "A1B2C3D4", description: "FT232R USB UART", com_port: 6, vendor_id: 1027, product_id: 24577 },
     host: "WORKSTATION",
     counts: { events: 1842, tx: 731, rx: 968, tx_bytes: 61820, rx_bytes: 63488, steps: 3, files: 2, errors: 0 },
-    tags: ["BMS46", "запись"],
-    notes: [{ t: 61, wall: "2026-11-09T12:01:14.000Z", text: "цикл питания после записи", author: "user" }],
+    tags: ["BMS46", t("запись")],
+    notes: [{ t: 61, wall: "2026-11-09T12:01:14.000Z", text: t("цикл питания после записи"), author: "user" }],
     status: "recording",
     engine_version: "0.1.0",
     dir: "sessions/" + ID,
     facts: [
       "ftd2xx: C:\\Windows\\System32\\FTD2XX.DLL 1.4.12",
       "adapter: FT232R USB UART serial=A1B2C3D4",
-      "hooks: 36 установлено",
+      t("hooks: 36 установлено"),
     ],
   };
 }
@@ -48,7 +65,7 @@ export function demoSteps(): StepSummary[] {
   return [
     {
       idx: 1,
-      title: "нажал идентификаторы",
+      title: t("нажал идентификаторы"),
       dur: 12.4,
       exchanges: 248,
       tx_bytes: 22026,
@@ -68,7 +85,7 @@ export function demoSteps(): StepSummary[] {
     },
     {
       idx: 2,
-      title: "чтение калибровки",
+      title: t("чтение калибровки"),
       dur: 84.2,
       exchanges: 512,
       tx_bytes: 18432,
@@ -87,7 +104,7 @@ export function demoSteps(): StepSummary[] {
     },
     {
       idx: 3,
-      title: "запись тюна",
+      title: t("запись тюна"),
       dur: 333.3,
       exchanges: 1204,
       tx_bytes: 61200,
@@ -99,7 +116,7 @@ export function demoSteps(): StepSummary[] {
         { start: 0, len: 65536, blocks: 128, sha256: "aa11bb22cc33dd44ee55ff6600778899aabbccddeeff00112233445566778899" },
       ],
       filehash: [{ path: "D:\\tune_v3.bin", size: 65536, sha256: "77aa88bb99cc00dd11ee22ff33aa44bb55cc66dd77ee88ff99aa00bb11cc22dd" }],
-      png: demoShotDataUrl(3, "запись тюна"),
+      png: demoShotDataUrl(3, t("запись тюна")),
       winkfp_jobs: [],
       verdict: { denied: 2, no_answer: 1, echo: true, unparsed: 0 },
       started_at: isoAt(117),
@@ -160,7 +177,7 @@ export function demoEvents(): Event[] {
   push({ kind: "sys", t: 0.52, api: "FT_SetBaudRate", rc: 0, text: "FT_SetBaudRate(handle=0x1, 9600) rc=0" });
 
   // Шаг 1: идентификация
-  push({ kind: "step_start", t: 1.9, api: "STEP", text: "нажал идентификаторы", step: 1 });
+  push({ kind: "step_start", t: 1.9, api: "STEP", text: t("нажал идентификаторы"), step: 1 });
   push({ kind: "tx", t: 2.05, api: "FT_Write", direction: "tx", hex: "12 04 0d 1b", len: 4, rc: 0, step: 1, text: "echo-check" });
   push({
     kind: "rx",
@@ -190,10 +207,10 @@ export function demoEvents(): Event[] {
   }
   push({ kind: "tx", t: 9.4, api: "FT_Write", direction: "tx", hex: "12 04 90 42 4d 57 04 d6", len: 8, rc: 0, step: 1, text: "auth 90 42 4d 57" });
   push({ kind: "rx", t: 9.45, api: "FT_Read", direction: "rx", hex: "12 04 a0 01", len: 4, rc: 0, step: 1 });
-  push({ kind: "step_end", t: 14.3, api: "STEP", text: "нажал идентификаторы · 12.4 с · TX 26 / 22 026 B · RX 25 523 B", step: 1 });
+  push({ kind: "step_end", t: 14.3, api: "STEP", text: t("нажал идентификаторы · 12.4 с · TX 26 / 22 026 B · RX 25 523 B"), step: 1 });
 
   // Шаг 2: чтение калибровки
-  push({ kind: "step_start", t: 18.0, api: "STEP", text: "чтение калибровки", step: 2 });
+  push({ kind: "step_start", t: 18.0, api: "STEP", text: t("чтение калибровки"), step: 2 });
   for (let i = 0; i < 120; i++) {
     const addr = 0x8000 + i * 0x40;
     const len = 0x40;
@@ -214,7 +231,9 @@ export function demoEvents(): Event[] {
         kind: "sys",
         t: 18.4 + i * 0.68,
         api: "READ",
-        text: `чтение 0x${addr.toString(16).toUpperCase().padStart(6, "0")} блоками собрано в reads/`,
+        text: t("чтение {addr} блоками собрано в reads/", {
+          addr: `0x${addr.toString(16).toUpperCase().padStart(6, "0")}`,
+        }),
         step: 2,
       });
     }
@@ -235,10 +254,10 @@ export function demoEvents(): Event[] {
     step: 2,
     transport: "file",
   });
-  push({ kind: "step_end", t: 102.2, api: "STEP", text: "чтение калибровки · 84.2 с · TX 512 / 18 432 B", step: 2 });
+  push({ kind: "step_end", t: 102.2, api: "STEP", text: t("чтение калибровки · 84.2 с · TX 512 / 18 432 B"), step: 2 });
 
   // Шаг 3: запись
-  push({ kind: "step_start", t: 108.0, api: "STEP", text: "запись тюна", step: 3 });
+  push({ kind: "step_start", t: 108.0, api: "STEP", text: t("запись тюна"), step: 3 });
   push({ kind: "tx", t: 108.2, api: "FT_Write", direction: "tx", hex: "12 04 10 85 00 00 87", len: 7, rc: 0, step: 3, text: "StartDiagnosticSession programming" });
   push({ kind: "rx", t: 108.26, api: "FT_Read", direction: "rx", hex: "12 04 50 85 00 00 c3", len: 7, rc: 0, step: 3, text: "pos(10)" });
   for (let i = 0; i < 260; i++) {
@@ -257,10 +276,10 @@ export function demoEvents(): Event[] {
       step: 3,
     });
     if (i === 130) {
-      push({ kind: "note", t: 109.0 + i * 1.15, api: "NOTE", text: "цикл питания после записи", step: 3 });
+      push({ kind: "note", t: 109.0 + i * 1.15, api: "NOTE", text: t("цикл питания после записи"), step: 3 });
     }
   }
-  push({ kind: "step_end", t: 407.2, api: "STEP", text: "запись тюна · 290.2 с · TX 1204 / 61 200 B · скриншот", step: 3 });
+  push({ kind: "step_end", t: 407.2, api: "STEP", text: t("запись тюна · 290.2 с · TX 1204 / 61 200 B · скриншот"), step: 3 });
   return out;
 }
 
@@ -344,7 +363,7 @@ export function demoUsbDevices(): UsbDevice[] {
       vid: 0x1ea7,
       pid: 0x0066,
       serial: "5&115A75A8&0&1",
-      description: "Составное USB устройство",
+      description: t("Составное USB устройство"),
       friendly_name: "",
       manufacturer: "(Standard USB Host Controller)",
       service: "usbccgp",

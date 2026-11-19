@@ -1,4 +1,4 @@
-# Установка FTDI/USB Logger (per-user, без прав администратора).
+﻿# Установка FTDI/USB Logger (per-user, без прав администратора).
 # Запускается из распакованного SFX: рядом лежит папка FTDI_USB_Logger\.
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
@@ -53,7 +53,7 @@ if (-not $silent) {
     New-Item -Path $reg -Force | Out-Null
     $values = @{
         DisplayName = "FTDI/USB Logger"
-        DisplayVersion = "0.2.1"
+        DisplayVersion = "0.3.0"
         Publisher = "DaVinci Cyber Engineering"
         InstallLocation = $dst
         DisplayIcon = $icon
@@ -75,5 +75,6 @@ if (-not $silent) {
     Start-Process -FilePath (Join-Path $dst "FTDI_USB_Logger.exe") -WorkingDirectory $dst
 }
 exit 0
+
 
 

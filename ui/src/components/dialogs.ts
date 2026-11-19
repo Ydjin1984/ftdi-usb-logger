@@ -3,6 +3,121 @@
 import { el, iconButton } from "../dom";
 import { store } from "../store";
 import type { NewSessionResult } from "../types";
+import { msg, t } from "../i18n";
+
+msg({
+  "нет активной сессии": "no active session",
+  "например: нажал «запись»": "for example: pressed Record",
+  "текст метки": "mark text",
+  "метка попадёт в поток и в отчёт, шаг не открывается": "the mark goes into the stream and the report; no step is opened",
+  "Метка в потоке": "Mark in the stream",
+  "поставить (Enter)": "set (Enter)",
+  "что делаете? например: нажал «идентификаторы»": "what are you doing? e.g. pressed Identifiers",
+  "название шага": "step name",
+  "Enter — открыть шаг; пустое имя — автоназвание «шаг N»":
+    "Enter opens the step; an empty name gives the automatic name \"step N\"",
+  "Открыть шаг": "Open step",
+  "открыть": "open",
+  "Демонстрационная запись остановится. Пример лога останется доступен для просмотра.":
+    "The demo recording will stop. The sample log stays available for viewing.",
+  "Захват остановится, хуки будут сняты, отчёт соберётся автоматически. Файлы сессии останутся на диске.":
+    "Capture will stop, hooks will be removed, and the report will be collected automatically. Session files stay on disk.",
+  "Остановить сессию?": "Stop the session?",
+  "продолжить запись": "keep recording",
+  "остановить": "stop",
+  "вся сессия: события, шаги, скриншоты, отчёт":
+    "the whole session: events, steps, screenshots, report",
+  "машинный поток событий, по объекту в строке": "machine-readable event stream, one object per line",
+  "таблица для Excel/скриптов": "a table for Excel/scripts",
+  "человекочитаемый отчёт со сводками шагов": "a human-readable report with step summaries",
+  "формат": "format",
+  "сессия: {label} · {steps} шагов": "session: {label} · {steps} steps",
+  "отправка на сервер (необязательно)": "upload to a server (optional)",
+  "https://ваш-сервер/upload": "https://your-server/upload",
+  "движок выполнит: curl -F file=@<zip> <url> — подходит любой приёмник, понимающий multipart":
+    "the engine runs: curl -F file=@<zip> <url> — any multipart receiver works",
+  "собираю…": "packing…",
+  "не удалось собрать экспорт": "failed to build the export",
+  "файл": "file",
+  "экспортировать": "export",
+  "Экспорт и отправка": "Export and upload",
+  "USBPcap не найден. Установите USBPcap (desowin.org/usbpcap), перезагрузите ПК и запустите логер от администратора.":
+    "USBPcap was not found. Install USBPcap (desowin.org/usbpcap), reboot the PC and start the logger as administrator.",
+  "корневой USB-хаб для захвата": "root USB hub to capture",
+  "нужны права администратора; трафик всех устройств на этом хабе":
+    "administrator rights are required; traffic of every device on this hub",
+  "Сырой захват USB-шины (USBPcap)": "Raw USB bus capture (USBPcap)",
+  "начать запись": "start recording",
+  "пресеты действий  (по одному в строке)": "action presets  (one per line)",
+  "список показывается в комбо на нижней панели: выбрал — шаг открылся. Новые названия, введённые вручную, добавляются сюда автоматически.":
+    "the list appears in the combo box on the bottom bar: pick one and the step opens. New names typed manually are added here automatically.",
+  "Пресеты действий": "Action presets",
+  "шаблоны сохранены": "presets saved",
+  "1": "1",
+  "Запустите программу на FTDI (Quickflash, WinKFP) — как обычно.":
+    "Start the tool on the FTDI cable (Quickflash, WinKFP) — as usual.",
+  "В колонке «Процессы на FTDI» нажмите «подключить» — откроется сессия и пойдёт поток.":
+    "In the \"FTDI processes\" column press \"attach\" — a session opens and the stream starts.",
+  "F2 — открыть шаг (название по шаблону), сделайте действие в программе, F2 — закрыть: сводка, скриншот, отчёт.":
+    "F2 opens a step (name from a preset), do the action in the tool, F2 closes it: summary, screenshot, report.",
+  "Ctrl+E — экспорт/отправка, Ctrl+O — импорт старого лога для переразбора.":
+    "Ctrl+E exports/uploads, Ctrl+O imports an old log for reparsing.",
+  "шаг: открыть / закрыть со сводкой; пресет — в комбо на нижней панели":
+    "step: open/close with a summary; a preset sits in the bottom combo",
+  "открыть шаг с названием вручную": "open a step with a manual name",
+  "метка без шага": "mark without a step",
+  "снять / вернуть хуки (A/B-проверка записи)": "remove/restore hooks (A/B recording check)",
+  "скриншот окна программы сейчас": "screenshot the tool window now",
+  "поиск по потоку": "search the stream",
+  "экспорт и отправка": "export and upload",
+  "импорт старого лога": "import an old log",
+  "навигация по потоку": "navigate the stream",
+  "остановить сессию (с подтверждением)": "stop the session (with confirmation)",
+  "эта справка": "this help",
+  "ПОРЯДОК РАБОТЫ": "WORKFLOW",
+  "ГОРЯЧИЕ КЛАВИШИ": "HOTKEYS",
+  "ЧТО ЗАПИСЫВАЕТСЯ": "WHAT IS RECORDED",
+  "Каждый вызов FT_*/ReadFile/WriteFile, открытия файлов и модулей, метки и шаги. После закрытия шага — сводка: команды, ответы, чтения с sha256, файлы и скриншот. Всё это лежит в sessions/<id>/ и экспортируется одним архивом.":
+    "Every FT_*/ReadFile/WriteFile call, file and module opens, marks and steps. When a step closes you get a summary: commands, responses, reads with sha256, files and a screenshot. All of it lives in sessions/<id>/ and exports as a single archive.",
+  "ЕСЛИ ЗАПИСЬ НЕ ИДЁТ": "IF RECORDING DOES NOT WORK",
+  "Нажмите F6 (снять хуки), повторите операцию в программе. Если под паузой запись пошла — инструментирование мешает: снимайте хуки перед входом в программирование и возвращайте сразу после ответа pos(10). Если ошибка та же — дело не в логере.":
+    "Press F6 (remove hooks) and repeat the operation in the tool. If it works while paused, instrumentation interferes: remove hooks before entering programming and restore them right after the pos(10) response. If the error is the same, the logger is not the cause.",
+  "Как работать": "How it works",
+  "понятно": "got it",
+  "Скриншот": "Screenshot",
+  "Текущая сессия «{label}» будет завершена и сохранена, затем логер заново просканирует шнурки и программы.":
+    "The current session \"{label}\" will be finished and saved, then the logger rescans cables and programs.",
+  "Новая сессия": "New session",
+  "завершить и пересканировать": "finish and rescan",
+  "  Сканирую USB-устройства, J2534-драйверы и программы…":
+    "  Scanning USB devices, J2534 drivers and programs…",
+  "Выберите адаптер и программу. Перед запуском проверьте выбранную цель внизу окна.":
+    "Choose an adapter and a program. Check the selected target at the bottom of the window before starting.",
+  "01  /  Адаптер FTDI / USB": "01  /  FTDI / USB adapter",
+  "FTDI-шнурки не найдены — проверьте драйвер и подключение.":
+    "No FTDI cables found — check the driver and the connection.",
+  "не указывать (любой шнурок)": "do not specify (any cable)",
+  "02  /  Программа": "02  /  Program",
+  "Поиск по имени, PID или окну": "Search by name, PID or window",
+  "Поиск программы": "Search programs",
+  "Нет совпадений. Измените запрос или укажите PID.": "No matches. Change the query or enter a PID.",
+  "Программы не найдены — переключите фильтр в панели «ПРОГРАММЫ» или введите PID.":
+    "No programs found — switch the filter in the \"PROGRAMS\" panel or enter a PID.",
+  "окно": "window",
+  "PID вручную, если программы нет в списке": "PID manually, if the program is not listed",
+  "PID программы": "Program PID",
+  "Выбрать PID": "Use PID",
+  "Введите положительный целый PID (только цифры).": "Enter a positive integer PID (digits only).",
+  "PID должен быть целым в диапазоне 1..2147483647.": "PID must be an integer in the range 1..2147483647.",
+  "выбран PID {pid}": "PID {pid} selected",
+  "начать сессию": "start session",
+  "выберите программу или укажите PID": "choose a program or enter a PID",
+  "сначала выберите программу (или введите PID)": "choose a program first (or enter a PID)",
+  "Любой адаптер": "Any adapter",
+  "Программа": "Program",
+  "Выберите программу или PID": "Choose a program or PID",
+  "Новая сессия: выбор цели": "New session: choose a target",
+});
 
 interface ModalOpts {
   title: string;
@@ -18,7 +133,7 @@ function modal(opts: ModalOpts): { close: () => void; body: HTMLElement } {
   if (opts.width) box.style.width = `min(${opts.width}px, 100%)`;
   const head = el("div", "modal__head");
   head.append(el("div", "modal__title", opts.title));
-  const closeBtn = iconButton("close", "закрыть", () => close());
+  const closeBtn = iconButton("close", t("закрыть"), () => close());
   head.append(closeBtn);
 
   const body = el("div", "modal__body");
@@ -96,26 +211,26 @@ function ghost(label: string, onClick: () => void): HTMLButtonElement {
 
 export function openMarkPrompt(): void {
   if (!store.state.active) {
-    store.toast("warn", "нет активной сессии");
+    store.toast("warn", t("нет активной сессии"));
     return;
   }
-  const input = textInput("например: нажал «запись»", "");
+  const input = textInput(t("например: нажал «запись»"), "");
   const list = el("datalist");
   list.id = "mark-titles";
-  for (const t of store.state.quickTitles) {
+  for (const title of store.state.quickTitles) {
     const o = el("option");
-    o.value = t;
+    o.value = title;
     list.append(o);
   }
   input.setAttribute("list", "mark-titles");
   const body = el("div");
-  body.append(field("текст метки", input, "метка попадёт в поток и в отчёт, шаг не открывается"), list);
+  body.append(field(t("текст метки"), input, t("метка попадёт в поток и в отчёт, шаг не открывается")), list);
   const m = modal({
-    title: "Метка в потоке",
+    title: t("Метка в потоке"),
     body,
     footer: [
-      ghost("отмена", () => m.close()),
-      primary("поставить (Enter)", () => submit()),
+      ghost(t("отмена"), () => m.close()),
+      primary(t("поставить (Enter)"), () => submit()),
     ],
   });
   const submit = (): void => {
@@ -137,28 +252,28 @@ export function openMarkPrompt(): void {
 
 export function openStepPrompt(): void {
   if (!store.state.active) {
-    store.toast("warn", "нет активной сессии");
+    store.toast("warn", t("нет активной сессии"));
     return;
   }
   const last = store.state.steps[store.state.steps.length - 1]?.title ?? "";
-  const input = textInput("что делаете? например: нажал «идентификаторы»", last);
+  const input = textInput(t("что делаете? например: нажал «идентификаторы»"), last);
   const list = el("datalist");
   list.id = "step-titles";
-  for (const t of store.state.quickTitles) {
+  for (const title of store.state.quickTitles) {
     const o = el("option");
-    o.value = t;
+    o.value = title;
     list.append(o);
   }
   input.setAttribute("list", "step-titles");
   const body = el("div");
   body.append(
-    field("название шага", input, "Enter — открыть шаг; пустое имя — автоназвание «шаг N»"),
+    field(t("название шага"), input, t("Enter — открыть шаг; пустое имя — автоназвание «шаг N»")),
     list,
   );
   const m = modal({
-    title: "Открыть шаг",
+    title: t("Открыть шаг"),
     body,
-    footer: [ghost("отмена", () => m.close()), primary("открыть", () => submit())],
+    footer: [ghost(t("отмена"), () => m.close()), primary(t("открыть"), () => submit())],
   });
   const submit = (): void => {
     m.close();
@@ -179,7 +294,7 @@ export function openStopConfirm(): void {
   // В демо стоп имеет смысл только когда запись реально идёт.
   if (store.state.mode === "demo" && !store.state.status?.recording) return;
   if (!store.state.active) {
-    store.toast("warn", "сессия не выбрана");
+    store.toast("warn", t("сессия не выбрана"));
     return;
   }
   const body = el("div");
@@ -188,16 +303,16 @@ export function openStopConfirm(): void {
       "div",
       "sec__empty",
       store.state.mode === "demo"
-        ? "Демонстрационная запись остановится. Пример лога останется доступен для просмотра."
-        : "Захват остановится, хуки будут сняты, отчёт соберётся автоматически. Файлы сессии останутся на диске.",
+        ? t("Демонстрационная запись остановится. Пример лога останется доступен для просмотра.")
+        : t("Захват остановится, хуки будут сняты, отчёт соберётся автоматически. Файлы сессии останутся на диске."),
     ),
   );
   const m = modal({
-    title: "Остановить сессию?",
+    title: t("Остановить сессию?"),
     body,
     footer: [
-      ghost("продолжить запись", () => m.close()),
-      primary("остановить", () => {
+      ghost(t("продолжить запись"), () => m.close()),
+      primary(t("остановить"), () => {
         m.close();
         void store.detach();
       }),
@@ -212,16 +327,16 @@ export function openStopConfirm(): void {
 export function openExportDialog(): void {
   const s = store.state;
   if (!s.active) {
-    store.toast("warn", "сессия не выбрана");
+    store.toast("warn", t("сессия не выбрана"));
     return;
   }
   let format: "zip" | "jsonl" | "csv" | "md" = "zip";
   const grid = el("div", "format-grid");
   const formats: Array<["zip" | "jsonl" | "csv" | "md", string, string]> = [
-    ["zip", "ZIP", "вся сессия: события, шаги, скриншоты, отчёт"],
-    ["jsonl", "JSONL", "машинный поток событий, по объекту в строке"],
-    ["csv", "CSV", "таблица для Excel/скриптов"],
-    ["md", "Markdown", "человекочитаемый отчёт со сводками шагов"],
+    ["zip", "ZIP", t("вся сессия: события, шаги, скриншоты, отчёт")],
+    ["jsonl", "JSONL", t("машинный поток событий, по объекту в строке")],
+    ["csv", "CSV", t("таблица для Excel/скриптов")],
+    ["md", "Markdown", t("человекочитаемый отчёт со сводками шагов")],
   ];
   for (const [id, title, desc] of formats) {
     const b = el("button", `format-option${id === format ? " is-active" : ""}`);
@@ -236,37 +351,41 @@ export function openExportDialog(): void {
   }
 
   const result = el("div", "decoded");
-  const shareInput = textInput("https://ваш-сервер/upload");
+  const shareInput = textInput(t("https://ваш-сервер/upload"));
   const status = el("div", "field__hint", "");
 
   const body = el("div");
   body.append(
-    field("формат", grid, `сессия: ${s.active.label || s.active.id} · ${s.steps.length} шагов`),
     field(
-      "отправка на сервер (необязательно)",
+      t("формат"),
+      grid,
+      t("сессия: {label} · {steps} шагов", { label: s.active.label || s.active.id, steps: s.steps.length }),
+    ),
+    field(
+      t("отправка на сервер (необязательно)"),
       shareInput,
-      "движок выполнит: curl -F file=@<zip> <url> — подходит любой приёмник, понимающий multipart",
+      t("движок выполнит: curl -F file=@<zip> <url> — подходит любой приёмник, понимающий multipart"),
     ),
     result,
     status,
   );
 
   const doExport = async (): Promise<void> => {
-    status.textContent = "собираю…";
+    status.textContent = t("собираю…");
     status.style.color = "var(--text-mute)";
     const path = await store.exportSession(format);
-    status.textContent = path ? `готово: ${path}` : "не удалось собрать экспорт";
+    status.textContent = path ? t("готово: {path}", { path }) : t("не удалось собрать экспорт");
     status.style.color = path ? "var(--ok)" : "var(--err)";
     if (path) {
       result.replaceChildren();
       const row = el("div", "decoded__row");
-      row.append(el("div", "decoded__key", "файл"), el("div", "decoded__val", path));
+      row.append(el("div", "decoded__key", t("файл")), el("div", "decoded__val", path));
       result.append(row);
-      const copy = el("button", "btn btn--sm", "скопировать путь");
+      const copy = el("button", "btn btn--sm", t("скопировать путь"));
       copy.type = "button";
       copy.addEventListener("click", () => {
         void navigator.clipboard?.writeText(path);
-        store.toast("ok", "путь скопирован");
+        store.toast("ok", t("путь скопирован"));
       });
       result.append(copy);
       if (shareInput.value.trim()) await store.share(shareInput.value.trim());
@@ -274,10 +393,10 @@ export function openExportDialog(): void {
   };
 
   const footer = [
-    ghost("закрыть", () => m.close()),
-    primary("экспортировать", () => void doExport()),
+    ghost(t("закрыть"), () => m.close()),
+    primary(t("экспортировать"), () => void doExport()),
   ];
-  const m = modal({ title: "Экспорт и отправка", body, footer, width: 620 });
+  const m = modal({ title: t("Экспорт и отправка"), body, footer, width: 620 });
   void m;
 }
 
@@ -287,7 +406,9 @@ export function openUsbpcapDialog(devices: string[]): void {
   if (!devices.length) {
     store.toast(
       "warn",
-      "USBPcap не найден. Установите USBPcap (desowin.org/usbpcap), перезагрузите ПК и запустите логер от администратора.",
+      t(
+        "USBPcap не найден. Установите USBPcap (desowin.org/usbpcap), перезагрузите ПК и запустите логер от администратора.",
+      ),
     );
     return;
   }
@@ -308,14 +429,14 @@ export function openUsbpcapDialog(devices: string[]): void {
   }
   const body = el("div");
   body.append(
-    field("корневой USB-хаб для захвата", list, "нужны права администратора; трафик всех устройств на этом хабе"),
+    field(t("корневой USB-хаб для захвата"), list, t("нужны права администратора; трафик всех устройств на этом хабе")),
   );
   const m = modal({
-    title: "Сырой захват USB-шины (USBPcap)",
+    title: t("Сырой захват USB-шины (USBPcap)"),
     body,
     footer: [
-      ghost("отмена", () => m.close()),
-      primary("начать запись", () => {
+      ghost(t("отмена"), () => m.close()),
+      primary(t("начать запись"), () => {
         m.close();
         void store.startUsbpcap(chosen);
       }),
@@ -342,17 +463,23 @@ export function openTemplatesDialog(): void {
 
   const body = el("div");
   body.append(
-    field("пресеты действий  (по одному в строке)", ta, "список показывается в комбо на нижней панели: выбрал — шаг открылся. Новые названия, введённые вручную, добавляются сюда автоматически."),
+    field(
+      t("пресеты действий  (по одному в строке)"),
+      ta,
+      t(
+        "список показывается в комбо на нижней панели: выбрал — шаг открылся. Новые названия, введённые вручную, добавляются сюда автоматически.",
+      ),
+    ),
   );
   const m = modal({
-    title: "Пресеты действий",
+    title: t("Пресеты действий"),
     body,
     footer: [
-      ghost("отмена", () => m.close()),
-      primary("сохранить", () => {
+      ghost(t("отмена"), () => m.close()),
+      primary(t("сохранить"), () => {
         store.saveQuickTitles(ta.value.split("\n"));
         m.close();
-        store.toast("ok", "шаблоны сохранены");
+        store.toast("ok", t("шаблоны сохранены"));
       }),
     ],
   });
@@ -366,10 +493,10 @@ export function openHelpDialog(): void {
 
   const workflow = el("div", "decoded");
   const steps: Array<[string, string]> = [
-    ["1", "Запустите программу на FTDI (Quickflash, WinKFP) — как обычно."],
-    ["2", "В колонке «Процессы на FTDI» нажмите «подключить» — откроется сессия и пойдёт поток."],
-    ["3", "F2 — открыть шаг (название по шаблону), сделайте действие в программе, F2 — закрыть: сводка, скриншот, отчёт."],
-    ["4", "Ctrl+E — экспорт/отправка, Ctrl+O — импорт старого лога для переразбора."],
+    ["1", t("Запустите программу на FTDI (Quickflash, WinKFP) — как обычно.")],
+    ["2", t("В колонке «Процессы на FTDI» нажмите «подключить» — откроется сессия и пойдёт поток.")],
+    ["3", t("F2 — открыть шаг (название по шаблону), сделайте действие в программе, F2 — закрыть: сводка, скриншот, отчёт.")],
+    ["4", t("Ctrl+E — экспорт/отправка, Ctrl+O — импорт старого лога для переразбора.")],
   ];
   for (const [n, text] of steps) {
     const row = el("div", "decoded__row");
@@ -378,17 +505,17 @@ export function openHelpDialog(): void {
   }
 
   const keys: Array<[string, string]> = [
-    ["F2", "шаг: открыть / закрыть со сводкой; пресет — в комбо на нижней панели"],
-    ["Shift+F2", "открыть шаг с названием вручную"],
-    ["F5", "метка без шага"],
-    ["F6", "снять / вернуть хуки (A/B-проверка записи)"],
-    ["F8", "скриншот окна программы сейчас"],
-    ["Ctrl+F", "поиск по потоку"],
-    ["Ctrl+E", "экспорт и отправка"],
-    ["Ctrl+O", "импорт старого лога"],
-    ["↑ ↓ PgUp PgDn Home End", "навигация по потоку"],
-    ["Esc", "остановить сессию (с подтверждением)"],
-    ["F1", "эта справка"],
+    ["F2", t("шаг: открыть / закрыть со сводкой; пресет — в комбо на нижней панели")],
+    ["Shift+F2", t("открыть шаг с названием вручную")],
+    ["F5", t("метка без шага")],
+    ["F6", t("снять / вернуть хуки (A/B-проверка записи)")],
+    ["F8", t("скриншот окна программы сейчас")],
+    ["Ctrl+F", t("поиск по потоку")],
+    ["Ctrl+E", t("экспорт и отправка")],
+    ["Ctrl+O", t("импорт старого лога")],
+    ["↑ ↓ PgUp PgDn Home End", t("навигация по потоку")],
+    ["Esc", t("остановить сессию (с подтверждением)")],
+    ["F1", t("эта справка")],
   ];
   const table = el("div", "decoded");
   for (const [k, v] of keys) {
@@ -400,24 +527,28 @@ export function openHelpDialog(): void {
   }
 
   body.append(
-    el("div", "sec__title", "ПОРЯДОК РАБОТЫ"),
+    el("div", "sec__title", t("ПОРЯДОК РАБОТЫ")),
     workflow,
-    el("div", "sec__title", "ГОРЯЧИЕ КЛАВИШИ"),
+    el("div", "sec__title", t("ГОРЯЧИЕ КЛАВИШИ")),
     table,
-    el("div", "sec__title", "ЧТО ЗАПИСЫВАЕТСЯ"),
+    el("div", "sec__title", t("ЧТО ЗАПИСЫВАЕТСЯ")),
     el(
       "div",
       "sec__empty",
-      "Каждый вызов FT_*/ReadFile/WriteFile, открытия файлов и модулей, метки и шаги. После закрытия шага — сводка: команды, ответы, чтения с sha256, файлы и скриншот. Всё это лежит в sessions/<id>/ и экспортируется одним архивом.",
+      t(
+        "Каждый вызов FT_*/ReadFile/WriteFile, открытия файлов и модулей, метки и шаги. После закрытия шага — сводка: команды, ответы, чтения с sha256, файлы и скриншот. Всё это лежит в sessions/<id>/ и экспортируется одним архивом.",
+      ),
     ),
-    el("div", "sec__title", "ЕСЛИ ЗАПИСЬ НЕ ИДЁТ"),
+    el("div", "sec__title", t("ЕСЛИ ЗАПИСЬ НЕ ИДЁТ")),
     el(
       "div",
       "sec__empty",
-      "Нажмите F6 (снять хуки), повторите операцию в программе. Если под паузой запись пошла — инструментирование мешает: снимайте хуки перед входом в программирование и возвращайте сразу после ответа pos(10). Если ошибка та же — дело не в логере.",
+      t(
+        "Нажмите F6 (снять хуки), повторите операцию в программе. Если под паузой запись пошла — инструментирование мешает: снимайте хуки перед входом в программирование и возвращайте сразу после ответа pos(10). Если ошибка та же — дело не в логере.",
+      ),
     ),
   );
-  const m = modal({ title: "Как работать", body, footer: [primary("понятно", () => m.close())], width: 660 });
+  const m = modal({ title: t("Как работать"), body, footer: [primary(t("понятно"), () => m.close())], width: 660 });
   void m;
 }
 
@@ -434,7 +565,7 @@ export function openImage(src: string, caption: string): void {
   const body = el("div");
   body.append(img);
   body.append(el("div", "field__hint", caption));
-  modal({ title: "Скриншот", body, width: 980 });
+  modal({ title: t("Скриншот"), body, width: 980 });
 }
 
 /* ─────────────────────────────── тосты ─────────────────────────────────── */
@@ -453,19 +584,19 @@ export class Toasts {
     if (list === this.last) return;
     this.last = list;
     this.el.replaceChildren();
-    for (const t of list) {
-      const box = el("div", `toast toast--${t.level}`);
+    for (const toast of list) {
+      const box = el("div", `toast toast--${toast.level}`);
       const bar = el("div", "toast__bar");
       const body = el("div", "toast__body");
       const titles: Record<string, string> = {
-        ok: "готово",
-        warn: "внимание",
-        error: "ошибка",
-        info: "подсказка",
+        ok: t("готово"),
+        warn: t("внимание"),
+        error: t("ошибка"),
+        info: t("подсказка"),
       };
-      body.append(el("b", "", titles[t.level] ?? t.level), el("span", "", t.text));
+      body.append(el("b", "", titles[toast.level] ?? toast.level), el("span", "", toast.text));
       box.append(bar, body);
-      box.addEventListener("click", () => store.dismissToast(t.id));
+      box.addEventListener("click", () => store.dismissToast(toast.id));
       this.el.append(box);
     }
   }
@@ -488,15 +619,17 @@ export function openNewSessionDialog(): void {
       el(
         "div",
         "sec__empty",
-        `Текущая сессия «${active.label || active.id}» будет завершена и сохранена, затем логер заново просканирует шнурки и программы.`,
+        t("Текущая сессия «{label}» будет завершена и сохранена, затем логер заново просканирует шнурки и программы.", {
+          label: active.label || active.id,
+        }),
       ),
     );
     const m: { close: () => void } = modal({
-      title: "Новая сессия",
+      title: t("Новая сессия"),
       body,
       footer: [
-        ghost("отмена", () => m.close()),
-        primary("завершить и пересканировать", () => {
+        ghost(t("отмена"), () => m.close()),
+        primary(t("завершить и пересканировать"), () => {
           m.close();
           void runRescan();
         }),
@@ -510,9 +643,9 @@ export function openNewSessionDialog(): void {
 async function runRescan(): Promise<void> {
   const body = el("div");
   const busy = el("div", "sec__empty");
-  busy.append(el("span", "spinner"), document.createTextNode("  Сканирую USB-устройства, J2534-драйверы и программы…"));
+  busy.append(el("span", "spinner"), document.createTextNode(t("  Сканирую USB-устройства, J2534-драйверы и программы…")));
   body.append(busy);
-  const wait = modal({ title: "Новая сессия", body, width: 720 });
+  const wait = modal({ title: t("Новая сессия"), body, width: 720 });
   const res = await store.newSession();
   wait.close();
   if (!res) return;
@@ -532,7 +665,11 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
 
   const body = el("div", "session-picker");
   body.append(
-    el("p", "picker-intro", "Выберите адаптер и программу. Перед запуском проверьте выбранную цель внизу окна."),
+    el(
+      "p",
+      "picker-intro",
+      t("Выберите адаптер и программу. Перед запуском проверьте выбранную цель внизу окна."),
+    ),
   );
   // Сводка выбранной цели — в футере рядом с кнопкой запуска.
   const summary = el("div", "picker-summary");
@@ -546,12 +683,12 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
   };
 
   // 01 — адаптер FTDI / USB / COM-порт
-  body.append(el("div", "sec__title", "01  /  Адаптер FTDI / USB"));
+  body.append(el("div", "sec__title", t("01  /  Адаптер FTDI / USB")));
   const adapters = el("div", "decoded");
   if (!devices.length) {
-    adapters.append(div("muted", "FTDI-шнурки не найдены — проверьте драйвер и подключение."));
+    adapters.append(div("muted", t("FTDI-шнурки не найдены — проверьте драйвер и подключение.")));
   } else {
-    const none = el("button", "format-option", "не указывать (любой шнурок)");
+    const none = el("button", "format-option", t("не указывать (любой шнурок)"));
     none.type = "button";
     none.addEventListener("click", () => {
       chosenAdapter = null;
@@ -579,15 +716,15 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
   body.append(adapters);
 
   // 02 — программа: поиск по имени, PID и заголовку окна
-  const progTitle = el("div", "sec__title", "02  /  Программа");
+  const progTitle = el("div", "sec__title", t("02  /  Программа"));
   progTitle.style.marginTop = "12px";
   body.append(progTitle);
   const programs = el("div", "decoded");
   programs.classList.add("picker-programs");
-  const query = textInput("Поиск по имени, PID или окну");
+  const query = textInput(t("Поиск по имени, PID или окну"));
   query.type = "search";
-  query.setAttribute("aria-label", "Поиск программы");
-  const noResults = el("p", "muted", "Нет совпадений. Измените запрос или укажите PID.");
+  query.setAttribute("aria-label", t("Поиск программы"));
+  const noResults = el("p", "muted", t("Нет совпадений. Измените запрос или укажите PID."));
   noResults.hidden = true;
   body.append(query);
   // Фильтр по тексту строки: в нём есть имя/known_tool, «pid N» и заголовок окна.
@@ -601,21 +738,28 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
     noResults.hidden = found > 0;
   };
   if (!tools.length) {
-    programs.append(div("muted", "Программы не найдены — переключите фильтр в панели «ПРОГРАММЫ» или введите PID."));
+    programs.append(
+      div("muted", t("Программы не найдены — переключите фильтр в панели «ПРОГРАММЫ» или введите PID.")),
+    );
   }
-  for (const t of tools) {
+  for (const tool of tools) {
     const row = el("button", "format-option");
     row.type = "button";
-    const caps = [t.has_ftd2xx ? "FTDI" : "", t.has_j2534 ? "J2534" : "", t.has_usb ? "USB" : "", t.window_title ? "окно" : ""]
+    const caps = [
+      tool.has_ftd2xx ? "FTDI" : "",
+      tool.has_j2534 ? "J2534" : "",
+      tool.has_usb ? "USB" : "",
+      tool.window_title ? t("окно") : "",
+    ]
       .filter(Boolean)
       .join(" · ");
     row.append(
-      el("div", "format-option__title", `${t.known_tool || t.name}  ·  pid ${t.pid}`),
-      el("div", "format-option__desc", [caps, t.window_title].filter(Boolean).join(" · ")),
+      el("div", "format-option__title", `${tool.known_tool || tool.name}  ·  pid ${tool.pid}`),
+      el("div", "format-option__desc", [caps, tool.window_title].filter(Boolean).join(" · ")),
     );
-    if (chosenPid === t.pid) row.classList.add("is-active");
+    if (chosenPid === tool.pid) row.classList.add("is-active");
     row.addEventListener("click", () => {
-      chosenPid = t.pid;
+      chosenPid = tool.pid;
       manualPid = null;
       selectOption(programs, row);
       manualHint.textContent = "";
@@ -631,27 +775,27 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
   const manual = el("div", "rail-pid");
   manual.style.marginTop = "8px";
   manual.classList.add("picker-pid");
-  const manualInput = textInput("PID вручную, если программы нет в списке", "");
+  const manualInput = textInput(t("PID вручную, если программы нет в списке"), "");
   manualInput.inputMode = "numeric";
-  manualInput.setAttribute("aria-label", "PID программы");
-  const manualBtn = primary("Выбрать PID", () => {
+  manualInput.setAttribute("aria-label", t("PID программы"));
+  const manualBtn = primary(t("Выбрать PID"), () => {
     const raw = manualInput.value.trim();
     // PID Win32: только цифры, целое в диапазоне 1..2147483647.
     if (!/^\d+$/.test(raw)) {
-      manualHint.textContent = "Введите положительный целый PID (только цифры).";
+      manualHint.textContent = t("Введите положительный целый PID (только цифры).");
       manualInput.focus();
       return;
     }
     const pid = Number(raw);
     if (!Number.isInteger(pid) || pid < 1 || pid > 2147483647) {
-      manualHint.textContent = "PID должен быть целым в диапазоне 1..2147483647.";
+      manualHint.textContent = t("PID должен быть целым в диапазоне 1..2147483647.");
       manualInput.focus();
       return;
     }
     manualPid = pid;
     chosenPid = pid;
     selectOption(programs, null);
-    manualHint.textContent = `выбран PID ${pid}`;
+    manualHint.textContent = t("выбран PID {pid}", { pid });
     updateStart();
   });
   manualInput.onkeydown = (e) => {
@@ -662,13 +806,13 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
   body.append(manual, manualHint);
 
   let m: { close: () => void };
-  const start = primary("начать сессию", () => {
+  const start = primary(t("начать сессию"), () => {
     const pid = manualPid ?? chosenPid;
     if (!pid) {
-      store.toast("warn", "выберите программу или укажите PID");
+      store.toast("warn", t("выберите программу или укажите PID"));
       return;
     }
-    const tool = tools.find((t) => t.pid === pid);
+    const tool = tools.find((x) => x.pid === pid);
     const label = tool?.known_tool || tool?.name?.replace(/\.exe$/i, "") || `pid ${pid}`;
     m.close();
     // Программа из списка → attach с выбранным адаптером; PID введён вручную
@@ -676,22 +820,22 @@ function renderNewSession(res: Pick<NewSessionResult, "devices" | "tools">): voi
     if (manualPid !== null && !chosenAdapter) void store.attachPid(pid, label);
     else void store.attach(pid, label, chosenAdapter ?? undefined);
   });
-  const cancel = ghost("отмена", () => m.close());
+  const cancel = ghost(t("отмена"), () => m.close());
   start.disabled = true;
-  start.title = "сначала выберите программу (или введите PID)";
+  start.title = t("сначала выберите программу (или введите PID)");
   const updateStart = (): void => {
     const pid = manualPid ?? chosenPid;
-    const tool = tools.find((t) => t.pid === pid);
+    const tool = tools.find((x) => x.pid === pid);
     summary.textContent = [
-      chosenAdapter || "Любой адаптер",
-      pid ? `${tool?.known_tool || tool?.name || "Программа"} · PID ${pid}` : "Выберите программу или PID",
+      chosenAdapter || t("Любой адаптер"),
+      pid ? `${tool?.known_tool || tool?.name || t("Программа")} · PID ${pid}` : t("Выберите программу или PID"),
     ].join("  /  ");
     start.disabled = !pid;
-    start.title = pid ? "" : "сначала выберите программу (или введите PID)";
+    start.title = pid ? "" : t("сначала выберите программу (или введите PID)");
   };
   updateStart();
   m = modal({
-    title: "Новая сессия: выбор цели",
+    title: t("Новая сессия: выбор цели"),
     body,
     footer: [summary, cancel, start],
     width: 720,
@@ -702,11 +846,3 @@ function div(cls: string, text: string): HTMLElement {
   const d = el("div", cls, text);
   return d;
 }
-
-
-
-
-
-
-
-

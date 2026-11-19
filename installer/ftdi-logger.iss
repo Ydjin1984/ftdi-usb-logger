@@ -1,7 +1,7 @@
-; FTDI/USB Logger — установщик Inno Setup 6.
+﻿; FTDI/USB Logger — установщик Inno Setup 6.
 ;
 ; Собирается из scripts\build-installer.ps1:
-;   ISCC.exe /Q /DAppVersion=0.2.1 installer\ftdi-logger.iss
+;   ISCC.exe /Q /DAppVersion=0.3.0 installer\ftdi-logger.iss
 ;
 ; Payload — portable-сборка (движок + UI + лаунчер + встроенный Python с Frida),
 ; которую готовит build-installer.ps1 в build\installer\payload\FTDI_USB_Logger.
@@ -9,7 +9,7 @@
 ; сам лаунчер при запуске запросит UAC (движку нужны права для Frida-хуков).
 
 #ifndef AppVersion
-  #define AppVersion "0.2.1"
+  #define AppVersion "0.3.0"
 #endif
 
 [Setup]
@@ -123,3 +123,4 @@ begin
       Log('uninstall: ярлык удалён ' + Link);
   end;
 end;
+

@@ -1,5 +1,7 @@
 # FTDI/USB Logger
 
+**Русский** · [English](#english)
+
 ![FTDI/USB Logger](assets/splash.png)
 
 Стационарный логер обмена диагностического шнурка с ЭБУ: живой поток, шаги, таймлайн,
@@ -74,13 +76,13 @@ USB/COM/J2534-устройств, а не только FTDI.
 |---|---|
 | ![Шаги](assets/ui-steps.png) | ![Экспорт](assets/ui-export.png) |
 
-'| Универсальный захват (USB + J2534) | Новая сессия |
+| Универсальный захват (USB + J2534) | Новая сессия |
 |---|---|
 | ![Универсальный](assets/ui-universal-inspector.png) | ![Новая сессия](assets/ui-new-session-live.png) |
 
 | Пресеты действий (комбо) |
 |---|
-| ![Пресеты](assets/ui-presets.png) |'
+| ![Пресеты](assets/ui-presets.png) |
 
 Демо без устройства: `ui/dist/index.html?demo=1` (или `/?demo=1` у запущенного движка).
 
@@ -319,7 +321,7 @@ sequenceDiagram
 
 ---
 
-'## Пресеты действий
+## Пресеты действий
 
 Названия шагов больше не вводятся руками: на нижней панели — **комбо пресетов**. Выбрал пункт —
 шаг с этим названием открылся (предыдущий автоматически закрылся со сводкой). Шестерёнка рядом —
@@ -346,7 +348,7 @@ sequenceDiagram
 Кнопки нижней панели — только иконки; полное название и горячая клавиша появляются при
 наведении (tooltip), поэтому при сужении окна они не наезжают друг на друга.
 
-## Горячие клавиши'
+## Горячие клавиши
 
 | Клавиша | Действие |
 |---|---|
@@ -547,6 +549,446 @@ sessions/20261109-154706-bmw-scanner-e2e/
 
 Лицензия в репозитории не задана (по умолчанию — все права у автора). Если планируете
 распространять/форкать — добавьте LICENSE (например, MIT/Apache-2.0) и укажите здесь.
+
+---
+
+## English
+
+**FTDI/USB Logger** is a desktop logger for the traffic between a diagnostic cable and an ECU:
+a live stream, steps, a timeline, a HEX inspector, screenshots, reports, export/import — plus
+**universal capture** of any USB/COM/J2534 device, not only FTDI.
+
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6?logo=windows)
+![engine](https://img.shields.io/badge/engine-Rust%202021-orange?logo=rust)
+![ui](https://img.shields.io/badge/UI-TypeScript%20%2B%20Vite-blue?logo=typescript)
+![bridge](https://img.shields.io/badge/bridge-Frida%2017-red)
+![tests](https://img.shields.io/badge/tests-120%20passed-brightgreen)
+
+The project grew out of a console `logger.py` plus a Frida agent: the hooks were ported and
+extended, while parsing and the UI were rewritten. The goal is "one button" instead of typing
+commands: the engine runs as a local service, the UI opens in its own Edge window (`--app=`),
+and steps are marked with `F2`.
+
+> **Interface language:** Russian (default) or English. Switch it with the **RU / EN** selector in
+> the top bar; the choice is stored in `localStorage` and survives restarts. The installer is
+> bilingual as well (Russian is the default wizard language).
+
+### Features
+
+| Area | What it does |
+|---|---|
+| **Live stream** | virtualized list for millions of rows, filters by `TX/RX/MARK/STEP/FILE/SYS/ERR`, HEX/API/text search, tail-first loading of large sessions |
+| **Steps** | `F2` starts/stops a step, **action-preset combo** (Identification, Read/Write calibrations and full flash, Clear fault codes/adaptations, Verification; custom names are added automatically), summary (commands, responses, reads with SHA-256), screenshot, `# PHASE` in `raw.log` |
+| **Inspector** | HEX/ASCII dump, KWP/DS2/ISOTP decoding, event properties, step metadata |
+| **Timeline** | exchange density, jump to an event, step markers |
+| **Universal capture** | FTDI D2XX, COM/VCP (including overlapped I/O and a port opened **before** attach), WinUSB, HID, libusb, J2534 PassThru, raw USB through USBPcap |
+| **Program list** | modes `auto / usb / window / all`, badges `FTDI · J2534 · USB · window`, manual attach by PID |
+| **Devices** | USB device panel (VID/PID, serial, driver, COM, present), J2534 driver tab (PassThru 04.04, 32/64-bit) |
+| **New session** | finish the current one, fully rescan devices/processes, pick an adapter and a program, enter a PID manually |
+| **Reports** | `report.txt` + `report.md`, step summaries, export to ZIP / JSONL / CSV / Markdown, upload to a server |
+| **Import** | old `capture.log`/`logger.out` files become an `imported` session; reparse is supported |
+| **Rates and timing** | `FT_SetBaudRate`, `FT_SetLatencyTimer`, `FT_SetTimeouts`, `FT_SetDataCharacteristics`, `FT_SetFlowControl`, `COM SetCommState/SetCommTimeouts/SetupComm` (with a snapshot of the current DCB/timeouts for a port opened before attach), `J2534 config` (`DATA_RATE`, W1..W5, ISO15765_*) are all recorded; every event has `t` and `wall` |
+| **Reliability** | "engine is not responding" watchdog, detach with a budget and a forced stop, recovery of unfinished sessions on startup |
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph WS["Workstation (Windows)"]
+        TGT["Target tool<br/>Quickflash / WinKFP / MS4x / BMW Scanner / J2534 client"]
+        DLL["ftd2xx.dll · kernel32 · winusb · hid · J2534 DLL"]
+        SIDE["sidecar/bridge.py<br/>Python 3.12 + Frida 17"]
+        AG["sidecar/agents/universal_capture.js<br/>hooks and handle classification"]
+        ENG["ftdi-logger.exe (Rust)<br/>capture · storage · parsing · API/WS"]
+        UI["UI (ui/dist)<br/>Edge --app= http://127.0.0.1:7811"]
+        SES["sessions/&lt;id&gt;/<br/>session.json · events.jsonl · raw.log<br/>steps/ · shots/ · reads/ · report"]
+    end
+    TGT --> DLL
+    AG -. "Interceptor.attach" .-> DLL
+    DLL -->|"FT_* / ReadFile / WriteFile / DeviceIoControl / PassThru*"| AG
+    SIDE -->|"attach · hookctl · stop (JSON Lines)"| AG
+    AG --> SIDE
+    SIDE --> ENG
+    ENG --> SES
+    ENG --> UI
+    UI -->|"REST + WebSocket"| ENG
+```
+
+- **Engine** — a single `ftdi-logger.exe` process: HTTP/WS on `127.0.0.1`, session recording,
+  line parsing, steps, reports, screenshots, import/export. The UI is static files served by the engine.
+- **Bridge** — a thin Python sidecar: starts Frida, loads the JS agent, streams events line by line
+  (JSON Lines) and supports `pause/resume`.
+- **Agent** — every hook: D2XX, VCP/COM, overlapped I/O, WinUSB/HID/libusb, J2534, USB paths,
+  and a module observer for DLLs loaded after attach.
+- **Log format** is compatible with the old `logger.py`: `raw.log` can be fed to
+  `tools/legacy/parse_family.py`, and old logs can be imported into the new UI.
+
+### Supported transports
+
+| Device / API | How it is captured | Status |
+|---|---|---|
+| FTDI D2XX (`ftd2xx.dll`) — Quickflash, ms41-studio, **BMW Scanner 1.4.0** (32-bit Delphi) | `FT_*` hooks (36 functions); internal USB ioctls do not duplicate TX/RX | ✅ verified on live tools |
+| Virtual COM / VCP (WinKFP, EDIABAS, `.NET System.IO.Ports`) | `CreateFileW/A`, `ReadFile`, `WriteFile`, `GetOverlappedResult(Ex)`, `DeviceIoControl`; lazy classification of an already-open port | ✅ including overlapped I/O |
+| WinUSB (`winusb.dll`) | `WinUsb_ReadPipe/WritePipe/ControlTransfer` | ✅ |
+| HID (`hid.dll`, `\\?\hid#…`) | `HidD_*`, `ReadFile/WriteFile/DeviceIoControl` on HID paths | ✅ |
+| libusb-1.0 | `libusb_bulk/interrupt/control_transfer` | ✅ |
+| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | DLL loading by patterns + **all** `PassThru*` exports (open/connect/read/write/ioctl/filter/voltage/version) | ✅ at message level: protocol, CAN ID, payload, ISOTP PCI, KWP/UDS service; vendor protocols without a CAN ID (PCMflash `0x8003`) are parsed by length prefix |
+| **LAN** (J2534-over-IP, DoIP/ISO 13400, BMW ICOM/HSFZ, network adapters) | Winsock hooks `ws2_32`: `connect/accept`, `send/recv`, `WSASend/WSARecv`, `sendto/recvfrom`, `WSAGetOverlappedResult` | ✅ full TCP/UDP exchange, including overlapped; DoIP headers, source/target address, UDS service and NRC in the inspector |
+| Any USB device with a proprietary driver | raw USBPcap capture → `USBRAW bus/dev/ep/transfer/…` | ⚠️ requires [USBPcap](https://desowin.org/usbpcap/) and administrator rights |
+
+The **USB DEVICES** panel lists every USB device and registered J2534 driver; the header shows a
+`bus: USB/J2534 · N` indicator. The device list refreshes every ~12 s even while recording, so a
+cable swap is visible without a restart.
+
+### Requirements
+
+| Component | Why | How to install |
+|---|---|---|
+| Windows 10/11 x64 | target OS (Frida/FTD2XX, Edge) | — |
+| Rust (cargo) | build the engine | <https://rustup.rs> |
+| Node.js 20+ and pnpm | build the UI | `winget install OpenJS.NodeJS.LTS`, then `npm i -g pnpm` |
+| Python 3.12 + `frida>=17,<18` | process bridge | `py -3.12 -m pip install "frida>=17,<18"` |
+| FTDI driver (D2XX / VCP) | the cable | from the FTDI site; for WinKFP/EDIABAS as before |
+| Administrator rights | WinKFP/EDIABAS and USBPcap attach to their processes | start the logger "as administrator" |
+
+> Windows is mandatory: the engine uses Win32 APIs (ToolHelp, SetupAPI, registry, screenshots).
+> The UI and the sidecar are cross-platform, but the product targets a Windows bench.
+
+### Quick start
+
+```mermaid
+flowchart TD
+    A["Windows 10/11 x64"] --> B["Rust + Node/pnpm + Python 3.12 + frida 17"]
+    B --> C["scripts\build.ps1"]
+    C --> D["dist\FTDI_USB_Logger (≈6.6 MB)"]
+    D --> E["logger.cmd / scripts\run.ps1"]
+    E --> F["UI: http://127.0.0.1:7811"]
+    F --> G["pick a program → attach → F2 steps"]
+```
+
+#### Build
+
+```powershell
+# full build: UI + engine + dist\FTDI_USB_Logger\
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+
+# engine only (no UI)
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -SkipUi
+
+# development mode: engine + vite dev proxying /api and /ws
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
+```
+
+Result in `dist\FTDI_USB_Logger\`:
+
+| Inside | What it is |
+|---|---|
+| `ftdi-logger.exe` | the engine (release) |
+| `ui\dist\` | the built interface (served by the engine at `/`) |
+| `sidecar\` | Python bridge `bridge.py` + Frida agent `universal_capture.js` |
+| `sessions\` | session directory (empty) |
+| `logger.cmd` | double-click launcher without a hanging console |
+
+#### Run
+
+```powershell
+# from the repository (dist if built, otherwise the release engine binary)
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+
+# as before: double-click logger.cmd (or a desktop shortcut)
+```
+
+The engine binds HTTP/WS on `http://127.0.0.1:7811` and opens an Edge `--app=` window itself.
+Change the port with `scripts\run.ps1 -Port 7812` (or `ftdi-logger.exe --port 7812`).
+
+### Installing on another machine (standalone build)
+
+The application does not need Python/Frida/Rust installed: the installer and the portable build
+embed Python 3.12 with Frida. Ready builds are published in **GitHub Releases** (workflow
+`.github/workflows/release.yml`, tag `v*`) — download `FTDI_USB_Logger_Setup.exe` and the
+portable ZIP from there and install without building from source.
+
+**Download (no authentication):**
+[FTDI_USB_Logger_Setup.exe](https://github.com/Ydjin1984/ftdi-usb-logger/releases/latest/download/FTDI_USB_Logger_Setup.exe) ·
+[portable ZIP](https://github.com/Ydjin1984/ftdi-usb-logger/releases/latest/download/FTDI_USB_Logger_portable.zip) ·
+[all releases](https://github.com/Ydjin1984/ftdi-usb-logger/releases)
+
+| What | Where | Size | How it installs |
+|---|---|---|---|
+| **Installer** | `FTDI_USB_Logger_Setup.exe` (GitHub Releases, `dist\`) | ≈43 MB | run it, allow UAC; per-user install into `%LOCALAPPDATA%\FTDI_USB_Logger`, desktop and Start menu shortcuts, an entry in "Apps & features", uninstaller |
+| **Portable ZIP** | `FTDI_USB_Logger_portable.zip` (GitHub Releases, `build\`) | ≈64 MB | unpack anywhere and run `FTDI_USB_Logger.exe`; nothing is installed |
+| Plain dist | `dist\FTDI_USB_Logger\` | ≈7 MB | for machines that already have Python + Frida |
+
+- **Standalone launcher** `FTDI_USB_Logger.exe` (`launcher/Launcher.cs`, built by
+  `scripts/build-launcher.ps1`): shows the logo for **2 seconds**, then starts the engine and opens
+  the journal window. The icon is `assets/app.ico`, the logo `assets/splash.png` is embedded as an
+  exe resource; the manifest requires administrator rights.
+- **Administrator rights**: both `FTDI_USB_Logger.exe` and `logger.cmd` always ask for UAC —
+  the engine needs rights for Frida hooks and reading other processes. The UI window itself opens
+  without administrator rights (through Explorer).
+- **Splash on start**: the logo stays for exactly 2 seconds (even if the engine is up earlier);
+  if the engine does not answer within 60 s, the launcher shows an error and points to
+  `logger.err.log`. The old fallback without the launcher is `scripts/splash.ps1`.
+- **Application icon**: `assets/app.ico` — in the exe, on shortcuts and in the taskbar
+  (the UI window gets its favicon from `ui/public/favicon.png`).
+- The installer is unsigned: on first launch SmartScreen may show "Unknown publisher" →
+  "More info" → "Run anyway". Distribution needs a code-signing certificate (not in the repository).
+- Sessions and logs live in the installation directory (`sessions\`); keep them when uninstalling.
+
+#### Building the installer (Inno Setup)
+
+```powershell
+# 0) engine + UI + standalone launcher -> dist\FTDI_USB_Logger\ (including FTDI_USB_Logger.exe)
+pwsh -File scripts\build.ps1
+
+# 1) portable: dist + embedded Python + frida -> build\FTDI_USB_Logger_portable.zip
+pwsh -File scripts\build-portable.ps1
+
+# 2) Setup.exe (Inno Setup 6, per-user install) -> dist\FTDI_USB_Logger_Setup.exe
+pwsh -File scripts\build-installer.ps1
+
+# fallback without Inno Setup — 7-Zip SFX (worse: no wizard, no icon)
+pwsh -File scripts\build-installer.ps1 -ForceSfx
+```
+
+The installer is **Inno Setup 6** (`installer\ftdi-logger.iss`): setup wizard, application icon
+for Setup.exe, an entry in "Apps & features", desktop and Start menu shortcuts, a proper uninstaller,
+and it closes running processes before installing. **The wizard is bilingual: Russian (default) and
+English** — Inno picks the language from the system, and the user can change it on the first page.
+The compiler is looked up in `%INNO_SETUP_DIR%`, `C:\Program Files (x86)\Inno Setup 6` and PATH;
+if it is missing, the script falls back to 7-Zip SFX.
+
+Building needs .NET Framework 4.x (csc for the launcher), Inno Setup 6 and internet access
+(embeddable Python is downloaded once and cached in `build\cache`); 7-Zip is only needed for the
+fallback and the portable archive.
+
+### How to log
+
+1. Start the target tool (Quickflash, WinKFP, MS4x Flasher, BMW Scanner, any J2534 client) and
+   connect the adapter.
+2. In the UI open **PROGRAMS**: the list shows processes with a window, USB/FTDI/J2534 modules and
+   known tools, with `FTDI`, `J2534`, `USB`, `window` badges. Pick the tool and press **attach**.
+   If it is not listed, switch the filter to "windows"/"all" or enter a PID manually.
+3. `F2` opens a step (the name is suggested automatically); `F2` again closes it: summary,
+   screenshot and `# PHASE` lines in `raw.log`.
+4. Work with the unit as usual: all FTDI/VCP/USB/J2534 traffic and file operations are recorded.
+5. `Esc` stops the capture and closes the session; reports and export are available from the UI.
+
+> Tools that open the port **before** attach (MS4x Flasher, .NET SerialPort) are supported: the
+> agent lazily classifies an already-open handle via `GetFinalPathNameByHandleW` and also picks up
+> overlapped RX through `GetOverlappedResult`/`OVERLAPPED.Internal`.
+
+### New session and cable swap
+
+The **NEW SESSION** button in the header (or `Ctrl+Alt+N`):
+
+1. If recording is active, it asks for confirmation: the current session is saved, capture stops.
+2. The logger **rescans** USB devices, J2534 drivers and processes (the cache is dropped).
+3. A picker opens: adapter (FTDI serial/COM) and program (the `auto` list) or a manual PID.
+4. "start session" — capture starts again, already with the new cable/program.
+
+If the **target tool exits**, the engine finishes the session within ~1 s ("capture stopped,
+devices released") instead of showing `REC` forever. If the engine is stopped or restarted, the UI
+shows the **"Engine is not responding"** layer after ~12 s, and the page reconnects by itself once
+`logger.cmd` is started again. A forced `detach` never lets the bridge hold a session longer than 8 s.
+
+### Action presets
+
+Step names are no longer typed by hand: the bottom bar has a **preset combo**. Pick an item and the
+step opens with that name (the previous one closes with a summary automatically). The gear next to it
+edits the list (add/remove lines, restore the defaults).
+
+Default set: Identification, Read calibrations, Read full flash, Write calibrations, Write full flash,
+Clear fault codes, Reset adaptations, Verification.
+
+- Presets live in `localStorage` (`ftdi.quickTitles`) and survive restarts.
+- A name typed manually (`Shift+F2` or a mark `F5`) is **saved automatically** as a preset.
+- The list is also used for suggestions in the step and mark dialogs.
+- The bottom-bar buttons are icon-only; the full name and hotkey appear in a tooltip, so they do not
+  overlap when the window is narrow.
+
+### Hotkeys
+
+| Key | Action |
+|---|---|
+| `F2` | open/close a step (start with an automatic name, end with a summary + screenshot) |
+| `Shift+F2` | open a step with a manual name |
+| `F1` | built-in help |
+| `F5` | mark in the stream without a step (MARK) |
+| `F6` | pause/resume hooks (`hookctl pause/resume`) |
+| `F8` | screenshot now |
+| `Esc` | stop capture (detach) |
+| `Ctrl+F` | search the stream |
+| `Ctrl+E` | export the session |
+| `Ctrl+O` | import an old log |
+| `Ctrl+Alt+N` | **new session** (rescan everything) |
+| bottom-bar combo | pick a preset — open a step with that name |
+| `↑ ↓ PgUp PgDn Home End` | navigate the stream |
+
+There are no global hotkeys — they work while the logger window is focused, so they never steal
+input from the target tool.
+
+### Repository layout
+
+| Path | Contents |
+|---|---|
+| `engine/` | Rust engine: `main/config/discovery/procscan/screenshot/frida`, `models/store/decode/api/report/import/ediabas/usbdevices/j2534/usbpcap`, integration tests |
+| `ui/` | interface (TypeScript + CSS, vite): stream, inspector, timeline, panels, dialogs, CDP checks |
+| `sidecar/` | `bridge.py` (JSON Lines) + `agents/universal_capture.js` (all hooks) and `ftdi_capture.js` (legacy set) |
+| `scripts/` | `build.ps1`, `run.ps1`, `dev.ps1` |
+| `tests/e2e/` | `smoke.ps1`, `universal.ps1` (MS4x), `bmw-scanner.ps1`, `dummy_target.py`, edge scenarios |
+| `docs/` | contracts, architecture, runbook, interfaces, edge cases, smoke, review, universal-capture research |
+| `tools/legacy/` | historical `parse_family.py`, `winkfp.py`, `attach_capture.py` — the parsing reference |
+| `reference/` | golden logs and expected artifacts for tests |
+| `sessions/` | product sessions (empty in git, `.gitkeep`) |
+| `assets/` | screenshots for the README |
+
+### HTTP/WS API (brief)
+
+Everything listens on `127.0.0.1` only; CORS allows the exact localhost origin.
+
+| Method / path | Purpose |
+|---|---|
+| `GET /api/health` | version, bridge state, `capabilities` (ftd2xx, j2534, usbpcap) |
+| `GET /api/sessions`, `GET /api/sessions/{id}` | list/details of sessions |
+| `GET /api/sessions/{id}/events?from=&limit=&filter=` | page of events |
+| `GET /api/sessions/{id}/events/{seq}/decode` | decode the payload (KWP/DS2/ISOTP) |
+| `POST /api/capture/attach` `{pid,label?,adapter?}` | attach to a process |
+| `POST /api/capture/detach` | stop capture (8 s budget + force) |
+| `POST /api/session/new` | finish the current session and rescan the environment |
+| `GET /api/tools?mode=auto\|usb\|window\|all` | candidate processes |
+| `GET /api/devices` · `GET /api/usb/devices` · `GET /api/j2534/drivers` | FTDI / USB / J2534 |
+| `POST /api/usbpcap/start` | raw bus capture (needs USBPcap) |
+| `POST /api/sessions/{id}/step/start` · `step/end` · `mark` · `note` · `shot` | session annotation |
+| `POST /api/sessions/{id}/reparse` | rebuild reports from `events.jsonl` |
+| `POST /api/import` · `POST /api/import/upload` | import old logs |
+| `GET /api/sessions/{id}/export?format=zip\|jsonl\|csv\|md` | export |
+| `WS /ws?session=` | live event stream |
+
+Full response shapes and error codes are in [docs/02-architecture.md](docs/02-architecture.md).
+
+### Sessions and log format
+
+```
+sessions/20261109-154706-bmw-scanner-e2e/
+├── session.json        # metadata: tool, pid, exe sha256, counters, status
+├── events.jsonl        # events (kind, api, transport, direction, t, hex, meta)
+├── events.idx          # fast lookup index
+├── raw.log             # log in the old logger.py format (re-importable)
+├── steps/01.json …     # step summaries (commands, responses, reads, screenshot)
+├── shots/              # PNG screenshots of steps
+├── reads/              # read dumps with SHA-256
+├── import/             # source of an imported log
+├── report.txt          # text report
+└── report.md           # Markdown report
+```
+
+Example `raw.log` (compatible with the old parser):
+
+```text
+# capture start: label=BMW Scanner e2e
+# tool: C:\BMWScan140\BMWScan140.exe
+# exe: size=3009024 mtime=2011-09-20 02:11:16 sha256=7aebc4b7…
+# wall(start)=2026-11-09 15:47:06
+# host: user=User computer=DESKTOP-7MECFCS
+[+3.947s] ftd2xx.dll hooks installed (36) at 0x10000000 C:\Windows\SYSTEM32\ftd2xx.dll
+[+3.969s] FT_OpenEx('BMW Scanner V14x' flags=2) rc=0 handle=0xde5608
+[+3.970s] FT_SetBaudRate(handle=0xde5608, 19200) rc=0
+[+4.147s] RX ftd2xx FT_Read rc=0 want=1 n=1 : 12
+[+4.637s] TX ftd2xx FT_Write rc=0 len=1 n=1 : b9
+# MARK wall=… rel=+4.900s START 1: reading identifiers
+# PHASE …
+# PHASE-JSON …
+# totals: events=1094 tx=260/260 rx=758/758 steps=0
+```
+
+### Export, import, reparse
+
+- **Export** (`Ctrl+E`): session ZIP, event JSONL, CSV, Markdown/text report; upload to a server by
+  a configurable URL.
+- **Import** (`Ctrl+O` or drag-and-drop into the window): an old `capture.log`/`logger.out` becomes
+  a session with `status:"imported"`, `transport:"import"`; the source is copied to
+  `sessions/<id>/import/`.
+- **Reparse**: `POST /api/sessions/{id}/reparse` — rebuild summaries/report from `events.jsonl`
+  after editing step names.
+
+### Tests and acceptance
+
+| What is checked | Command | Result |
+|---|---|---|
+| Rust: unit + integration | `cd engine; cargo test --all-targets` | 104 passed, 10 ignored |
+| API end-to-end on a real log | `pwsh -File tests\e2e\smoke.ps1` | 14/14 |
+| UI through CDP (stream, inspector, summary, export, search, responsive) | `node ui\tools\cdp-check.mjs "http://127.0.0.1:7811/?demo=1" ui\shots` | 14/14 demo, 15/15 live |
+| Live universal capture (MS4x Flasher, VCP+overlapped, UIA "Identify") | `pwsh -File tests\e2e\universal.ps1` | 10/10 |
+| Live BMW Scanner 1.4.0 capture (FTDI D2XX, 32-bit Delphi) | `pwsh -File tests\e2e\bmw-scanner.ps1 -StartApp` | 4/4 |
+| Live capture without hardware (Frida → process → events → report) | `python tests\e2e\dummy_target.py --seconds 30` + attach | ok |
+| Acceptance of the built dist | [docs/06-smoke.md](docs/06-smoke.md) | — |
+| Independent review and found defects | [docs/07-review.md](docs/07-review.md) | — |
+
+### Documentation
+
+| Document | About |
+|---|---|
+| [docs/01-original-contracts.md](docs/01-original-contracts.md) | research of the old logger: line format, behaviour, artifacts |
+| [docs/02-architecture.md](docs/02-architecture.md) | architecture, API contracts, event model, §11 universal capture |
+| [docs/03-runbook.md](docs/03-runbook.md) | installation, build, rights, diagnostics, cable swap |
+| [docs/04-interfaces.md](docs/04-interfaces.md) | Rust module signatures |
+| [docs/05-edge-cases.md](docs/05-edge-cases.md) | API/import/UI edge cases |
+| [docs/06-smoke.md](docs/06-smoke.md) | acceptance of the built dist |
+| [docs/07-review.md](docs/07-review.md) | review and fixed defects |
+| [docs/08-universal-research.md](docs/08-universal-research.md) | how MS4x/BMW Scanner/J2534 talk to the adapter, what hooks catch and what needs USBPcap |
+
+### Limitations
+
+| Limitation | Why / what to do |
+|---|---|
+| The step summary is computed immediately, without the 1.6 s settle pause of the old logger | trailing RX in the last milliseconds may miss the step summary; use `raw.log` with the old `parse_family.py` for a full parse |
+| `report.txt` is a step summary, not a full `parse_family` analysis | full analysis: `python tools/legacy/parse_family.py --log sessions/<id>/raw.log --gap 2.0` |
+| FT_* and internal USB ioctls could duplicate | suppressed in the agent while `ftd2xx.dll` hooks are active; through WinUSB/HID the USB level is visible |
+| Raw USB through USBPcap needs the driver and administrator rights | without it, API hooks (FTDI/COM/WinUSB/HID/libusb/J2534/LAN) are available; installing USBPcap needs a reboot |
+| J2534 is captured at the PassThru message level (protocol/ID/payload), without driver URB parsing | if the adapter does not open through `PassThru*`, use USBPcap |
+| I/O straight through `ntdll!NtReadFile/NtDeviceIoControlFile` (bypassing kernel32) is not hooked | such devices need raw USBPcap; other paths (including overlapped `ReadFile` on a USB handle and `DeviceIoControl`) are covered |
+| Over TCP/UDP only DoIP (ISO 13400) and port hints are recognised | HSFZ (ICOM, 6801) and J2534-over-IP are visible as a byte stream with addresses; frame parsing is in the inspector/export |
+| ISOTP: PCI classification (SF/FF/CF/FC) and the service id of a single frame | multi-frame reassembly is not performed — collect frames in the export |
+| J2534/TX-RX are not paired request-response automatically | the step summary has `cmd_hist`/`resp_hist` by protocol/ID/service; the full exchange is in the stream |
+| One line holds at most 16 KB of payload | large bulk packets are split into `part=i/n` lines; the engine event limit is 64 KB |
+| Capture is "byte-by-byte" for D2XX tools like BMW Scanner | the tool calls `FT_Read/FT_Write` one byte at a time; the logger faithfully records every call; frame assembly is done by `parse_family`/a future assembler |
+| No global hotkeys | F2/F5/F6/F8 work while the logger window is focused |
+| Listens on `127.0.0.1` only, CORS is the exact localhost origin | remote access is intentionally closed |
+| EDIABAS mode is enabled by a heuristic (process name or fresh traces) | force it with `FTDI_LOGGER_EDIABAS=1`; INI/trace paths via `FTDI_LOGGER_EDIABAS_INI`, `_OBD_INI`, `_WINKFP_INI`, `_TRACE_DIR` |
+
+### Diagnostics
+
+| Symptom | Where to look |
+|---|---|
+| "bridge unavailable" | `python sidecar\bridge.py --self-test`; python/frida of the engine (runbook) |
+| port 7811 is busy | `netstat -ano \| findstr :7811`, close the old `ftdi-logger.exe` or set `-Port` |
+| the device is not visible | FTDI driver (D2XX/VCP); wait for `MODULE + FTD2XX.DLL` / `FT_GetDeviceInfoDetail` in the log |
+| the tool is not listed | switch to the "windows"/"all" mode or enter a PID manually; check `GET /api/tools?mode=all` |
+| WinKFP/EDIABAS is not logged | the tool runs as administrator → the logger must too |
+| a LAN adapter is not visible in the stream | the session start should contain `LAN module: ws2_32.dll … hooks=N`; if not, the target did not load Winsock (or the logger is not elevated), check `universal hooks: … lan=1` |
+| the UI shows "Engine is not responding" | the engine is stopped/restarting; start `logger.cmd`, the page reconnects |
+| "already running" on a second click | by design: `logger.cmd` focuses the window of the running instance |
+| the product does not start | `dist\FTDI_USB_Logger\logger.err.log` + `netstat` for the port; see the runbook |
+
+The full order of installation, bridge checks, administrator rights and error analysis is in
+**[docs/03-runbook.md](docs/03-runbook.md)**.
+
+### Privacy and security
+
+- The logger works **locally**: HTTP/WS only on `127.0.0.1`; nothing leaves the machine except an
+  explicit "upload to server" command (when a URL is configured).
+- Sessions contain diagnostic traffic and may contain VINs/ECU dumps — store and share them
+  consciously; the `sessions/` directory never goes into the repository.
+- The tool does not modify the target application and does not bypass its protections: it only
+  intercepts calls and records them. The application is started by the user and works as usual.
+- Responsibility for use lies with the equipment owner. Do not use it on third-party
+  vehicles/devices without permission.
+
+### License
+
+No license is set in the repository (by default all rights remain with the author). If you plan to
+distribute/fork it, add a LICENSE (e.g. MIT/Apache-2.0) and mention it here.
 
 ---
 

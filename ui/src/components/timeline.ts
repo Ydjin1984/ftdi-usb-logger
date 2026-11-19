@@ -3,6 +3,14 @@
 import { el } from "../dom";
 import { fmtDurationSeconds, fmtTime } from "../format";
 import { store } from "../store";
+import { msg, t } from "../i18n";
+
+msg({
+  "ТАЙМЛАЙН": "TIMELINE",
+  "плотность обмена · клик — перейти к событию": "exchange density · click to jump to an event",
+  "таймлайн появится вместе с потоком": "the timeline appears together with the stream",
+  "canvas 2d недоступен": "canvas 2d is unavailable",
+});
 
 export class Timeline {
   el: HTMLElement;
@@ -21,15 +29,15 @@ export class Timeline {
     this.onSeek = onSeek;
     this.el = el("section", "timeline");
     const head = el("div", "timeline__head");
-    head.append(el("span", "timeline__title", "ТАЙМЛАЙН"));
-    this.hint = el("span", "timeline__hint", "плотность обмена · клик — перейти к событию");
+    head.append(el("span", "timeline__title", t("ТАЙМЛАЙН")));
+    this.hint = el("span", "timeline__hint", t("плотность обмена · клик — перейти к событию"));
     head.append(this.hint);
     this.wrap = el("div", "timeline__canvas-wrap");
     this.canvas = el("canvas");
     this.wrap.append(this.canvas);
     this.el.append(head, this.wrap);
     const ctx = this.canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d недоступен");
+    if (!ctx) throw new Error(t("canvas 2d недоступен"));
     this.ctx = ctx;
 
     new ResizeObserver(() => this.draw()).observe(this.wrap);
@@ -130,7 +138,7 @@ export class Timeline {
     if (!s.events.length) {
       ctx.fillStyle = "#5f6c7a";
       ctx.font = "10px " + (getComputedStyle(document.body).getPropertyValue("--font-mono") || "monospace");
-      ctx.fillText("таймлайн появится вместе с потоком", padX + 4, chartTop + chartH / 2);
+      ctx.fillText(t("таймлайн появится вместе с потоком"), padX + 4, chartTop + chartH / 2);
       this.drawHover(ctx, w, h, padX, innerW, maxT);
       return;
     }
