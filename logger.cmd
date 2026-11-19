@@ -106,7 +106,7 @@ goto :start_failed
 :already_running
 echo [logger] FTDI/USB Logger уже запущен: http://127.0.0.1:%PORT%/
 echo [logger] открываю окно работающего экземпляра.
-start "" msedge --app=http://127.0.0.1:%PORT%/
+start "" msedge --app=http://127.0.0.1:%PORT%/ --user-data-dir="%ROOT%\browser-profile" --no-first-run --no-default-browser-check --disable-features=Translate,TranslateUI --disable-translate
 exit /b 0
 
 :started

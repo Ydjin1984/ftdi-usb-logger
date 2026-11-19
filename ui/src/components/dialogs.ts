@@ -219,7 +219,7 @@ export function openMarkPrompt(): void {
   list.id = "mark-titles";
   for (const title of store.state.quickTitles) {
     const o = el("option");
-    o.value = title;
+    o.value = t(title);
     list.append(o);
   }
   input.setAttribute("list", "mark-titles");
@@ -261,7 +261,7 @@ export function openStepPrompt(): void {
   list.id = "step-titles";
   for (const title of store.state.quickTitles) {
     const o = el("option");
-    o.value = title;
+    o.value = t(title);
     list.append(o);
   }
   input.setAttribute("list", "step-titles");

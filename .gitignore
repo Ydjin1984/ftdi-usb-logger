@@ -21,4 +21,7 @@ Thumbs.db
 # Машинные артефакты edge-прогона (перегенерируются run-edge.ps1)
 /tests/e2e/edge/out/
 /build/
+# Настройки интерфейса и профиль окна Edge — локальные, не для git
+/prefs.json
+/browser-profile/
 

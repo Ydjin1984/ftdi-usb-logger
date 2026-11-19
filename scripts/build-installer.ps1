@@ -27,7 +27,7 @@ $SetupOut = Join-Path $Root "dist\FTDI_USB_Logger_Setup.exe"
 
 # Версия приложения для AppVersion/VersionInfo установщика.
 $engineToml = Join-Path $Root "engine\Cargo.toml"
-$appVersion = "0.3.1"
+$appVersion = "0.3.2"
 if (Test-Path -LiteralPath $engineToml) {
     $toml = Get-Content -LiteralPath $engineToml -Raw
     if ($toml -match '(?m)^version\s*=\s*"([^"]+)"') { $appVersion = $Matches[1] }
@@ -70,7 +70,9 @@ $isccCandidates = @()
 if ($env:INNO_SETUP_DIR) { $isccCandidates += (Join-Path $env:INNO_SETUP_DIR "ISCC.exe") }
 $isccCandidates += @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+    (Join-Path $env:LOCALAPPDATA "Inno Setup 6\ISCC.exe")
 )
 $isccCmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if ($isccCmd) { $isccCandidates += $isccCmd.Source }

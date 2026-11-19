@@ -49,6 +49,25 @@ function readLang(): Lang {
 let current: Lang = readLang();
 const listeners = new Set<(lang: Lang) => void>();
 
+/**
+ * Пометить страницу как непереводимую и выставить ей настоящий язык.
+ *
+ * UI открывается в Edge (`--app`), а у Edge есть встроенный переводчик: если
+ * страница выглядит английской, он может перевести её обратно на русский —
+ * и выбор английского «не срабатывал». Свои подписи приложение переводит
+ * само, браузерный перевод ему только мешает, поэтому страница объявляется
+ * непереводимой (`translate="no"`, `notranslate`, meta google).
+ */
+function applyDocumentLang(): void {
+  const root = document.documentElement;
+  root.lang = current;
+  root.setAttribute("translate", "no");
+  root.classList.add("notranslate");
+  document.body?.classList.add("notranslate");
+}
+
+applyDocumentLang();
+
 /** Английские переводы. Ключ — русская фраза (шаблон). */
 const EN: Record<string, string> = {
   // ── общее ──────────────────────────────────────────────────────────────
@@ -236,6 +255,9 @@ export function setLang(next: Lang): void {
   } catch {
     /* хранилище недоступно — выбранный язык поедет в адресе */
   }
+  // Выбор дублируем в настройки приложения (prefs.json рядом с сессиями):
+  // профиль браузера может смениться, а язык должен остаться.
+  void savePrefs(next);
   for (const fn of listeners) fn(next);
   // Компоненты строят текст один раз в конструкторе, поэтому язык применяем
   // полной перезагрузкой. Выбор передаём в адресе (`?lang=en`), а не полагаемся
@@ -272,6 +294,65 @@ export function syncLangParam(): void {
     history.replaceState(history.state, "", url.toString());
   } catch {
     /* адрес не трогаем: роли не играет, язык уже применён */
+  }
+}
+
+/**
+ * Настройки языка в самом приложении (`prefs.json` в корне установки).
+ *
+ * localStorage живёт только в профиле браузера: гостевой профиль, очистка
+ * данных, новый профиль Edge — и выбор терялся. Файл рядом с сессиями общий
+ * для всех окон, профилей и браузеров, поэтому язык больше не «откатывается».
+ */
+const PREFS_URL = "/api/prefs";
+
+async function fetchPrefs(): Promise<Lang | null> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 1200);
+    const res = await fetch(PREFS_URL, { signal: ctl.signal, cache: "no-store" });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { lang?: unknown };
+    return data.lang === "en" || data.lang === "ru" ? (data.lang as Lang) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function savePrefs(lang: Lang): Promise<void> {
+  try {
+    await fetch(PREFS_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lang }),
+    });
+  } catch {
+    /* движок недоступен — выбор останется в адресе и в хранилище */
+  }
+}
+
+/**
+ * Согласовать язык до построения интерфейса: явный `?lang=` главнее, иначе
+ * берём сохранённый в приложении. Вызывается из main() до build().
+ */
+export async function syncLangPreference(): Promise<void> {
+  const fromUrl = langFromUrl();
+  if (fromUrl) {
+    current = fromUrl;
+    applyDocumentLang();
+    await savePrefs(fromUrl);
+    return;
+  }
+  const saved = await fetchPrefs();
+  if (saved && saved !== current) {
+    current = saved;
+    try {
+      localStorage.setItem(STORAGE_KEY, saved);
+    } catch {
+      /* хранилище недоступно — язык уже применён из настроек */
+    }
+    applyDocumentLang();
   }
 }
 

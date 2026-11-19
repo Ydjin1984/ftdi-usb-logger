@@ -8,6 +8,7 @@ import { openHelpDialog, openNewSessionDialog } from "./dialogs";
 import { getLang, msg, setLang, t, type Lang } from "../i18n";
 
 msg({
+  "DAVINCI  /  КОНСОЛЬ ЗАХВАТА": "DAVINCI  /  CAPTURE CONSOLE",
   "звуковые сигналы шагов": "step sound alerts",
   "+ Новая сессия": "+ New session",
   "завершить текущую сессию, пересканировать шнурки и программы (Ctrl+Alt+N)":
@@ -62,7 +63,7 @@ export class Topbar {
     mark.appendChild(icon("step"));
     const names = el("div");
     names.appendChild(el("div", "brand__name", "FTDI / USB Logger"));
-    names.appendChild(el("div", "brand__sub", "DAVINCI  /  CAPTURE CONSOLE"));
+    names.appendChild(el("div", "brand__sub", t("DAVINCI  /  КОНСОЛЬ ЗАХВАТА")));
     brand.append(mark, names);
 
     this.pills = el("div", "statusbar");

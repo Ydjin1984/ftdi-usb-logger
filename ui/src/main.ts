@@ -24,7 +24,7 @@ import {
   openStopConfirm,
 } from "./components/dialogs";
 import { isDemoMode } from "./api";
-import { errText, localizeDom, msg, syncLangParam, t } from "./i18n";
+import { errText, localizeDom, msg, syncLangParam, syncLangPreference, t } from "./i18n";
 
 msg({
   "Разделы рабочего пространства": "Workspace sections",
@@ -305,6 +305,9 @@ function showBootError(message: string): void {
 }
 
 async function main(): Promise<void> {
+  // Сначала язык из адреса (и запись его в настройки), потом хранилище и
+  // очистка адреса, потом — настройки приложения как источник по умолчанию.
+  await syncLangPreference();
   syncLangParam();
   localizeDom();
   build();

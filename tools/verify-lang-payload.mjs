@@ -114,18 +114,70 @@ async function waitFor(expr, ms = 20000) {
 await waitFor(`!!document.querySelector('.topbar')`);
 
 const SAMPLE = `({ lang: document.documentElement.lang,
+  translate: document.documentElement.getAttribute('translate'),
+  noTranslateMeta: !!document.querySelector('meta[name="google"][content="notranslate"]'),
   sel: document.querySelector('select.lang-select')?.value ?? null,
   nav: (document.querySelector('.workspace-nav')?.textContent ?? '').trim() })`;
 
+// Подписи интерфейса без данных (устройства, процессы, журнал, названия шагов).
+const CHROME = `(() => {
+  const SKIP = ".device, .session-item, .row, .inspect, .tool, .timeline, .list__item, .hex, .decoded, datalist";
+  let cyr = 0, latin = 0, total = 0;
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walk.nextNode())) {
+    const el = n.parentElement;
+    if (!el || el.closest(SKIP)) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") continue;
+    const t = (n.nodeValue ?? "").trim();
+    if (!t) continue;
+    total++;
+    if (/[А-Яа-яЁё]/.test(t)) cyr++;
+    else if (/[A-Za-z]/.test(t)) latin++;
+  }
+  return { cyr, latin, total };
+})()`;
+
 const before = await ev(SAMPLE);
+const beforeChrome = await ev(CHROME);
 await ev(`(() => { const s = document.querySelector('select.lang-select'); if (!s) return 'no-select';
   s.value = 'en'; s.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
 await sleep(2500);
 await waitFor(`!!document.querySelector('.topbar')`);
 const after = await ev(SAMPLE);
+const afterChrome = await ev(CHROME);
 
-const ok = after.lang === "en" && /Sessions and USB/.test(after.nav);
-console.log(JSON.stringify({ dist: DIST, blockStorage: BLOCK, before, after, result: ok ? "PASS" : "FAIL" }, null, 2));
+// Обратно на русский: переключение должно работать в обе стороны.
+await ev(`(() => { const s = document.querySelector('select.lang-select'); if (!s) return 'no-select';
+  s.value = 'ru'; s.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
+await sleep(2500);
+await waitFor(`!!document.querySelector('.topbar')`);
+const back = await ev(SAMPLE);
+const backChrome = await ev(CHROME);
+
+const notranslatable = after.translate === "no" && after.noTranslateMeta;
+const ok =
+  after.lang === "en" &&
+  back.lang === "ru" &&
+  notranslatable &&
+  afterChrome.cyr === 0 &&
+  backChrome.cyr > 0;
+console.log(
+  JSON.stringify(
+    {
+      dist: DIST,
+      blockStorage: BLOCK,
+      before,
+      after,
+      back,
+      chrome: { before: beforeChrome, en: afterChrome, ru: backChrome },
+      result: ok ? "PASS" : "FAIL",
+    },
+    null,
+    2,
+  ),
+);
 
 ws.close();
 edge.kill();

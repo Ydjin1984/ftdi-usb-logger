@@ -1,6 +1,7 @@
 /** Форматирование значений для ленты и инспектора. */
 
 import { getLang } from "./i18n";
+import { localizeEventText } from "./engine-text";
 
 /** Локаль чисел и дат — по языку интерфейса. */
 function loc(): string {
@@ -36,9 +37,13 @@ export function fmtClock(seconds: number): string {
 
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+  const ru = getLang() === "ru";
+  const b = ru ? "Б" : "B";
+  const kib = ru ? "КиБ" : "KiB";
+  const mib = ru ? "МиБ" : "MiB";
+  if (n < 1024) return `${n} ${b}`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} ${kib}`;
+  return `${(n / (1024 * 1024)).toFixed(2)} ${mib}`;
 }
 
 export function fmtBytesShort(n: number): string {
@@ -124,7 +129,7 @@ export function eventPreview(ev: {
   if (ev.kind === "mark" || ev.kind === "note" || ev.kind === "step_start" || ev.kind === "step_end") {
     return ev.text || "";
   }
-  if (ev.text) return ev.text;
+  if (ev.text) return localizeEventText(ev.text);
   if (ev.hex) {
     const bytes = hexToBytes(ev.hex);
     return bytesToHex(bytes.slice(0, 24)) + (bytes.length > 24 ? " …" : "");

@@ -13,6 +13,7 @@ import { store } from "../store";
 import { emptyDeltaState, extendDeltaMap, type DeltaState } from "../traffic-core";
 import type { Event, EventKind } from "../types";
 import { msg, t } from "../i18n";
+import { localizeEventText } from "../engine-text";
 
 msg({
   "Интервал между записями обмена в загруженном логе":
@@ -39,6 +40,10 @@ msg({
   "Захват поднят, хуки на месте. Сделайте действие в программе — строки появятся автоматически.":
     "Capture is up and hooks are in place. Do an action in the tool — rows will appear automatically.",
   "ШАГ {n} · ": "STEP {n} · ",
+  "МЕТКА": "MARK",
+  "ШАГ": "STEP",
+  "ФАЙЛ": "FILE",
+  "ОШИБКА": "ERR",
   "мс": "ms",
   "с": "s",
 });
@@ -56,14 +61,16 @@ interface FilterGroup {
 const GROUPS: FilterGroup[] = [
   { id: "tx", label: "TX", kinds: ["tx"] },
   { id: "rx", label: "RX", kinds: ["rx"] },
-  { id: "mark", label: "MARK", kinds: ["mark", "note"] },
-  { id: "step", label: "STEP", kinds: ["step_start", "step_end"] },
-  { id: "file", label: "FILE", kinds: ["file", "file_hash"] },
+  { id: "mark", label: "МЕТКА", kinds: ["mark", "note"] },
+  { id: "step", label: "ШАГ", kinds: ["step_start", "step_end"] },
+  { id: "file", label: "ФАЙЛ", kinds: ["file", "file_hash"] },
   { id: "sys", label: "SYS", kinds: ["sys", "module", "vcp"] },
-  { id: "err", label: "ERR", kinds: ["error"] },
+  { id: "err", label: "ОШИБКА", kinds: ["error"] },
 ];
 
-const DELTA_HINT = t("Интервал между записями обмена в загруженном логе");
+// Подсказка вычисляется при показе: язык из настроек приложения приходит уже
+// после импорта модулей, и замороженная строка осталась бы русской.
+const deltaHint = (): string => t("Интервал между записями обмена в загруженном логе");
 
 /** Мс → «50 мс» / «1.25 с»; хвостовые нули не показываем. */
 function fmtDelta(ms: number): string {
@@ -114,9 +121,9 @@ export class Stream {
       const chip = el("button", `chip chip--${g.id}`);
       chip.type = "button";
       chip.dataset.group = g.id;
-      chip.append(el("span", "chip__dot"), document.createTextNode(g.label));
+      chip.append(el("span", "chip__dot"), document.createTextNode(t(g.label)));
       chip.addEventListener("click", () => this.toggleGroup(g));
-      chip.title = t("показать/скрыть {label}", { label: g.label });
+      chip.title = t("показать/скрыть {label}", { label: t(g.label) });
       this.chips.append(chip);
     }
 
@@ -159,7 +166,7 @@ export class Stream {
     for (let i = 0; i < columnLabels.length; i++) {
       const span = el("span", "", columnLabels[i]);
       // Подсказка у нового заголовка: Δ — интервал в логе, а не время ответа ЭБУ.
-      if (i === columnLabels.length - 1) span.title = DELTA_HINT;
+      if (i === columnLabels.length - 1) span.title = deltaHint();
       columns.append(span);
     }
 
@@ -358,10 +365,10 @@ export class Stream {
     const deltaCell = el("span", "row__delta");
     const deltaMs = this.deltas.get(ev.seq);
     deltaCell.textContent = deltaMs === undefined ? "—" : fmtDelta(deltaMs);
-    deltaCell.title = DELTA_HINT;
+    deltaCell.title = deltaHint();
 
     row.append(main, bytes, deltaCell);
-    row.title = ev.raw || `${ev.api} ${ev.hex}`.trim();
+    row.title = localizeEventText(ev.raw || `${ev.api} ${ev.hex}`.trim());
     row.addEventListener("click", () => {
       store.selectEvent(ev);
       this.viewport.focus({ preventScroll: true });

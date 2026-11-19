@@ -1,13 +1,20 @@
 <!doctype html>
-<html lang="ru">
+<!--
+  translate="no" + meta notranslate: интерфейс открывается в браузере, и
+  встроенный переводчик Edge/Chrome раньше переводил уже английский UI обратно
+  на русский — выбор языка «не срабатывал». Эти маркеры запрещают перевод
+  страницы: язык интерфейса задаёт только само приложение.
+-->
+<html lang="ru" translate="no" class="notranslate">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
+    <meta name="google" content="notranslate" />
     <title>FTDI/USB Logger</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
   </head>
-  <body>
+  <body class="notranslate">
     <div id="app" class="app-shell" hidden>
       <!-- Заполняется из src/main.ts -->
     </div>

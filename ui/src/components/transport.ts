@@ -224,7 +224,7 @@ export class Transport {
       for (const title of s.quickTitles) {
         const o = el("option");
         o.value = title;
-        o.textContent = title;
+        o.textContent = t(title);
         this.presetSel.append(o);
       }
       this.presetSel.value = current && s.quickTitles.includes(current) ? current : "";

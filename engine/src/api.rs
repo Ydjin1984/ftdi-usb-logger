@@ -42,7 +42,8 @@ const WS_FLUSH_EVERY: Duration = Duration::from_millis(50);
 const WS_BACKLOG_MAX: usize = 2560;
 
 const UI_STUB: &str = r#"<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><title>FTDI/USB Logger</title>
+<html lang="ru" translate="no" class="notranslate"><head><meta charset="utf-8"><title>FTDI/USB Logger</title>
+<meta name="google" content="notranslate">
 <style>body{font:16px/1.5 system-ui,sans-serif;background:#111;color:#ddd;display:flex;
 align-items:center;justify-content:center;height:100vh;margin:0}
 main{max-width:640px;padding:32px;border:1px solid #333;border-radius:12px;background:#1a1a1a}
@@ -134,6 +135,7 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health))
+        .route("/prefs", get(prefs_get).post(prefs_set))
         .route("/devices", get(devices))
         .route("/tools", get(tools))
         .route("/tools/:pid/detail", get(tool_detail))
@@ -308,8 +310,43 @@ async fn api_not_found() -> AppError {
 
 // ─────────────────────────────── health ──────────────────────────────────
 
-async fn health(State(st): State<AppState>) -> Json<Value> {
-    let sessions = st.store.list().len();
+// ─────────────────────────── настройки UI ────────────────────────────────
+
+/// Файл настроек интерфейса в корне установки: язык выбора переживает смену
+/// браузера, профиля и переустановку (localStorage живёт только в профиле).
+fn prefs_path(st: &AppState) -> PathBuf {
+    st.cfg.root.join("prefs.json")
+}
+
+/// Текущий сохранённый язык: `null`, если выбор ещё не делали.
+async fn prefs_get(State(st): State<AppState>) -> Json<Value> {
+    let lang = std::fs::read_to_string(prefs_path(&st))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get("lang").and_then(Value::as_str).map(str::to_string))
+        .filter(|l| l == "en" || l == "ru");
+    Json(json!({ "lang": lang }))
+}
+
+#[derive(Debug, Deserialize)]
+struct PrefsReq {
+    lang: String,
+}
+
+/// Сохранить выбранный язык. Ошибка записи не критична для UI, но видна.
+async fn prefs_set(State(st): State<AppState>, Json(req): Json<PrefsReq>) -> ApiResult<Json<Value>> {
+    let lang = match req.lang.as_str() {
+        "en" => "en",
+        "ru" => "ru",
+        other => return Err(AppError::bad(format!("язык: ожидается ru|en, получено {other}"))),
+    };
+    let body = serde_json::to_vec_pretty(&json!({ "lang": lang }))
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(prefs_path(&st), body)?;
+    Ok(Json(json!({ "ok": true, "lang": lang })))
+}
+
+async fn health(State(st): State<AppState>) -> Json<Value> {    let sessions = st.store.list().len();
     let capabilities = env_capabilities();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),

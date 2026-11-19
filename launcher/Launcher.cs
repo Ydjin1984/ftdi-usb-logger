@@ -223,10 +223,11 @@ namespace FtdiLoggerLauncher
             string edge = FindEdge();
             if (edge != null)
             {
-                if (ShellExecute(edge, "--app=" + url)) return;
+                string args = BrowserArgs(url);
+                if (ShellExecute(edge, args)) return;
                 try
                 {
-                    Process.Start(edge, "--app=" + url);
+                    Process.Start(edge, args);
                     return;
                 }
                 catch { }
@@ -237,6 +238,24 @@ namespace FtdiLoggerLauncher
                 try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
                 catch (Exception ex) { splash.ShowError("Не удалось открыть браузер: " + ex.Message); }
             }
+        }
+
+        /// <summary>
+        /// Аргументы окна Edge.
+        ///
+        /// Отдельный профиль и выключенный переводчик нужны, чтобы выбор языка в
+        /// приложении не отменялся встроенным переводом браузера: с общим
+        /// профилем Edge переводил уже английский интерфейс обратно на русский,
+        /// и переключение на английский выглядело как «ничего не поменялось».
+        /// </summary>
+        private static string BrowserArgs(string url)
+        {
+            string profile = Path.Combine(RootDir, "browser-profile");
+            try { Directory.CreateDirectory(profile); } catch { }
+            return "--app=" + url +
+                   " --user-data-dir=\"" + profile + "\"" +
+                   " --no-first-run --no-default-browser-check" +
+                   " --disable-features=Translate,TranslateUI --disable-translate";
         }
 
         /// <summary>Запуск через Shell.Application: Explorer выполняет запрос в обычном (среднем) IL.</summary>
