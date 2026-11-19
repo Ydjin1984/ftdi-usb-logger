@@ -12,7 +12,7 @@ USB/COM/J2534-устройств, а не только FTDI.
 ![engine](https://img.shields.io/badge/engine-Rust%202021-orange?logo=rust)
 ![ui](https://img.shields.io/badge/UI-TypeScript%20%2B%20Vite-blue?logo=typescript)
 ![bridge](https://img.shields.io/badge/bridge-Frida%2017-red)
-![tests](https://img.shields.io/badge/tests-120%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-142%20passed-brightgreen)
 
 Проект вырос из консольного `logger.py` + Frida-агента: хуки перенесены и расширены,
 разбор и интерфейс написаны заново. Цель — «одна кнопка» вместо ввода команд в консоль:
@@ -132,9 +132,9 @@ flowchart LR
 | WinUSB (`winusb.dll`) | `WinUsb_ReadPipe/WritePipe/ControlTransfer` | ✅ |
 | HID (`hid.dll`, `\\?\hid#…`) | `HidD_*`, `ReadFile/WriteFile/DeviceIoControl` по HID-путям | ✅ |
 | libusb-1.0 | `libusb_bulk/interrupt/control_transfer` | ✅ |
-| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + **все** экспорты `PassThru*` (open/connect/read/write/ioctl/filter/voltage/version) | ✅ на уровне сообщений: протокол, CAN ID, payload, ISOTP-PCI, сервис KWP/UDS; вендорные протоколы без CAN-id (PCMflash `0x8003`) разбираются по префиксу длины |
+| J2534 PassThru (Scanmatik SM2/SM3, CHIPSOFT, Tactrix OpenPort, VXDIAG, Bosch MDI, UCDS, EVC) | загрузка DLL по шаблонам + **все** экспорты `PassThru*` (open/connect/read/write/ioctl/filter/voltage/version) | ✅ на уровне сообщений: протокол, CAN ID (и `idlen=` — id остаётся в `hex`), `ExtraDataIndex`, payload, ISOTP-PCI, сервис KWP/UDS; вендорные протоколы без CAN-id (PCMflash `0x8003`) разбираются по префиксу длины; частичные результаты при `rc!=0` и нарушения контракта драйвера не теряются |
 | **LAN** (J2534-по-IP, DoIP/ISO 13400, BMW ICOM/HSFZ, сетевые адаптеры) | хуки Winsock `ws2_32`: `connect/accept`, `send/recv`, `WSASend/WSARecv`, `sendto/recvfrom`, `WSAGetOverlappedResult` | ✅ обмен TCP/UDP целиком, включая overlapped; DoIP-заголовки, source/target address, UDS-сервис и NRC в инспекторе |
-| Любой USB с проприетарным драйвером | сырой захват USBPcap → `USBRAW bus/dev/ep/transfer/…` | ⚠️ нужен установленный [USBPcap](https://desowin.org/usbpcap/) + права администратора |
+| Любой USB с проприетарным драйвером | сырой захват USBPcap → `USBRAW bus/dev/ep/transfer/…` | ⚠️ нужен установленный [USBPcap](https://desowin.org/usbpcap/) + права администратора; отдельная сессия — одновременно с захватом процесса пока не запускается |
 
 В панели **USB-УСТРОЙСТВА** — все USB-устройства системы и зарегистрированные J2534-драйверы;
 в шапке — индикатор `шина: USB/J2534 · N`. Список устройств обновляется каждые ~12 с даже
@@ -562,7 +562,7 @@ a live stream, steps, a timeline, a HEX inspector, screenshots, reports, export/
 ![engine](https://img.shields.io/badge/engine-Rust%202021-orange?logo=rust)
 ![ui](https://img.shields.io/badge/UI-TypeScript%20%2B%20Vite-blue?logo=typescript)
 ![bridge](https://img.shields.io/badge/bridge-Frida%2017-red)
-![tests](https://img.shields.io/badge/tests-120%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-142%20passed-brightgreen)
 
 The project grew out of a console `logger.py` plus a Frida agent: the hooks were ported and
 extended, while parsing and the UI were rewritten. The goal is "one button" instead of typing
