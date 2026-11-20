@@ -466,6 +466,99 @@ pub struct ProxyLane {
     pub notes: Vec<String>,
 }
 
+// ───────────────────────── живое состояние прокси ────────────────────────
+
+/// Один загруженный прокси: файл `proxy-live-<pid>.state` рядом с журналом
+/// (docs/13 §6.1). Пишет сама DLL раз в секунду, движок только читает.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProxyLiveItem {
+    #[serde(default)]
+    pub pid: u32,
+    /// `live` — процесс держит прокси; `stopped` — DLL выгружена.
+    #[serde(default)]
+    pub state: String,
+    /// Полный путь программы, которая загрузила прокси (`PCMflash.exe`).
+    #[serde(default)]
+    pub exe: String,
+    #[serde(default)]
+    pub exe_name: String,
+    #[serde(default)]
+    pub dll: String,
+    /// Настоящий драйвер, в который идёт форвард.
+    #[serde(default)]
+    pub real: String,
+    #[serde(default)]
+    pub log: String,
+    #[serde(default)]
+    pub device: String,
+    /// `wall(start)` из шапки журнала.
+    #[serde(default)]
+    pub started: String,
+    /// Сколько секунд назад обновлялся файл (0 — только что).
+    #[serde(default)]
+    pub age_s: u64,
+    #[serde(default)]
+    pub calls: u64,
+    #[serde(default)]
+    pub tx: u64,
+    #[serde(default)]
+    pub rx: u64,
+    #[serde(default)]
+    pub errors: u64,
+    #[serde(default)]
+    pub gen: u64,
+    #[serde(default)]
+    pub bits: u32,
+    /// Прокси не смог загрузить настоящий драйвер: вызовы вернут 0x08.
+    #[serde(default)]
+    pub fatal: bool,
+    #[serde(default)]
+    pub version: String,
+    /// Свежий `live`-файл: прокси работает прямо сейчас.
+    #[serde(default)]
+    pub alive: bool,
+}
+
+/// Сводка живого состояния: ответ на вопрос «подхватился ли прокси».
+///
+/// `state`: `loaded` — хотя бы один процесс держит прокси сейчас; `recent` —
+/// файлы есть, но процессы завершились; `idle` — прокси не загружала ни одна
+/// программа (типичная причина: в программе выбран другой адаптер).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProxyLive {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub items: Vec<ProxyLiveItem>,
+    /// Сколько файлов состояния прочитано (включая уже остановленные).
+    #[serde(default)]
+    pub files: u64,
+    /// Что это значит и что делать — текстом для интерфейса.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Драйвер J2534 как вариант «какой шнурок проксировать» (docs/13 §4.1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProxyDevice {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub dll: String,
+    #[serde(default)]
+    pub present: bool,
+    #[serde(default)]
+    pub api: String,
+    /// Это текущий `RealLibrary` прокси.
+    #[serde(default)]
+    pub current: bool,
+    /// Наше собственное прокси-устройство: проксировать его нельзя.
+    #[serde(default)]
+    pub is_proxy: bool,
+}
+
 // ─────────────────────────────── шаг ─────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

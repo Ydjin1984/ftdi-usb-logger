@@ -6,6 +6,13 @@ import { store } from "../store";
 import { fmtNum } from "../format";
 import type { NewSessionResult, ProxyStatus } from "../types";
 import { errText, msg, t } from "../i18n";
+import {
+  proxyDeviceLabel,
+  proxyLiveDetail,
+  proxyLiveShort,
+  proxyLiveTitle,
+  proxyLiveTone,
+} from "../proxy";
 
 msg({
   "нет активной сессии": "no active session",
@@ -127,6 +134,15 @@ msg({
     "the proxy library sits between the tool and the adapter driver and writes its log outside the process: the channel does not depend on injection and survives an agent crash",
   "настоящий драйвер не найден — укажите RealLibrary в j2534proxy.ini":
     "the real driver was not found — set RealLibrary in j2534proxy.ini",
+  "настоящий драйвер не найден — выберите шнурок ниже":
+    "the real driver was not found — pick a cable below",
+  "какой шнурок проксировать": "which cable to proxy",
+  "выберите «шнурок», в который прокси будет форвардить вызовы":
+    "pick the cable the proxy forwards calls to; applies at the next launch of the tool",
+  "не найдено ни одного J2534-драйвера": "no J2534 driver was found",
+  "сейчас в ini": "currently in the ini",
+  "драйвер выбран: {name}": "driver selected: {name}",
+  "живое состояние: {state}": "live state: {state}",
   "Драйвер": "Driver",
   "Реестр": "Registry",
   "реестр": "registry",
@@ -592,8 +608,13 @@ export function openSettingsDialog(): void {
   const driverHint = el("div", "field__hint");
   driverHint.style.color = "var(--warn)";
   driverHint.style.display = "none";
-  driverHint.textContent = t("настоящий драйвер не найден — укажите RealLibrary в j2534proxy.ini");
+  driverHint.textContent = t("настоящий драйвер не найден — выберите шнурок ниже");
   body.append(driverHint);
+
+  // Живое состояние — главный ответ на «подхватился или нет» (docs/13 §6.1):
+  // крупно, с процессом и счётчиками, без похода в журналы.
+  const liveBox = el("div", "proxy-live");
+  body.append(liveBox);
 
   const statusBox = el("div");
   statusBox.append(el("div", "muted", t("читаю состояние прокси…")));
@@ -614,8 +635,20 @@ export function openSettingsDialog(): void {
     ),
   );
 
-  const collect = el("button", "btn btn--sm", t("Подхватить журналы сейчас"));
-  collect.type = "button";
+  // «Какой шнурок проксировать»: выбор из зарегистрированных J2534-драйверов,
+  // а не правка `RealLibrary` в ini руками (docs/13 §4.1).
+  const deviceSelect = el("select") as HTMLSelectElement;
+  deviceSelect.title = t("выберите «шнурок», в который прокси будет форвардить вызовы");
+  const deviceBox = field(
+    t("какой шнурок проксировать"),
+    deviceSelect,
+    t("выберите «шнурок», в который прокси будет форвардить вызовы"),
+  );
+  body.append(deviceBox);
+  /** Подпись набора вариантов: пересобираем список только когда он изменился. */
+  let deviceSignature = "";
+
+  const collect = el("button", "btn btn--sm", t("Подхватить журналы сейчас"));  collect.type = "button";
   const collectBox = el("div");
   collectBox.append(
     collect,
@@ -631,7 +664,69 @@ export function openSettingsDialog(): void {
     busy = value;
     toggle.disabled = value;
     adapter.disabled = value;
+    // Пустой список (нет драйверов) остаётся выключенным и после снятия busy.
+    deviceSelect.disabled = value || deviceSignature === "";
     collect.disabled = value || !store.state.active;
+  };
+
+  /** Живой индикатор: подхвачен / был / не подхвачен — с counters и причиной. */
+  const renderLive = (st: ProxyStatus): void => {
+    const live = st.live;
+    const tone = proxyLiveTone(live);
+    liveBox.className = `proxy-live${tone ? ` proxy-live--${tone}` : ""}`;
+    const head = el("div", "proxy-live__head");
+    head.append(el("span", "proxy-live__dot"), el("b", "", proxyLiveShort(live)));
+    liveBox.replaceChildren(head);
+    const detail = proxyLiveDetail(live);
+    if (detail) liveBox.append(el("div", "proxy-live__meta", detail));
+    for (const note of live?.notes ?? []) {
+      liveBox.append(el("div", "proxy-live__note", t(note)));
+    }
+    liveBox.title = proxyLiveTitle(live);
+  };
+
+  /** Выбор «шнурка»: список пересобирается только когда набор изменился. */
+  const renderDevices = (st: ProxyStatus): void => {
+    // Своё устройство в выборе не показываем: форвард в себя запрещён (§7).
+    const options = (st.devices ?? []).filter((device) => !device.is_proxy);
+    const currentReal = st.real?.present ? st.real.path : "";
+    // Драйвер из ini может быть не зарегистрирован (свой путь) — тогда его
+    // показываем отдельной строкой, иначе список молчал бы о текущем выборе.
+    const iniOnly =
+      currentReal && !options.some((d) => d.dll.toLowerCase() === currentReal.toLowerCase())
+        ? currentReal
+        : "";
+    const signature = [iniOnly, ...options.map((d) => `${d.dll}|${d.present}|${d.current}`)].join("\n");
+    if (signature === deviceSignature) return;
+    deviceSignature = signature;
+    const previous = deviceSelect.value;
+    deviceSelect.replaceChildren();
+
+    const add = (value: string, label: string, title: string): void => {
+      const option = el("option") as HTMLOptionElement;
+      option.value = value;
+      option.textContent = label;
+      option.title = title;
+      deviceSelect.append(option);
+    };
+
+    if (iniOnly) {
+      const file = iniOnly.split(/[\\/]/).pop() || iniOnly;
+      add(iniOnly, `${t("сейчас в ini")} · ${file}`, iniOnly);
+    }
+    for (const device of options) add(device.dll, proxyDeviceLabel(device), device.dll);
+
+    if (!deviceSelect.options.length) {
+      add("", t("не найдено ни одного J2534-драйвера"), "");
+      deviceSelect.disabled = true;
+      return;
+    }
+    deviceSelect.disabled = false;
+    // Текущий драйвер важнее прежнего выбора в списке: он и есть правда.
+    const current = options.find((device) => device.current);
+    const keep = previous && [...deviceSelect.options].some((o) => o.value === previous) ? previous : "";
+    deviceSelect.value =
+      current?.dll || keep || iniOnly || options.find((d) => d.present)?.dll || options[0].dll;
   };
 
   const render = (st: ProxyStatus): void => {
@@ -669,6 +764,9 @@ export function openSettingsDialog(): void {
         notesBox.append(el("div", "", t(note)));
       }
     }
+
+    renderLive(st);
+    renderDevices(st);
   };
 
   /** Выполнить действие и показать ровно то состояние, которое вернул сервер. */
@@ -728,6 +826,12 @@ export function openSettingsDialog(): void {
     );
   });
 
+  deviceSelect.addEventListener("change", () => {
+    const path = deviceSelect.value;
+    if (!path) return;
+    apply(() => api.j2534ProxySetReal({ path }));
+  });
+
   collect.addEventListener("click", () => {
     const active = store.state.active;
     if (!active) return;
@@ -761,11 +865,22 @@ export function openSettingsDialog(): void {
     })();
   });
 
+  // Живость меняется сама (программа запустилась или закрылась), поэтому пока
+  // диалог открыт состояние перечитывается: «подхвачен» не должен требовать F5.
+  const timer = window.setInterval(() => {
+    if (busy) return;
+    void api
+      .j2534ProxyStatus()
+      .then((st) => render(mergeProxyStatus(last, st)))
+      .catch(() => undefined);
+  }, 2000);
+
   const m = modal({
     title: t("Настройки"),
     body,
     footer: [primary(t("закрыть"), () => m.close())],
     width: 640,
+    onClose: () => window.clearInterval(timer),
   });
   setBusy(false);
   void (async () => {

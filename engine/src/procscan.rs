@@ -546,6 +546,45 @@ unsafe fn query_image_path(handle: windows::Win32::Foundation::HANDLE) -> Option
     }
 }
 
+/// Жив ли процесс и какой у него exe — без снимка всех процессов.
+///
+/// `None` — процесса нет (или он защищён так, что и `OpenProcess` не дал ничего);
+/// `Some("")` — процесс есть, но путь прочитать не разрешили (чужой пользователь,
+/// защищённый процесс). Второй случай важен: живость подтверждена, а имя — нет,
+/// и это должно оставаться честным «не знаю», а не «процесса нет».
+///
+/// Нужен индикатору прокси: файл состояния мог остаться от прошлого запуска, и
+/// «подхвачен» обязан означать «этот pid прямо сейчас живёт», иначе PID, отданный
+/// другому процессу, показывал бы работающий прокси, которого уже нет.
+pub fn pid_exe(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+        if pid == 0 {
+            return None;
+        }
+        // SAFETY: pid — обычное число; дескриптор закрывается ниже во всех ветках.
+        match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+            Ok(handle) => {
+                let path = unsafe { query_image_path(handle) }.unwrap_or_default();
+                // SAFETY: дескриптор получен выше и больше не используется.
+                let _ = unsafe { CloseHandle(handle) };
+                Some(path)
+            }
+            // 5 = ERROR_ACCESS_DENIED: процесс существует, читать путь не дали.
+            Err(err) if err.code().0 as u32 == 5 => Some(String::new()),
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Время старта процесса по открытому дескриптору.
 #[cfg(windows)]
 fn process_times(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {

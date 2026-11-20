@@ -168,6 +168,17 @@ flowchart LR
 появляются обе полосы: `raw.log` и `raw-proxy.log`, а отчёт показывает, сколько кадров
 совпало, сколько потерял каждый канал.
 
+**Видно, подхватился ли прокси** — без похода в журналы:
+
+| Где | Что показывает |
+|---|---|
+| шапка приложения | пилюля `прокси`: «подхвачен: PCMflash.exe» (зелёная), «был подхвачен: …» (серая), «не подхвачен» (жёлтая); клик открывает настройки |
+| настройки → J2534 | строка под переключателем: процесс и pid, «2876 вызовов · TX 1959 / RX 3917 · обмен 3 с назад», либо причина, почему никто не загрузил прокси |
+| там же | выбор **какой шнурок проксировать** — список зарегистрированных J2534-драйверов с текущим выбранным |
+
+Свежесть даёт файл `proxy-live-<pid>.state`, который DLL пишет рядом с журналом;
+«подхвачен» движок подтверждает по живому процессу с тем же exe, а не по наличию файла.
+
 Установщик ставит прокси сразу (галка «Установить J2534-прокси», запрос UAC) — но
 **не** переключает адаптер в чужой программе: это всегда осознанное действие.
 Подробности, формат журнала и откат — [docs/13-j2534-proxy.md](docs/13-j2534-proxy.md).
@@ -436,7 +447,7 @@ sequenceDiagram
 | `POST /api/session/new` | завершить текущую и пересканировать окружение |
 | `GET /api/tools?mode=auto\|usb\|window\|all` | процессы-кандидаты |
 | `GET /api/devices` · `GET /api/usb/devices` · `GET /api/j2534/drivers` | FTDI / USB / J2534 |
-| `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter`) |
+| `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter/set-real`); ответ содержит живое состояние (`live`) и список драйверов (`devices`) |
 | `POST /api/sessions/{id}/proxy/collect` | подхватить журналы прокси в открытую сессию сейчас |
 | `POST /api/usbpcap/start` | сырой захват шины (нужен USBPcap) |
 | `POST /api/sessions/{id}/step/start` · `step/end` · `mark` · `note` · `shot` | разметка сессии |
@@ -684,6 +695,16 @@ Enable it in **Settings → J2534**: the switch registers the `Scanmatik - SM2 P
 optionally switches PCMflash to it (the previous choice is saved and restored) and pulls the
 proxy logs into the open session. The session then carries both lanes, `raw.log` and
 `raw-proxy.log`, and the report shows how many frames matched and what each channel lost.
+
+**You can see whether the proxy is picked up** without opening logs: the header carries a
+`proxy` pill (“picked up: PCMflash.exe” in green, “was picked up: …” in grey, “not picked up”
+in yellow — click opens settings), and Settings → J2534 shows the process, its PID and the
+counters (“2876 calls · TX 1959 / RX 3917 · last exchange 3 s ago”) or the reason nobody
+loaded it. The same panel holds the **which cable to proxy** selector built from the
+registered J2534 drivers, with the current one selected. Freshness comes from
+`proxy-live-<pid>.state` next to the log; “picked up” is confirmed by a live process with the
+same exe, not by the file simply existing.
+
 The installer ships the proxy (a checked “Install the J2534 proxy” task, UAC prompt) but never
 switches adapters in another application by itself. See
 [docs/13-j2534-proxy.md](docs/13-j2534-proxy.md) (Russian).

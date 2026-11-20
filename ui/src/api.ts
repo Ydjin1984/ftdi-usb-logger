@@ -138,6 +138,9 @@ export const api = {
   j2534ProxyStatus: () => req<ProxyStatus>("/api/j2534/proxy"),
   /** Действие над прокси; ответ — уже актуальное состояние. */
   j2534ProxyAction: (action: ProxyAction) => req<ProxyStatus>("/api/j2534/proxy", json({ action })),
+  /** `action=set-real`: выбрать «шнурок», в который прокси форвардит вызовы. */
+  j2534ProxySetReal: (target: { path?: string; device?: string }) =>
+    req<ProxyStatus>("/api/j2534/proxy", json({ action: "set-real", ...target })),
   /** Подхватить журналы прокси в открытую сессию прямо сейчас. */
   sessionProxyCollect: (id: string) =>
     req<ProxyCollect>(`/api/sessions/${encodeURIComponent(id)}/proxy/collect`, json({})),

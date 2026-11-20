@@ -37,7 +37,7 @@ typedef unsigned char u8;
 
 /* Kept in sync with proxy\version.rc; the proxy reports it in the header
  * without pulling in version.dll (that would be a second dependency). */
-#define PROXY_VERSION "1.0.0.120"
+#define PROXY_VERSION "1.0.0.121"
 #define PROXY_API     "04.04"
 #define PROXY_MAX_DATA 4128
 
@@ -139,6 +139,13 @@ static char             g_logDir[MAX_PATH];      /* [proxy] LogDir */
 static char             g_logExact[MAX_PATH];    /* FTDI_J2534_PROXY_LOG */
 static char             g_devName[MAX_PATH];     /* [device] Name */
 static char             g_devVendor[MAX_PATH];   /* [device] Vendor */
+
+/* Live state for the GUI (docs/13 section 6).  The journal answers "what was
+ * the exchange", this file answers "is the proxy loaded right now, in which
+ * process, and how much has it seen" -- without the user reading logs or
+ * running a single command.  It sits next to the journal, never instead of it. */
+static char             g_logPath[MAX_PATH];     /* the journal we actually write */
+static char             g_started[64];           /* wall(start), same value as the header */
 
 static PFN_OPEN          pOpen;
 static PFN_CLOSE         pClose;
@@ -334,6 +341,9 @@ static void WriteFmt(const char *fmt, ...)
 }
 
 /* Exchange lines: "[+<sec>.<usec>s] <body>", six decimals as in docs/11. */
+static void WriteLiveFile(const char *state);   /* live state, defined below */
+static void MaybeWriteLive(void);
+
 static void LogLine(const char *fmt, ...)
 {
     char      body[16384];
@@ -367,6 +377,10 @@ static void LogLine(const char *fmt, ...)
 
     WriteFile(g_hLog, line, (DWORD)m, &wrote, NULL);
     FlushFileBuffers(g_hLog);
+
+    /* Every call ends here, so this is the one place that keeps the counters
+     * in the live state file moving (throttled to once a second). */
+    MaybeWriteLive();
 }
 
 /* ------------------------------------------------------------------ */
@@ -433,6 +447,9 @@ static HANDLE OpenLogAt(const char *path)
     if (h == INVALID_HANDLE_VALUE) return h;
     /* append: OPEN_ALWAYS keeps the existing content, seek to its end */
     SetFilePointer(h, 0, NULL, FILE_END);
+    /* Remember where the journal really went: the live state file must sit in
+     * the same directory the engine scans (LogDir, exact path or %TEMP%). */
+    SetStr(g_logPath, MAX_PATH, path);
     return h;
 }
 
@@ -481,13 +498,142 @@ static void OpenLog(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* live state (for the GUI)                                            */
+/* ------------------------------------------------------------------ */
+
+/* proxy-live-<pid>.state, next to the journal.  Extension is deliberately not
+ * `.log`: the engine's lane collector takes every `proxy-*.log` as exchange
+ * lines, and this file is not an exchange. */
+static void LivePath(char *dst, DWORD cap)
+{
+    char  dir[MAX_PATH];
+    char  name[64];
+
+    dst[0] = 0;
+    if (!g_logPath[0]) return;      /* no journal -> nothing to attribute it to */
+    DirOf(g_logPath, dir, MAX_PATH);
+    _snprintf(name, sizeof(name), "proxy-live-%lu.state", (ulong)GetCurrentProcessId());
+    name[sizeof(name) - 1] = 0;
+    JoinPath(dst, cap, dir, name);
+}
+
+/* Seconds since the Unix epoch (the engine compares them without parsing). */
+static unsigned long long UnixNow(void)
+{
+    FILETIME      ft;
+    ULARGE_INTEGER u;
+
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart  = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return (u.QuadPart - 116444736000000000ULL) / 10000000ULL;
+}
+
+/* Replace the state file in one step: write `<path>.tmp`, then rename over.
+ *
+ * The engine polls this file while the tool works, so a half-written line would
+ * be read as a broken state.  Rename is atomic on the same volume, hence the tmp
+ * file next to the target and never in %TEMP%.
+ *
+ * No critical section: this also runs from DLL_PROCESS_DETACH, where another
+ * thread may still hold g_cs.  Counters are read with InterlockedCompareExchange
+ * so a torn 32-bit read is impossible in practice. */
+static void WriteLiveFile(const char *state)
+{
+    char  path[MAX_PATH];
+    char  tmp[MAX_PATH];
+    char  exe[MAX_PATH];
+    char  text[4096];
+    HANDLE h;
+    DWORD written = 0;
+    int   len;
+    size_t n;
+
+    LivePath(path, MAX_PATH);
+    if (!path[0]) return;
+
+    SetStr(tmp, MAX_PATH, path);
+    n = strlen(tmp);
+    if (n + 5 >= MAX_PATH) return;
+    lstrcpyA(tmp + n, ".tmp");
+
+    exe[0] = 0;
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    exe[MAX_PATH - 1] = 0;
+
+    len = _snprintf(text, sizeof(text),
+        "# proxy live: pid=%lu state=%s\n"
+        "pid=%lu\n"
+        "state=%s\n"
+        "exe=%s\n"
+        "dll=%s\n"
+        "real=%s\n"
+        "log=%s\n"
+        "device=%s\n"
+        "started=%s\n"
+        "updated=%llu\n"
+        "calls=%ld\n"
+        "tx=%ld\n"
+        "rx=%ld\n"
+        "errors=%ld\n"
+        "gen=%ld\n"
+        "bits=%d\n"
+        "fatal=%d\n"
+        "version=%s\n",
+        (ulong)GetCurrentProcessId(), state,
+        (ulong)GetCurrentProcessId(), state,
+        exe, g_dll, g_realPath, g_logPath, g_devName,
+        g_started, UnixNow(),
+        (long)InterlockedCompareExchange(&g_calls, 0, 0),
+        (long)InterlockedCompareExchange(&g_tx, 0, 0),
+        (long)InterlockedCompareExchange(&g_rx, 0, 0),
+        (long)InterlockedCompareExchange(&g_errors, 0, 0),
+        (long)InterlockedCompareExchange(&g_gen, 0, 0),
+        g_bits, g_fatal, PROXY_VERSION);
+    if (len < 0) return;
+    if ((size_t)len >= sizeof(text)) len = (int)sizeof(text) - 1;
+
+    h = CreateFileA(tmp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    WriteFile(h, text, (DWORD)len, &written, NULL);
+    CloseHandle(h);
+    MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+}
+
+/* One write per second, driven by the exchange itself: every API call ends in
+ * LogLine(), so an active tool refreshes the counters, and an idle tool keeps
+ * the last numbers instead of rewriting the file 60 times a minute.  A thread
+ * would do the same job but must then be joined before FreeLibrary() unmaps
+ * this code -- a driver that crashes on unload is worse than slightly stale
+ * counters, and "is it loaded" is answered by the process check in the engine. */
+static void MaybeWriteLive(void)
+{
+    static volatile LONG last;
+    LONG now  = (LONG)GetTickCount64();
+    LONG prev = InterlockedCompareExchange(&last, 0, 0);
+
+    if ((ULONG)(now - prev) < 1000) return;
+    if (InterlockedCompareExchange(&last, now, prev) != prev) return;
+    WriteLiveFile("live");
+}
+
 static void WriteHeader(void)
 {
     SYSTEMTIME st;
     char       dir[MAX_PATH];
+    char       live[MAX_PATH];
 
     GetLocalTime(&st);
     DirOf(g_dll, dir, MAX_PATH);
+
+    g_started[0] = 0;
+    _snprintf(g_started, sizeof(g_started), "%04u-%02u-%02u %02u:%02u:%02u.%03u",
+              (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
+              (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
+              (unsigned)st.wMilliseconds);
+    g_started[sizeof(g_started) - 1] = 0;
 
     WriteFmt("# capture start: label=J2534 proxy");
     /* active=1 is the machine-readable proof (for the Frida agent) that the
@@ -495,15 +641,14 @@ static void WriteHeader(void)
     WriteFmt("# proxy: dll=\"%s\" real=\"%s\" pid=%lu bits=%d active=%d",
              g_dll, g_realPath[0] ? g_realPath : "", (ulong)GetCurrentProcessId(),
              g_bits, g_mutex ? 1 : 0);
-    WriteFmt("# wall(start)=%04u-%02u-%02u %02u:%02u:%02u.%03u",
-             (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
-             (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
-             (unsigned)st.wMilliseconds);
+    WriteFmt("# wall(start)=%s", g_started);
     WriteFmt("# api: %s dll=\"%s\" ver=\"%s\" path=\"%s\" pid=%lu bits=%d dec=1",
              PROXY_API, g_dllName, PROXY_VERSION, g_dll,
              (ulong)GetCurrentProcessId(), g_bits);
     WriteFmt("# agent: %s mode=proxy", g_dllName);
     WriteFmt("# device: name=\"%s\" vendor=\"%s\"", g_devName, g_devVendor);
+    LivePath(live, MAX_PATH);
+    if (live[0]) WriteFmt("# proxy live: %s", live);
 }
 
 /* ------------------------------------------------------------------ */
@@ -628,6 +773,12 @@ static void InitOnce(void)
     OpenLog();
     WriteHeader();
     ResolveReal();
+
+    /* "Loaded" is true from the moment the tool loaded us, not from the first
+     * PassThru call: the whole point of the GUI indicator is to tell the user
+     * whether the program picked our device at all.  Counters are refreshed by
+     * MaybeWriteLive() from the exchange itself. */
+    WriteLiveFile("live");
 }
 
 static void EnsureInit(void)
@@ -1352,6 +1503,10 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
             CloseHandle(g_hLog);
             g_hLog = INVALID_HANDLE_VALUE;
         }
+        /* Keep the final state instead of deleting it: after the tool exits the
+         * GUI shows "last run" with its counters right away, and the engine
+         * prunes the file later. */
+        WriteLiveFile("stopped");
         if (g_mutex) {
             CloseHandle(g_mutex);
             g_mutex = NULL;

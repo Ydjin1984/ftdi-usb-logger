@@ -18,6 +18,7 @@ import type {
   ToolProcess,
   UsbDevice,
   J2534Driver,
+  ProxyStatus,
 } from "./types";
 
 const RING = 60_000;
@@ -55,6 +56,8 @@ export interface StoreState {
   tools: ToolProcess[];
   usbDevices: UsbDevice[];
   j2534Drivers: J2534Driver[];
+  /** Состояние J2534-прокси: индикатор «подхвачен» в шапке (docs/13 §6.1). */
+  proxy: ProxyStatus | null;
   toolsMode: "auto" | "usb" | "window" | "all";
   loadingTargets: boolean;
 
@@ -181,6 +184,7 @@ class Store {
       tools: [],
       usbDevices: [],
       j2534Drivers: [],
+      proxy: null,
       toolsMode: "auto",
       loadingTargets: false,
       filters: new Set(ALL_KINDS),
@@ -348,6 +352,17 @@ class Store {
     this.emit();
   }
 
+  /** Состояние J2534-прокси — для индикатора в шапке (docs/13 §6.1). */
+  async refreshProxy(): Promise<void> {
+    if (this.state.mode === "demo") return;
+    try {
+      this.state.proxy = await api.j2534ProxyStatus();
+      this.emit();
+    } catch {
+      /* движок не ответил: прежнее состояние не затираем, чтобы индикатор не мигал */
+    }
+  }
+
   private startPolling(): void {
     if (this.pollTimer != null) window.clearInterval(this.pollTimer);
     let idleTicks = 0;
@@ -365,6 +380,9 @@ class Store {
           this.state.health = h;
           this.state.status = h.capture ?? this.state.status;
           this.emit();
+          // Прокси — каждый опрос: индикатор «подхвачен» должен меняться сам,
+          // когда программу запустили или закрыли, без перезагрузки страницы.
+          void this.refreshProxy();
           // Устройства обновляем всегда (шнурок могли заменить во время записи),
           // процессы — только когда захват не идёт.
           idleTicks += 1;

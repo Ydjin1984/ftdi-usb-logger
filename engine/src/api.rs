@@ -477,9 +477,15 @@ struct ProxyActionReq {
     /// Явный путь настоящего драйвера — только для `action=install`.
     #[serde(default)]
     real: Option<String>,
+    /// `action=set-real`: точный путь драйвера («шнурка»).
+    #[serde(default)]
+    path: Option<String>,
+    /// `action=set-real`: имя зарегистрированного J2534-устройства.
+    #[serde(default)]
+    device: Option<String>,
 }
 
-/// POST /api/j2534/proxy — `install|remove|enable|disable|select-adapter|restore-adapter`.
+/// POST /api/j2534/proxy — `install|remove|enable|disable|select-adapter|restore-adapter|set-real`.
 ///
 /// Отказ действия отдаётся как `{"ok": false, "notes": […]}` с кодом 200, а не
 /// 500: для UI это не поломка движка, а состояние («нужны права администратора»),
@@ -497,12 +503,13 @@ async fn j2534_proxy_post(
         "disable" => crate::proxy::set_enabled(&dir, false),
         "select-adapter" => crate::proxy::select_adapter(&dir, true),
         "restore-adapter" => crate::proxy::restore_adapter(&dir),
+        "set-real" => crate::proxy::set_real(&dir, req.path.as_deref(), req.device.as_deref()),
         other => {
             return Json(json!({
                 "ok": false,
                 "notes": [format!(
                     "неизвестное действие: {other} \
-                     (install|remove|enable|disable|select-adapter|restore-adapter)"
+                     (install|remove|enable|disable|select-adapter|restore-adapter|set-real)"
                 )],
             }))
         }

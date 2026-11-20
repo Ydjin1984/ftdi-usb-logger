@@ -765,6 +765,63 @@
   color: var(--text-dim);
   overflow-wrap: anywhere;
 }
+/* Живой индикатор прокси: подхвачен / был подхвачен / не подхвачен (docs/13 §6.1).
+   Цвет полосы слева — единственный «сигнал», текст всегда рядом: цвет не должен
+   быть единственным носителем смысла. */
+.proxy-live {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.proxy-live__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.proxy-live__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-mute);
+}
+.proxy-live__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.proxy-live__note {
+  font-size: 11px;
+  color: var(--text-mute);
+  line-height: 1.45;
+}
+.proxy-live--ok {
+  border-left-color: var(--ok);
+}
+.proxy-live--ok .proxy-live__dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(88, 214, 141, 0.16);
+}
+.proxy-live--warn {
+  border-left-color: var(--warn);
+}
+.proxy-live--warn .proxy-live__dot {
+  background: var(--warn);
+}
+.proxy-live--err {
+  border-left-color: var(--err);
+}
+.proxy-live--err .proxy-live__dot {
+  background: var(--err);
+}
 /* Чекбокс с подписью в одну строку (настройки, второй канал захвата). */.check-row {
   display: flex;
   align-items: flex-start;

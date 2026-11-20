@@ -6,6 +6,7 @@ import { button, el, icon, iconButton } from "../dom";
 import { fmtTimeOnly } from "../format";
 import { openHelpDialog, openNewSessionDialog, openSettingsDialog } from "./dialogs";
 import { getLang, msg, setLang, t, type Lang } from "../i18n";
+import { proxyLiveShort, proxyLiveTitle, proxyLiveTone } from "../proxy";
 
 msg({
   "DAVINCI  /  КОНСОЛЬ ЗАХВАТА": "DAVINCI  /  CAPTURE CONSOLE",
@@ -39,6 +40,7 @@ msg({
   "не выбрана": "not selected",
   "сессия": "session",
   "шина": "bus",
+  "прокси": "proxy",
   "J2534-драйверов: {n}": "J2534 drivers: {n}",
   "FTDI: {value}": "FTDI: {value}",
   "USB-перечисление: {value}": "USB enumeration: {value}",
@@ -127,7 +129,13 @@ export class Topbar {
 
     const capsKey = s.health?.capabilities ? `${s.health.capabilities.j2534}:${s.health.capabilities.usbpcap}` : "";
     const admin = s.health?.admin;
-    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey, String(admin)].join("|");
+    // Живое состояние прокси — часть ключа: иначе пилюля «прокси» появится
+    // только после смены другого статуса (шапка перерисовывается по ключу).
+    const firstLive = s.proxy?.live?.items?.[0];
+    const proxyKey = s.proxy
+      ? `${s.proxy.live?.state ?? ""}:${firstLive?.pid ?? 0}:${firstLive?.alive ? 1 : 0}:${s.proxy.dll?.present ? 1 : 0}`
+      : "";
+    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey, String(admin), proxyKey].join("|");
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -181,6 +189,19 @@ export class Topbar {
         }),
       ].join("\n");
       this.pills.append(p);
+    }
+
+    // J2534-прокси: видно ли, что он реально подхвачен (docs/13 §6.1).
+    // Показываем только установленный прокси — иначе шапка шумит у всех, кто
+    // фичей не пользуется.
+    const proxy = s.proxy;
+    if (proxy && (proxy.dll?.present || proxy.ini?.present || proxy.registry?.registered)) {
+      const live = proxyLiveShort(proxy.live);
+      const chip = pill(proxyLiveTone(proxy.live), t("прокси"), live);
+      chip.title = proxyLiveTitle(proxy.live);
+      chip.style.cursor = "pointer";
+      chip.addEventListener("click", () => openSettingsDialog());
+      this.pills.append(chip);
     }
   }
 }

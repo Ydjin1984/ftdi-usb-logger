@@ -119,6 +119,56 @@ export interface ProxyPcmflash {
   backup: string;
 }
 
+/** Один загруженный прокси: файл `proxy-live-<pid>.state` (docs/13 §6.1). */
+export interface ProxyLiveItem {
+  pid: number;
+  /** `live` — DLL не выгружалась; `stopped` — выгружена. */
+  state: string;
+  exe: string;
+  exe_name: string;
+  dll: string;
+  real: string;
+  log: string;
+  device: string;
+  /** `wall(start)` из шапки журнала. */
+  started: string;
+  /** Секунд с последнего обновления файла (то есть с последнего обмена). */
+  age_s: number;
+  calls: number;
+  tx: number;
+  rx: number;
+  errors: number;
+  gen: number;
+  bits: number;
+  /** Настоящий драйвер не открылся: вызовы вернут 0x08. */
+  fatal: boolean;
+  version: string;
+  /** Процесс жив и это тот же exe — прокси работает прямо сейчас. */
+  alive: boolean;
+}
+
+/** Сводка «подхватился ли прокси»: `loaded` | `recent` | `idle`. */
+export interface ProxyLive {
+  state: string;
+  items: ProxyLiveItem[];
+  files: number;
+  /** Что это значит и что делать — текстом. */
+  notes: string[];
+}
+
+/** Зарегистрированный J2534-драйвер как вариант «какой шнурок проксировать». */
+export interface ProxyDevice {
+  name: string;
+  vendor: string;
+  dll: string;
+  present: boolean;
+  api: string;
+  /** Это текущий `RealLibrary` прокси. */
+  current: boolean;
+  /** Наше собственное устройство: проксировать его нельзя. */
+  is_proxy: boolean;
+}
+
 /** Полное состояние прокси: ответ `GET /j2534/proxy`. */
 export interface ProxyStatus {
   ok: boolean;
@@ -131,6 +181,10 @@ export interface ProxyStatus {
   log_dir: string;
   log_files: number;
   pcmflash: ProxyPcmflash;
+  /** Живое состояние: подхвачен ли прокси и сколько он уже видел. */
+  live?: ProxyLive;
+  /** Из чего выбирать «шнурок». */
+  devices?: ProxyDevice[];
   /** Причины отказа при `ok:false` — показываются пользователю как есть. */
   notes: string[];
 }

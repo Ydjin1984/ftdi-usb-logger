@@ -150,6 +150,24 @@ static int Has(const char *log, const char *needle)
     return strstr(log, needle) != NULL;
 }
 
+/* `<dir of log>\proxy-live-<pid>.state` -- the GUI's "is it loaded" file. */
+static void LiveStatePath(const char *logPath, char *dst, DWORD cap)
+{
+    size_t len = strlen(logPath);
+    size_t cut = len;
+    size_t i;
+
+    for (i = len; i > 0; --i) {
+        if (logPath[i - 1] == '\\' || logPath[i - 1] == '/') { cut = i; break; }
+    }
+    if (cut >= cap) cut = cap - 1;
+    memcpy(dst, logPath, cut);
+    dst[cut] = 0;
+    _snprintf(dst + cut, cap - cut, "proxy-live-%lu.state",
+              (ulong)GetCurrentProcessId());
+    dst[cap - 1] = 0;
+}
+
 static int CountOf(const char *log, const char *needle)
 {
     int         n = 0;
@@ -449,6 +467,8 @@ int main(int argc, char **argv)
     Check(Has(log, "# wall(start)="),                            "header: # wall(start)=");
     Check(Has(log, "# api: 04.04 "),                             "header: # api: 04.04");
     Check(Has(log, "# agent: j2534proxy.dll mode=proxy"),        "header: # agent:");
+    Check(Has(log, "# proxy live: "),                            "header: # proxy live:");
+    Check(Has(log, "# device: name=\"Scanmatik - SM2 Proxy\""),  "header: # device:");
     Check(Has(log, "J2534 open name=\"Scanmatik - SM2 Proxy\""), "J2534 open");
     Check(Has(log, "J2534 connect-enter "),                      "J2534 connect-enter");
     Check(Has(log, "J2534 connect dev=1 ch=1 "),                 "J2534 connect");
@@ -483,6 +503,33 @@ int main(int argc, char **argv)
 
     free(log);
     log = NULL;
+
+    /* ---- live state (docs/13 section 6.1) --------------------------- */
+    {
+        char  livePath[MAX_PATH];
+        char *live = NULL;
+        DWORD liveSize = 0;
+        char  pidTag[32];
+
+        LiveStatePath(logPath, livePath, MAX_PATH);
+        _snprintf(pidTag, sizeof(pidTag), "pid=%lu", (ulong)GetCurrentProcessId());
+        pidTag[sizeof(pidTag) - 1] = 0;
+
+        if (!ReadWholeFile(livePath, &live, &liveSize)) {
+            Fail("live state was not created: %s", livePath);
+        } else {
+            printf("\nlive: %s (%lu bytes)\n", livePath, (ulong)liveSize);
+            Check(Has(live, pidTag),                        "live: own pid");
+            Check(Has(live, "state=stopped"),               "live: DETACH wrote state=stopped");
+            Check(Has(live, "exe="),                        "live: exe=");
+            Check(Has(live, "real="),                       "live: real=");
+            Check(Has(live, "calls=") && Has(live, "tx=") && Has(live, "rx="),
+                                                            "live: counters");
+            Check(Has(live, "updated="),                    "live: updated=");
+            Check(Has(live, "version=1.0.0.121"),           "live: version");
+            free(live);
+        }
+    }
 
     /* ---- append, not overwrite: load the proxy once more ------------ */
     hProxy = LoadLibraryA(proxyPath);

@@ -11,7 +11,7 @@
 //! первой гарантирует, что после отказа не останется ни ini с `Enabled=1`, ни
 //! полузаписанного ключа реестра, из-за которого прокси «как бы включён».
 
-use crate::models::{ProxyCross, ProxyLane};
+use crate::models::{ProxyCross, ProxyDevice, ProxyLane, ProxyLive, ProxyLiveItem};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,6 +103,12 @@ pub struct ProxyStatus {
     pub log_dir: String,
     pub log_files: usize,
     pub pcmflash: ProxyPcmflash,
+    /// Живое состояние: подхватился ли прокси и сколько он уже видел (docs/13 §6.1).
+    #[serde(default)]
+    pub live: ProxyLive,
+    /// Зарегистрированные J2534-драйверы: из чего выбирать «шнурок» (docs/13 §4.1).
+    #[serde(default)]
+    pub devices: Vec<ProxyDevice>,
     pub notes: Vec<String>,
 }
 
@@ -316,6 +322,10 @@ fn build_status(install_dir: &Path, extra_notes: Vec<String>) -> ProxyStatus {
     let backup = read_adapter_backup(&log_dir).unwrap_or_default();
     let real = resolve_real_status(install_dir, &ini_values);
     let elevated = reg::is_elevated();
+    // Живое состояние читается всегда: «включено, но никто не загрузил» —
+    // именно тот вопрос, ради которого смотрят в настройки (docs/13 §6.1).
+    let live = live_status(&log_dir);
+    let devices = device_options(&real.path);
 
     let mut notes = extra_notes;
     if !elevated {
@@ -369,6 +379,8 @@ fn build_status(install_dir: &Path, extra_notes: Vec<String>) -> ProxyStatus {
             adapter,
             backup,
         },
+        live,
+        devices,
         notes,
     }
 }
@@ -416,6 +428,255 @@ fn count_logs(dir: &Path) -> usize {
             name.starts_with("proxy-") && name.ends_with(".log")
         })
         .count()
+}
+
+// ──────────────────────── живое состояние (live) ─────────────────────────
+
+/// Расширение файла живого состояния. Намеренно не `.log`: сборщик полосы
+/// берёт все `proxy-*.log` как строки обмена, а это не обмен (docs/13 §6.1).
+const LIVE_EXT: &str = ".state";
+const LIVE_PREFIX: &str = "proxy-live-";
+/// Сколько секунд файл считается свежим. DLL обновляет его раз в секунду,
+/// поэтому 15 с — это «процесс замолчал», а не «просто нечего писать».
+const LIVE_FRESH_SECS: u64 = 15;
+/// Через сколько секунд файл удаляется: он нужен, чтобы показать последний
+/// прогон, а не чтобы копиться годами.
+const LIVE_KEEP_SECS: u64 = 6 * 3600;
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Разобрать `proxy-live-<pid>.state` (docs/13 §6.1).
+///
+/// Формат — `ключ=значение` по строке: его пишет C-код без JSON-экранирования,
+/// и путь вида `C:\Program Files (x86)\…` не должен требовать побега кавычек.
+fn parse_live_state(text: &str, now: u64) -> Option<ProxyLiveItem> {
+    let mut item = ProxyLiveItem::default();
+    let mut updated = 0u64;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "pid" => item.pid = value.parse().unwrap_or(0),
+            "state" => item.state = value.to_ascii_lowercase(),
+            "exe" => item.exe = value.to_string(),
+            "dll" => item.dll = value.to_string(),
+            "real" => item.real = value.to_string(),
+            "log" => item.log = value.to_string(),
+            "device" => item.device = value.to_string(),
+            "started" => item.started = value.to_string(),
+            "updated" => updated = value.parse().unwrap_or(0),
+            "calls" => item.calls = value.parse().unwrap_or(0),
+            "tx" => item.tx = value.parse().unwrap_or(0),
+            "rx" => item.rx = value.parse().unwrap_or(0),
+            "errors" => item.errors = value.parse().unwrap_or(0),
+            "gen" => item.gen = value.parse().unwrap_or(0),
+            "bits" => item.bits = value.parse().unwrap_or(0),
+            "fatal" => item.fatal = value == "1",
+            "version" => item.version = value.to_string(),
+            _ => {}
+        }
+    }
+    if item.pid == 0 {
+        return None;
+    }
+    // `updated=0` (файл без пульса) — возраст неизвестен: считаем протухшим,
+    // а не «только что», иначе индикатор врал бы в сторону «всё хорошо».
+    item.age_s = if updated == 0 {
+        LIVE_FRESH_SECS + 1
+    } else {
+        now.saturating_sub(updated)
+    };
+    // Здесь проверяется только то, что записала DLL. Живость процесса
+    // подтверждает `live_status`: файл может остаться от прошлого запуска.
+    item.alive = item.state == "live" && updated != 0;
+    item.exe_name = Path::new(&item.exe)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(item)
+}
+
+/// Каталоги, где искать файлы живого состояния.
+///
+/// `FTDI_J2534_PROXY_LOG` перебивает каталог журналов (docs/13 §4), поэтому
+/// состояние, записанное рядом с таким журналом, тоже должно находиться: иначе
+/// «принесённый с другой машины» журнал показывал бы «не подхвачен», хотя файл
+/// лежит ровно там, куда его положили.
+fn live_dirs(log_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![log_dir.to_path_buf()];
+    if let Some(exact) = env_log_file() {
+        if let Some(parent) = exact.parent() {
+            if !dirs.iter().any(|dir| dir == parent) {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+    dirs
+}
+
+/// Живое состояние: подхватился ли прокси и что он уже видел (docs/13 §6.1).
+///
+/// Читает `proxy-live-*.state` из каталога журналов. Ошибки чтения не
+/// превращаются в отказ: отсутствие файлов — это `idle`, то есть «никто не
+/// загружал прокси», а не поломка.
+pub fn live_status(log_dir: &Path) -> ProxyLive {
+    let now = unix_now();
+    let mut out = ProxyLive::default();
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for dir in live_dirs(log_dir) {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.starts_with(LIVE_PREFIX) && name.ends_with(LIVE_EXT) {
+                entries.push(entry.path());
+            }
+        }
+    }
+    if entries.is_empty() {
+        out.state = "idle".into();
+        out.notes.push(
+            "ни одна программа не загрузила прокси-устройство: проверьте выбранный адаптер".into(),
+        );
+        return out;
+    }
+    entries.sort();
+    for path in entries {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(item) = parse_live_state(&text, now) else {
+            continue;
+        };
+        out.files += 1;
+        // Старый файл (и живой, и остановленный) — след прошлого запуска:
+        // удаляем, чтобы каталог не рос. Имя уже проверено шаблоном, так что
+        // удаляется только наш собственный файл состояния.
+        if item.age_s > LIVE_KEEP_SECS {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        // `live` в файле — это «DLL не выгружалась». Работает ли она сейчас,
+        // знает только сам процесс: журнал состояния мог остаться от прошлого
+        // запуска, а PID за это время достался другому процессу.
+        let mut item = item;
+        if item.alive {
+            match crate::procscan::pid_exe(item.pid) {
+                // Процесс есть, путь прочитать не дали — доверяем файлу.
+                Some(exe) if exe.is_empty() => {}
+                // Процесс есть и это тот же exe, что писал файл.
+                Some(exe) if item.exe.is_empty() || same_path(&exe, &item.exe) => {}
+                // PID переиспользован: состояние относится к прежнему запуску.
+                Some(_) | None => item.alive = false,
+            }
+        }
+        out.items.push(item);
+    }
+    out.items
+        .sort_by(|a, b| b.alive.cmp(&a.alive).then_with(|| a.pid.cmp(&b.pid)));
+    out.state = if out.items.iter().any(|item| item.alive) {
+        "loaded".into()
+    } else if out.items.is_empty() {
+        "idle".into()
+    } else {
+        "recent".into()
+    };
+    match out.state.as_str() {
+        "loaded" => {
+            if out.items.iter().any(|item| item.alive && item.fatal) {
+                out.notes.push(
+                    "прокси загружен, но настоящий драйвер не открылся: все вызовы вернут 0x08"
+                        .into(),
+                );
+            }
+        }
+        "recent" => out
+            .notes
+            .push("прокси работал, но программа уже завершилась".into()),
+        _ => out.notes.push(
+            "ни одна программа не загрузила прокси-устройство: проверьте выбранный адаптер".into(),
+        ),
+    }
+    out
+}
+
+/// Варианты «какой шнурок проксировать»: зарегистрированные J2534-драйверы.
+///
+/// Собственное устройство прокси помечается `is_proxy` и в выборе недоступно:
+/// форвард в самого себя запрещён (docs/13 §7).
+pub fn device_options(current_real: &str) -> Vec<ProxyDevice> {
+    crate::j2534::list_drivers()
+        .into_iter()
+        .map(|driver| ProxyDevice {
+            current: !current_real.is_empty() && same_path(&driver.dll, current_real),
+            is_proxy: is_proxy_dll(&driver.dll),
+            name: driver.name,
+            vendor: driver.vendor,
+            dll: driver.dll,
+            present: driver.dll_present,
+            api: driver.api,
+        })
+        .collect()
+}
+
+/// Выбрать настоящий драйвер («шнурок») из интерфейса (docs/13 §4.1).
+///
+/// Принимает точный путь или имя зарегистрированного устройства. Проверки идут
+/// до записи: файл существует и это не наша DLL. Иначе прокси форвардил бы в
+/// себя, вызовы уходили бы в никуда, а пользователь искал бы поломку в адаптере.
+pub fn set_real(
+    install_dir: &Path,
+    path: Option<&str>,
+    device: Option<&str>,
+) -> Result<ProxyStatus> {
+    let chosen = match (path, device) {
+        (Some(value), _) if !value.trim().is_empty() => value.trim().to_string(),
+        (_, Some(value)) if !value.trim().is_empty() => {
+            let wanted = value.trim();
+            let found = crate::j2534::list_drivers()
+                .into_iter()
+                .find(|driver| {
+                    driver.name.eq_ignore_ascii_case(wanted)
+                        || driver.registry_key.eq_ignore_ascii_case(wanted)
+                })
+                .ok_or_else(|| anyhow!("драйвер «{wanted}» не зарегистрирован"))?;
+            if !found.dll_present {
+                bail!(
+                    "у драйвера «{}» нет файла {} — прокси нечего загружать",
+                    found.name,
+                    found.dll
+                );
+            }
+            found.dll
+        }
+        _ => bail!("не указан драйвер: передайте path или device"),
+    };
+    if is_proxy_dll(&chosen) {
+        bail!("нельзя проксировать самого себя: {chosen} — это {DLL_NAME}");
+    }
+    if !Path::new(&chosen).is_file() {
+        bail!("файл драйвера не найден: {chosen}");
+    }
+    let current = read_ini(install_dir);
+    write_ini(install_dir, current.enabled, Some(&chosen))?;
+    Ok(build_status(
+        install_dir,
+        vec![format!(
+            "настоящий драйвер: {chosen} (применится при следующем запуске программы)"
+        )],
+    ))
 }
 
 // ───────────────────────── настоящая библиотека ──────────────────────────
@@ -1395,5 +1656,146 @@ mod tests {
         );
         // Незнакомое имя — None: вызывающий возьмёт первый с существующим файлом.
         assert!(pick_driver(&drivers, "VXDIAG").is_none());
+    }
+
+    fn live_text(pid: u32, state: &str, updated: u64, exe: &str) -> String {
+        format!(
+            "# proxy live: pid={pid} state={state}\n\
+             pid={pid}\n\
+             state={state}\n\
+             exe={exe}\n\
+             dll=C:\\App\\j2534proxy\\j2534proxy.dll\n\
+             real=C:\\Program Files (x86)\\Scanmatik\\smj2534.dll\n\
+             log=C:\\Logs\\proxy-20261120-142031-pid{pid}.log\n\
+             device=Scanmatik - SM2 Proxy\n\
+             started=2026-11-20 14:20:31.123\n\
+             updated={updated}\n\
+             calls=2876\n\
+             tx=1959\n\
+             rx=3917\n\
+             errors=2\n\
+             gen=1\n\
+             bits=32\n\
+             fatal=0\n\
+             version=1.0.0.121\n"
+        )
+    }
+
+    #[test]
+    fn live_state_is_parsed() {
+        let now = 1_800_000_000u64;
+        let text = live_text(8120, "live", now - 1, r"C:\Tools\PCMflash.exe");
+        let item = parse_live_state(&text, now).expect("разбор");
+        assert_eq!(item.pid, 8120);
+        assert_eq!(item.exe_name, "PCMflash.exe");
+        assert_eq!(item.calls, 2876);
+        assert_eq!(item.age_s, 1);
+        assert!(item.alive, "state=live при живом updated — файл «подхвачен»");
+
+        let stopped =
+            parse_live_state(&live_text(8120, "stopped", now - 1, r"C:\T\a.exe"), now)
+                .expect("разбор");
+        assert!(!stopped.alive, "выгруженная DLL не «подхвачена»");
+
+        // `updated=0` (сборка без отметки времени): возраст неизвестен, и такой
+        // файл не должен выдаваться за работающий прокси.
+        let pulse_less =
+            parse_live_state(&live_text(8120, "live", 0, r"C:\T\a.exe"), now).expect("разбор");
+        assert!(!pulse_less.alive);
+
+        assert!(
+            parse_live_state("exe=x\n", now).is_none(),
+            "без pid это не файл состояния"
+        );
+    }
+
+    #[test]
+    fn live_status_separates_loaded_recent_and_idle() {
+        let now = unix_now();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let idle = live_status(dir.path());
+        assert_eq!(idle.state, "idle");
+        assert_eq!(idle.files, 0);
+        assert!(
+            idle.notes.iter().any(|note| note.contains("адаптер")),
+            "«idle» обязан объяснять причину: {:?}",
+            idle.notes
+        );
+
+        // Свой же процесс — самый честный «живой» случай: exe и pid настоящие.
+        let me = std::process::id();
+        let own_exe = std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path = dir.path().join(format!("proxy-live-{me}.state"));
+        std::fs::write(&path, live_text(me, "live", now - 1, &own_exe)).expect("state");
+        let loaded = live_status(dir.path());
+        assert_eq!(loaded.state, "loaded");
+        assert_eq!(loaded.items.len(), 1);
+        assert!(loaded.items[0].alive, "процесс жив — прокси подхвачен");
+
+        // Тот же файл, но pid давно не существует: «работал», а не «работает».
+        let _ = std::fs::remove_file(&path);
+        let dead = dir.path().join("proxy-live-999999.state");
+        std::fs::write(&dead, live_text(999_999, "live", now - 1, r"C:\Tools\PCMflash.exe"))
+            .expect("state");
+        assert_eq!(live_status(dir.path()).state, "recent");
+        let _ = std::fs::remove_file(&dead);
+
+        // Остановленный файл — тоже «recent»: прокси работал, программы нет.
+        std::fs::write(&path, live_text(me, "stopped", now - 1, &own_exe)).expect("state");
+        assert_eq!(live_status(dir.path()).state, "recent");
+
+        // Протухший (старше суток) удаляется, чтобы каталог не рос.
+        std::fs::write(
+            &path,
+            live_text(me, "stopped", now - LIVE_KEEP_SECS - 10, &own_exe),
+        )
+        .expect("state");
+        assert_eq!(live_status(dir.path()).state, "idle");
+        assert!(!path.exists(), "старый файл состояния должен удаляться");
+    }
+
+    #[test]
+    fn set_real_refuses_self_and_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(INI_NAME), "[proxy]\nEnabled=0\n").expect("ini");
+
+        let err = set_real(dir.path(), Some(r"C:\x\j2534proxy.dll"), None)
+            .expect_err("своя DLL запрещена");
+        assert!(format!("{err:#}").contains("самого себя"), "{err:#}");
+
+        let err = set_real(dir.path(), Some(r"C:\no\such\vendor.dll"), None)
+            .expect_err("несуществующий файл запрещён");
+        assert!(format!("{err:#}").contains("не найден"), "{err:#}");
+
+        // Настоящий драйвер: файл есть — ini обновляется, `Enabled` не теряется.
+        let real = dir.path().join("smj2534.dll");
+        std::fs::write(&real, b"x").expect("fake dll");
+        set_real(dir.path(), Some(&real.to_string_lossy()), None).expect("set-real");
+        let after = read_ini(dir.path());
+        assert_eq!(after.real_library, real.to_string_lossy());
+        assert!(!after.enabled, "выключенный прокси не должен включаться сам");
+    }
+
+    #[test]
+    fn device_options_marks_our_own_device_and_the_current_one() {
+        let options = device_options(r"C:\nope\smj2534.dll");
+        // Список зависит от машины, поэтому проверяем инварианты, а не состав.
+        for option in &options {
+            if option.is_proxy {
+                assert!(
+                    option.dll.to_ascii_lowercase().ends_with(DLL_NAME),
+                    "is_proxy выставлен не нашей DLL: {}",
+                    option.dll
+                );
+            }
+            assert!(
+                !option.current || option.dll.eq_ignore_ascii_case(r"C:\nope\smj2534.dll"),
+                "current выставлен чужому драйверу: {}",
+                option.dll
+            );
+        }
     }
 }
