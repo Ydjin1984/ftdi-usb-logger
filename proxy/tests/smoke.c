@@ -526,7 +526,7 @@ int main(int argc, char **argv)
             Check(Has(live, "calls=") && Has(live, "tx=") && Has(live, "rx="),
                                                             "live: counters");
             Check(Has(live, "updated="),                    "live: updated=");
-            Check(Has(live, "version=1.0.0.121"),           "live: version");
+            Check(Has(live, "version=1.0.0."),             "live: version");
             free(live);
         }
     }

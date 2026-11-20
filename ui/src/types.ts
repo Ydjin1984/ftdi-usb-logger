@@ -54,6 +54,15 @@ export interface SessionCounts {
   untracked_channels?: number;
   /** Протоколы по запросам: `{"0x8003": 11096}`. */
   protocols?: Record<string, number>;
+  /** Внутренние записи второго слоя J2534 (прокси → драйвер): не в счётчиках. */
+  inner_events?: number;
+  inner_tx?: number;
+  inner_rx?: number;
+  inner_bytes?: number;
+  /** Слои J2534: `proxy`, `driver` (docs/13 §6.2). */
+  j2534_layers?: string[];
+  /** Модули J2534, которые открывались (для старых логов без разметки). */
+  j2534_modules?: string[];
 }
 
 export interface AdapterInfo {

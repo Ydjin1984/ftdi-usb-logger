@@ -8,7 +8,7 @@
 
 import { fmtNum } from "./format";
 import { msg, t } from "./i18n";
-import type { ProxyDevice, ProxyLane, ProxyLive, ProxyLiveItem } from "./types";
+import type { ProxyDevice, ProxyLane, ProxyLive, ProxyLiveItem, SessionCounts } from "./types";
 
 msg({
   // Подпись бейджа полосы — языконезависимая, записана явно, чтобы словарь был полным.
@@ -34,6 +34,14 @@ msg({
   "выберите «шнурок», в который прокси будет форвардить вызовы":
     "pick the cable the proxy forwards calls to",
   "файла нет": "no file",
+  "прокси": "proxy",
+  "драйвер": "driver",
+  "слои J2534: {layers}": "J2534 layers: {layers}",
+  "внутри {n} записей, не в счётчиках": "{n} inner records, not counted",
+  "возможен двойной учёт (старый агент)": "possible double counting (old agent)",
+  "вызовы J2534 не захвачены": "J2534 calls were not captured",
+  "внешний вызов идёт в счётчики, внутренний (прокси → драйвер) остаётся в деталях":
+    "the outer call is counted, the inner one (proxy → driver) stays in the details",
 });
 
 /**
@@ -171,4 +179,54 @@ export function proxyDeviceLabel(device: ProxyDevice): string {
   if (file) parts.push(file);
   if (!device.present) parts.push(t("файла нет"));
   return parts.join(" · ");
+}
+
+/* ────────────────── слои J2534 в карточке сессии ────────────────── */
+
+/**
+ * Строка «слои J2534» для карточки/инспектора сессии (docs/13 §6.2).
+ *
+ * Показывает, что обмен шёл через прокси и драйвер, сколько записей отнесено
+ * к внутреннему слою (они не в счётчиках) и — для старых сессий без связи
+ * вызовов — что сводка может быть удвоена. `null`, если сказать нечего.
+ */
+export function j2534LayersLine(
+  counts: SessionCounts | null | undefined,
+): { text: string; title: string; warn: boolean } | null {
+  if (!counts) return null;
+  const layers = counts.j2534_layers ?? [];
+  const modules = counts.j2534_modules ?? [];
+  const inner = counts.inner_events ?? 0;
+  if (!layers.length && !modules.length && !inner) return null;
+
+  const names = layers.length
+    ? layers
+        .map((layer) =>
+          layer === "proxy" ? t("прокси") : layer === "driver" ? t("драйвер") : layer,
+        )
+        .join(" + ")
+    : modules.join(" + ");
+  const parts = [t("слои J2534: {layers}", { layers: names })];
+  let warn = false;
+  if (inner) {
+    parts.push(t("внутри {n} записей, не в счётчиках", { n: fmtNum(inner) }));
+  } else if (layers.length > 1 || modules.length > 1) {
+    warn = true;
+    parts.push(t("возможен двойной учёт (старый агент)"));
+  }
+  if ((counts.tx ?? 0) === 0 && modules.length) {
+    warn = true;
+    parts.push(t("вызовы J2534 не захвачены"));
+  }
+  return {
+    text: parts.join(" · "),
+    title: [
+      t("слои J2534: {layers}", { layers: names }),
+      ...(modules.length ? [modules.join(", ")] : []),
+      t(
+        "внешний вызов идёт в счётчики, внутренний (прокси → драйвер) остаётся в деталях",
+      ),
+    ].join("\n"),
+    warn,
+  };
 }

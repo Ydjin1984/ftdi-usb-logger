@@ -1470,6 +1470,12 @@ fn cross(
         if ev.transport != crate::models::Transport::J2534 {
             continue;
         }
+        // Внутренний слой (прокси → драйвер) — это тот же кадр, уже посчитанный
+        // строкой прокси. Если сверять и его, прокси «теряет» ровно столько
+        // кадров, сколько их во внутреннем слое (docs/13 §6.2).
+        if crate::decode::is_inner(ev) {
+            continue;
+        }
         if !matches!(ev.kind, crate::models::EventKind::Tx | crate::models::EventKind::Rx)
             || ev.hex.is_empty()
             || is_short(ev)
@@ -1575,6 +1581,28 @@ mod tests {
         assert_eq!(ini.name, "Scanmatik - SM2 Proxy");
         assert_eq!(ini.real_library, r"C:\x\smj2534.dll");
         assert_eq!(ini.max_data_bytes, 4128);
+    }
+
+    #[test]
+    fn cross_ignores_inner_layer_frames() {
+        // Один обмен виден дважды: слой прокси и вложенный вызов драйвера.
+        // В сверке участвует только внешняя запись, иначе прокси «теряет»
+        // ровно те кадры, которые продублировал второй слой (docs/13 §6.2).
+        let main: Vec<crate::models::Event> = [
+            "[+1.000000s] J2534 TX ch=1 proto=0x8003 len=5 layer=proxy : 00 03 80 e1 01",
+            "[+1.000100s] J2534 TX ch=1 proto=0x8003 len=5 layer=driver parent=1 : 00 03 80 e1 01",
+        ]
+        .iter()
+        .filter_map(|line| crate::decode::parse_capture_line(line))
+        .collect();
+        assert_eq!(main.len(), 2);
+
+        let mut proxy: BTreeMap<(u8, String), u64> = BTreeMap::new();
+        proxy.insert((b't', normalize_hex("00 03 80 e1 01")), 1);
+        let out = cross(&main, &proxy);
+        assert_eq!(out.tx_matched, 1);
+        assert_eq!(out.tx_missing, 0, "внутренняя копия — не потеря прокси");
+        assert_eq!(out.extra, 0);
     }
 
     #[test]

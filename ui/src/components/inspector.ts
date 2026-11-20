@@ -7,7 +7,13 @@ import { store } from "../store";
 import type { Event, StepSummary } from "../types";
 import { openImage } from "./dialogs";
 import { msg, t } from "../i18n";
-import { proxyBadge, proxyLine, proxyLineTitle, proxyNeedsAttention } from "../proxy";
+import {
+  j2534LayersLine,
+  proxyBadge,
+  proxyLine,
+  proxyLineTitle,
+  proxyNeedsAttention,
+} from "../proxy";
 
 msg({
   "событие": "event",
@@ -445,6 +451,19 @@ export class Inspector {
       if (proxyWarn) line.append(icon("warn"));
       line.append(el("span", "", proxyLine(proxy)));
       line.title = proxyLineTitle(proxy);
+      sec.append(line);
+    }
+
+    // Слои J2534: один обмен в схеме «прокси → драйвер» виден дважды, но
+    // считается один раз. Строка доказывает, что связь вызовов сработала
+    // (docs/13 §6.2), а для старых сессий предупреждает о возможном удвоении.
+    const layers = j2534LayersLine(meta.counts);
+    if (layers) {
+      const line = el("div", `session-item__proxy${layers.warn ? " is-warn" : ""}`.trim());
+      line.style.marginTop = "6px";
+      if (layers.warn) line.append(icon("warn"));
+      line.append(el("span", "", layers.text));
+      line.title = layers.title;
       sec.append(line);
     }
 

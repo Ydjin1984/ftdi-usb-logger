@@ -22,6 +22,54 @@ const MODE = CFG.mode === 'compact' ? 'compact' : 'full';
 const BITS = Process.arch === 'ia32' ? 32 : 64;
 let CALL_SEQ = 0;
 function threadId() { try { return Process.getCurrentThreadId(); } catch (e) { return 0; } }
+
+// ── Слой и вложенность вызовов J2534 ─────────────────────────────────────
+// Штатный сценарий: приложение → j2534proxy.dll → smj2534.dll. Один и тот же
+// обмен виден дважды — на входе в прокси и на входе в настоящий драйвер.
+// Поэтому каждая запись несёт слой (`layer=proxy|driver`), а вызов, начатый
+// внутри вызова другого слоя на том же потоке, — ссылку `parent=<call>`.
+// Связь ставится ТОЛЬКО по вложенности: одинаковые байты в разных вызовах —
+// это реальные повторы, их схлопывать нельзя (docs/13 §6.2).
+const JSTACK = new Map();
+function jStack() {
+  const th = threadId();
+  let s = JSTACK.get(th);
+  if (!s) { s = []; JSTACK.set(th, s); }
+  return s;
+}
+function jTop() {
+  const s = jStack();
+  return s.length ? s[s.length - 1] : null;
+}
+/** Внутренний (вложенный) вызов: его строки не идут в счётчики обмена. */
+function jInner() {
+  const top = jTop();
+  return !!(top && top.parent);
+}
+/** Один идентификатор на весь вызов: вход, кадры и выход. */
+function jCallId(self) {
+  const ctx = self && self.__jctx;
+  return ctx ? ctx.cid : (++CALL_SEQ);
+}
+function jEnter(layer) {
+  const s = jStack();
+  let parent = 0;
+  for (let i = s.length - 1; i >= 0; i--) {
+    if (s[i].layer !== layer) { parent = s[i].cid; break; }
+  }
+  const ctx = { cid: ++CALL_SEQ, layer: layer, parent: parent };
+  s.push(ctx);
+  return ctx;
+}
+function jLeave(ctx) {
+  const s = jStack();
+  for (let i = s.length - 1; i >= 0; i--) {
+    if (s[i].cid === ctx.cid) { s.splice(i, 1); break; }
+  }
+  if (!s.length) JSTACK.delete(threadId());
+}
+/** Имя файла нашего прокси: по нему определяется слой модуля. */
+const PROXY_MODULE_RE = /^j2534proxy\.dll$/i;
 // Счётчики полноты по стороне агента (docs/09 §4). `dropped_events` здесь —
 // именно потери захвата (очередь/буфер), а не вытеснение из сводки шага:
 // вытеснение считает движок отдельным `evicted_events`.
@@ -64,7 +112,23 @@ function ts() {
   if (qpcCount && qpcFreq) return '+' + (qpcUs(qpcT0, qpcNow()) / 1e6).toFixed(6) + 's';
   return '+' + ((Date.now() - T0) / 1000).toFixed(3) + 's';
 }
-function log(msg) { send('[' + ts() + '] ' + msg); }
+function log(msg) {
+  // J2534-строки несут слой и, для вложенного вызова, ссылку на внешний:
+  // движок по `parent=` понимает, что кадр уже посчитан слоем прокси.
+  // Вставляем ДО hex-секции (` : …`): payload обязан оставаться последним,
+  // иначе `layer=driver` попадёт в hex и «кадр» станет мусором.
+  if (typeof msg === 'string' && msg.charCodeAt(0) === 0x4a &&
+      msg.charCodeAt(1) === 0x32 && msg.charCodeAt(2) === 0x35) {
+    const top = jTop();
+    if (top) {
+      let suffix = ' layer=' + top.layer;
+      if (top.parent) suffix += ' parent=' + top.parent;
+      const cut = msg.indexOf(' : ');
+      msg = cut >= 0 ? (msg.slice(0, cut) + suffix + msg.slice(cut)) : (msg + suffix);
+    }
+  }
+  send('[' + ts() + '] ' + msg);
+}
 
 function hexDump(ptr, len) {
   try {
@@ -152,10 +216,33 @@ function modKey(mod) { return mod ? (mod.name + '|' + String(mod.base)) : ''; }
 // Идемпотентно: повторная установка на тот же адрес (повторный dispatch модуля,
 // повторный onAdded от наблюдателя) давала ВТОРОЙ listener — и каждая строка
 // писалась дважды (`LAN CLOSE …` парами в логе PCMflash).
+//
+// `JLAYER` выставляет installJ2534Hook на время установки: слой попадает в
+// замыкание, и дальше каждый вызов сам знает, где он — в прокси или в драйвере.
+let JLAYER = '';
 function attachHook(target, cbs) {
   const key = String(target);
   if (hookedAddrs.has(key)) return null;
-  const l = Interceptor.attach(target, cbs);
+  const layer = JLAYER;
+  let wrapped = cbs;
+  if (layer) {
+    const onEnter = cbs.onEnter;
+    const onLeave = cbs.onLeave;
+    wrapped = {
+      onEnter: function (args) {
+        this.__jctx = jEnter(layer);
+        if (onEnter) return onEnter.call(this, args);
+      },
+      onLeave: function (ret) {
+        try {
+          if (onLeave) return onLeave.call(this, ret);
+        } finally {
+          if (this.__jctx) jLeave(this.__jctx);
+        }
+      }
+    };
+  }
+  const l = Interceptor.attach(target, wrapped);
   hookedAddrs.add(key);
   listeners.push({ l: l, addr: key, owner: currentOwner });
   return l;
@@ -1691,6 +1778,18 @@ function ioctlOutput(id, p, st) {
 
 // ── обработчики PassThru* ────────────────────────────────────────────────
 function installJ2534Hook(name, addr, mod, load) {
+  // Слой фиксируется на время установки: attachHook забирает его в замыкание,
+  // и дальше каждый вызов сам знает, где он — в прокси или в настоящем драйвере.
+  const prev = JLAYER;
+  JLAYER = PROXY_MODULE_RE.test(mod && mod.name ? mod.name : '') ? 'proxy' : 'driver';
+  try {
+    installJ2534HookInner(name, addr, mod, load);
+  } finally {
+    JLAYER = prev;
+  }
+}
+
+function installJ2534HookInner(name, addr, mod, load) {
   const dll = mod.name || '';
   const vendor = j2534Vendor(dll);
   const abi = abiFor(load, dll);
@@ -1769,7 +1868,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.pNum = args[2];
         this.nIn = u32(args[2]) >>> 0;
         try { this.timeoutMs = args[3].toInt32(); } catch (e) { this.timeoutMs = 0; }
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'ReadMsgs');
@@ -1778,7 +1877,7 @@ function installJ2534Hook(name, addr, mod, load) {
         const rc = ret.toInt32();
         const dur = qpcUs(this.t0, qpcNow());
         const nOut = u32(this.pNum) >>> 0;
-        counters.calls += 1;
+        if (!jInner()) counters.calls += 1;
 
         const to = this.timeoutMs;
         // rc=0 печатается как `0`, остальные — hex: так строка не меняет вид
@@ -1815,15 +1914,15 @@ function installJ2534Hook(name, addr, mod, load) {
         // допускает сообщения, уже снятые с очереди, вместе с кодом ошибки.
         const partial = rc !== 0;
         const emptyWithMsgs = (rc === 0x10 || rc === 0x11) && nOut > 0;
-        if (partial) counters.partial_results += 1;
+        if (partial && !jInner()) counters.partial_results += 1;
         if (emptyWithMsgs) {
           // «Пусто» с сообщениями — тоже нарушение контракта драйвера.
-          counters.contract_violations += 1;
+          if (!jInner()) counters.contract_violations += 1;
           log('J2534 msgs-empty-with-data ch=' + this.ch + ' call=' + this.call +
               ' n_out=' + nOut + ' rc=' + rcHex);
         }
         if (overflow) {
-          counters.contract_violations += 1;
+          if (!jInner()) counters.contract_violations += 1;
           log('J2534 msgs-overflow ch=' + this.ch + ' call=' + this.call + ' n_in=' + this.nIn +
               ' n_out=' + nOut + ' read=' + cap + ' rc=' + rcHex);
         }
@@ -1860,7 +1959,7 @@ function installJ2534Hook(name, addr, mod, load) {
         for (let i = 0; i < recs.length; i++) {
           const r = recs[i];
           const isSof = (r.rxs & 0x02) !== 0;
-          if (isSof) counters.rx_sof += 1;
+          if (isSof && !jInner()) counters.rx_sof += 1;
           // Компактный режим: SOF построчно не пишется, только счётчик (§4).
           // Полезные данные SOF (len > 0) сохраняются и в компактном режиме —
           // отбрасывается только пустой статус.
@@ -1883,7 +1982,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.pMsg = args[1];
         this.pNum = args[2];
         this.nIn = u32(args[2]) >>> 0;
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         try { this.timeoutMs = args[3].toInt32(); } catch (e) { this.timeoutMs = 0; }
@@ -1900,7 +1999,7 @@ function installJ2534Hook(name, addr, mod, load) {
         const rc = ret.toInt32();
         const dur = qpcUs(this.t0, qpcNow());
         const nOut = u32(this.pNum) >>> 0;   // сколько драйвер реально принял
-        counters.calls += 1;
+        if (!jInner()) counters.calls += 1;
         const to = this.timeoutMs;
         if (this.nIn > this.cap && this.cap > 0) {
           counters.truncated_payloads += 1;
@@ -1942,7 +2041,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.pPattern = args[3];
         this.pFlow = args[4];
         this.pId = args[5];
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'filter');
@@ -1974,7 +2073,7 @@ function installJ2534Hook(name, addr, mod, load) {
       onEnter: enterSafe(function (args) {
         this.ch = args[0].toInt32();
         this.pId = args[1];
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'filter-stop');
@@ -1994,7 +2093,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.pMsg = args[1];
         this.pId = args[2];
         try { this.ms = args[3].toInt32(); } catch (e) { this.ms = 0; }
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'periodic');
@@ -2020,7 +2119,7 @@ function installJ2534Hook(name, addr, mod, load) {
       onEnter: enterSafe(function (args) {
         this.ch = args[0].toInt32();
         this.pId = args[1];
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'periodic-stop');
@@ -2040,7 +2139,7 @@ function installJ2534Hook(name, addr, mod, load) {
         this.id = args[1].toInt32();
         this.pIn = args[2];
         this.pOut = args[3];
-        this.call = ++CALL_SEQ;
+        this.call = jCallId(this);
         this.th = threadId();
         this.t0 = qpcNow();
         chanTouch(load, this.ch, 'ioctl');
@@ -2180,7 +2279,7 @@ function installJ2534Hook(name, addr, mod, load) {
         parts.push(v);
       }
       this.argdump = parts.join(',');
-      this.call = ++CALL_SEQ;
+      this.call = jCallId(this);
       this.th = threadId();
       this.t0 = qpcNow();
     }),
@@ -2233,7 +2332,9 @@ function hookJ2534Module(mod) {
     startIoStatsTimer();
   }
   // Диагностика установки: одна строка на модуль + список имён.
-  log('# hooks mod="' + mod.name + '" base=' + mod.base + ' load=' + load +
+  // `layer=` — какой слой это: наш прокси или настоящий драйвер под ним.
+  const layer = PROXY_MODULE_RE.test(mod.name || '') ? 'proxy' : 'driver';
+  log('# hooks mod="' + mod.name + '" layer=' + layer + ' base=' + mod.base + ' load=' + load +
       ' exports=' + total + ' attached=' + attached + ' dup=' + dup + ' failed=' + failed);
   if (names.length) log('# hooks-names mod="' + mod.name + '" names="' + names.join(',') + '"');
   const st = abiFor(load, mod.name);
@@ -2989,70 +3090,18 @@ function hookDllLoadWatch() {
   if (n > 0) log('universal: сторож загрузки DLL активен (' + n + ' хуков) — перезагрузка адаптерных DLL не теряется');
 }
 
-// ── J2534-прокси: не хукать «внутренний» драйвер ───────────────────────────
-// Когда приложение грузит наш j2534proxy.dll, прокси сама подгружает настоящий
-// драйвер, и в процессе оказываются ДВА J2534-модуля. Хук на обоих писал бы
-// каждый кадр дважды — TX на входе в прокси и ещё раз на входе в драйвер, —
-// и счётчики сессии удваивались бы. Поэтому всё, что загружено «внутрь»
-// прокси, не хукаем: эту полосу пишет сама DLL (docs/13-j2534-proxy.md §6).
-const PROXY_MODULE_RE = /^j2534proxy\.dll$/i;
-let proxySkipNoted = {};
-let proxyActiveSeen = false;
-
-function proxyModulePath() {
-  try {
-    const mods = Process.enumerateModules();
-    for (let i = 0; i < mods.length; i++) {
-      if (PROXY_MODULE_RE.test(mods[i].name)) return String(mods[i].path || mods[i].name);
-    }
-  } catch (e) { hookError('proxyModulePath', e); }
-  return null;
-}
-
-// Прокси считается работающей, только если она реально начала форвардить:
-// при инициализации (до LoadLibrary настоящего драйвера) она создаёт именованный
-// мьютекс Local\FTDI_J2534_PROXY_<pid>. Просто «модуль загружен» — не признак:
-// некоторые инструменты грузят все зарегистрированные J2534-DLL для перебора,
-// и по одному лишь факту загрузки мы бы зря перестали хукать рабочий драйвер.
-function proxyActiveInProcess() {
-  if (proxyActiveSeen) return true;
-  try {
-    const k32 = Process.findModuleByName('kernel32.dll');
-    const addr = k32 ? exportAddr(k32, 'OpenMutexA') : null;
-    if (!addr) return false;
-    const openMutex = new NativeFunction(addr, 'pointer', ['uint32', 'int', 'pointer']);
-    const name = Memory.allocUtf8String('Local\\FTDI_J2534_PROXY_' + Process.id);
-    const sync = 0x00100000; // SYNCHRONIZE
-    const h = openMutex(sync, 0, name);
-    if (!h.isNull()) { proxyActiveSeen = true; return true; }
-  } catch (e) { hookError('proxyActiveInProcess', e); }
-  return false;
-}
-
-function isProxyInner(mod) {
-  if (!proxyActiveInProcess()) return false;
-  const proxy = proxyModulePath();
-  if (!proxy) return false;
-  const path = String((mod && mod.path) || '');
-  if (!path) return false;
-  return path.toLowerCase() !== proxy.toLowerCase();
-}
-
+// ── J2534-прокси: два слоя, один обмен ─────────────────────────────────────
+// Когда приложение грузит наш j2534proxy.dll, прокси подгружает настоящий
+// драйвер, и в процессе оказываются ДВА J2534-модуля. Хукаем оба: без второго
+// слоя не видно, что вернул драйвер, а первый без второго не отличить от
+// обычного драйвера. Дубли не удаляем — они связываются по вложенности
+// (`layer=`, `parent=`, docs/13 §6.2) и считаются один раз в движке.
 function dispatchUniversalModule(mod) {
   if (!mod || !mod.name) return;
   try {
     if (/^ftd2xx\.dll$/i.test(mod.name)) { if (!ftMod) hookFtModule(mod); }
     else if (J2534_MODULE_RE.test(mod.name)) {
-      // Прокси в процессе? Значит настоящий драйвер загружен ею — см. выше.
-      if (isProxyInner(mod)) {
-        const key = String(mod.path || mod.name).toLowerCase();
-        if (!proxySkipNoted[key]) {
-          proxySkipNoted[key] = true;
-          log('# hooks mod="' + mod.name + '" skip=proxy-inner path="' + (mod.path || '') + '"');
-        }
-      } else {
-        hookJ2534Module(mod);
-      }
+      hookJ2534Module(mod);
     }
     else if (LAN_MODULE_RE.test(mod.name)) hookLanModule(mod);
     else if (/^winusb\.dll$/i.test(mod.name)) hookWinUsbModule(mod);

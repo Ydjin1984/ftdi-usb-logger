@@ -499,19 +499,64 @@ pub fn reparse_session(store: &SessionStore, id: &str) -> anyhow::Result<Session
     let mut meta = meta;
     meta.counts.events = events.len() as u64;
     meta.counts.steps = new_steps.len() as u64;
-    meta.counts.tx = events.iter().filter(|e| e.kind == EventKind::Tx).count() as u64;
-    meta.counts.rx = events.iter().filter(|e| e.kind == EventKind::Rx).count() as u64;
-    // Байты считаем по фактическому payload, а не по длине hex-строки:
-    // у «12 04 0d 1b» hex.len() == 11, и деление на 3 теряет по байту на событие.
-    meta.counts.tx_bytes = events
+    // Второй слой J2534 (прокси → драйвер) считается отдельно: строка остаётся,
+    // но обмен не удваивается (docs/13 §6.2, decode::is_inner).
+    let outer: Vec<&Event> = events.iter().filter(|e| !decode::is_inner(e)).collect();
+    meta.counts.tx = outer.iter().filter(|e| e.kind == EventKind::Tx).count() as u64;
+    meta.counts.rx = outer.iter().filter(|e| e.kind == EventKind::Rx).count() as u64;
+    meta.counts.inner_events = events.iter().filter(|e| decode::is_inner(e)).count() as u64;
+    meta.counts.inner_tx = events
         .iter()
-        .filter(|e| e.kind == EventKind::Tx)
+        .filter(|e| decode::is_inner(e) && e.kind == EventKind::Tx)
+        .count() as u64;
+    meta.counts.inner_rx = events
+        .iter()
+        .filter(|e| decode::is_inner(e) && e.kind == EventKind::Rx)
+        .count() as u64;
+    meta.counts.inner_bytes = events
+        .iter()
+        .filter(|e| decode::is_inner(e))
         .map(payload_len)
         .sum();
-    meta.counts.rx_bytes = events
+    meta.counts.j2534_layers = {
+        let mut seen: Vec<String> = Vec::new();
+        for ev in &events {
+            if let Some(layer) = ev.meta.get("layer").and_then(|v| v.as_str()) {
+                if !layer.is_empty() && !seen.iter().any(|s| s == layer) {
+                    seen.push(layer.to_string());
+                }
+            }
+        }
+        seen
+    };
+    // Модули — для старых логов без разметки слоёв (docs/13 §6.2).
+    meta.counts.j2534_modules = {
+        let mut seen: Vec<String> = Vec::new();
+        for ev in &events {
+            if ev.transport != crate::models::Transport::J2534 {
+                continue;
+            }
+            if let Some(dll) = ev.meta.get("dll").and_then(|v| v.as_str()) {
+                if dll.to_ascii_lowercase().ends_with(".dll")
+                    && !seen.iter().any(|s| s.eq_ignore_ascii_case(dll))
+                {
+                    seen.push(dll.to_string());
+                }
+            }
+        }
+        seen
+    };
+    // Байты считаем по фактическому payload, а не по длине hex-строки:
+    // у «12 04 0d 1b» hex.len() == 11, и деление на 3 теряет по байту на событие.
+    meta.counts.tx_bytes = outer
+        .iter()
+        .filter(|e| e.kind == EventKind::Tx)
+        .map(|e| payload_len(e))
+        .sum();
+    meta.counts.rx_bytes = outer
         .iter()
         .filter(|e| e.kind == EventKind::Rx)
-        .map(payload_len)
+        .map(|e| payload_len(e))
         .sum();
     store.update_meta(&meta)?;
     report::write_session_reports(&dir, &meta, &new_steps)?;

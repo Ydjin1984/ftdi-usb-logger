@@ -112,6 +112,18 @@ fn meta_bool(ev: &Event, key: &str) -> bool {
     ev.meta.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Запись внутреннего слоя J2534: агент ставит `parent=<call>`, когда вызов
+/// пришёл из настоящего драйвера внутри вызова прокси (docs/13 §6.2).
+///
+/// Такая строка остаётся в логе и в `events.jsonl` — по ней видно, что вернул
+/// драйвер, — но в счётчики обмена не входит: обмен уже посчитан слоем выше.
+pub fn is_inner(ev: &Event) -> bool {
+    ev.meta
+        .as_object()
+        .map(|meta| meta.contains_key("parent"))
+        .unwrap_or(false)
+}
+
 fn meta_idx(ev: &Event) -> Option<u32> {
     ev.meta
         .get("idx")
@@ -995,7 +1007,7 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
     let op = op_raw.to_ascii_lowercase();
     let body = after[op_raw.len()..].trim_start();
 
-    match op.as_str() {
+    let mut ev = match op.as_str() {
         "tx" | "rx" => {
             let (dir, kind) = if op == "tx" {
                 (Direction::Tx, EventKind::Tx)
@@ -1412,7 +1424,17 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             ev.text = Some(body.to_string());
             ev
         }
+    };
+
+    // Слой и вложенность проставляет агент на каждый вызов J2534 (docs/13 §6.2),
+    // поэтому их надо сохранить у ЛЮБОЙ операции, а не только у незнакомой:
+    // без `parent=` вложенный вызов прокси не отличить от самостоятельного, и
+    // счётчики удваивают трафик.
+    set_meta_str(&mut ev, "layer", tag_quoted(body, "layer"));
+    if let Some(parent) = tag_u64(body, "parent") {
+        set_meta(&mut ev, "parent", json!(parent));
     }
+    ev
 }
 
 /// LAN/Winsock — сетевой обмен (docs/02 §11.4): J2534-по-IP, DoIP (ISO 13400),
@@ -2328,6 +2350,11 @@ pub fn bus_segments(events: &[Event], gap: f64) -> Vec<BusSegment> {
         if !matches!(ev.kind, EventKind::Tx | EventKind::Rx) {
             continue;
         }
+        // Внутренний слой (прокси → драйвер) — та же посылка, посчитанная выше:
+        // в отрезки она не входит, иначе «посылок» было бы вдвое больше.
+        if is_inner(ev) {
+            continue;
+        }
         let start_new = match out.last() {
             None => true,
             Some(seg) => ev.t - seg.t1 > gap,
@@ -2990,6 +3017,53 @@ pub fn decode_isotp(hex: &str, can_id: &str, protocol: &str) -> PayloadDecode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn j2534_layer_and_parent_are_kept_and_hex_stays_clean() {
+        // Внешний вызов прокси: слой есть, родителя нет.
+        let outer = parse_capture_line(
+            "[+8.240241s] J2534 TX ch=1 call=1 i=1/1 n_in=1 n_out=2 th=31152 ts=0 \
+             flags=0x0 proto=0x8003 svc=0x80 len=5 dur=3543 rc=0 layer=proxy : 00 03 80 e1 01",
+        )
+        .expect("внешний TX");
+        assert_eq!(outer.kind, EventKind::Tx);
+        assert_eq!(outer.meta.get("layer").and_then(Value::as_str), Some("proxy"));
+        assert!(!is_inner(&outer), "у внешнего вызова родителя нет");
+        // `layer=proxy` стоит ДО ` : ` и не должен попасть в payload.
+        assert_eq!(outer.hex, "00 03 80 e1 01");
+        assert_eq!(outer.len, 5);
+
+        // Вложенный вызов драйвера: тот же кадр, но с родителем.
+        let inner = parse_capture_line(
+            "[+8.237046s] J2534 TX ch=1 call=2 i=1/1 n_in=1 n_out=2 th=31152 ts=0 \
+             flags=0x0 proto=0x8003 svc=0x80 len=5 dur=60 rc=0 layer=driver parent=1 : 00 03 80 e1 01",
+        )
+        .expect("вложенный TX");
+        assert!(is_inner(&inner), "parent= делает запись внутренней");
+        assert_eq!(inner.meta.get("parent").and_then(Value::as_u64), Some(1));
+        assert_eq!(inner.meta.get("layer").and_then(Value::as_str), Some("driver"));
+        assert_eq!(inner.hex, "00 03 80 e1 01");
+    }
+
+    #[test]
+    fn bus_segments_ignore_the_inner_layer() {
+        let lines = [
+            "[+1.000000s] J2534 TX ch=1 call=1 proto=0x8003 len=5 layer=proxy : 00 03 80 e1 01",
+            "[+1.000100s] J2534 TX ch=1 call=2 proto=0x8003 len=5 layer=driver parent=1 : 00 03 80 e1 01",
+            "[+1.001000s] J2534 TX ch=1 call=3 proto=0x8003 len=5 layer=proxy : 00 03 80 e1 02",
+            "[+1.001100s] J2534 TX ch=1 call=4 proto=0x8003 len=5 layer=driver parent=3 : 00 03 80 e1 02",
+        ];
+        let events: Vec<Event> = lines
+            .iter()
+            .filter_map(|line| parse_capture_line(line))
+            .collect();
+        assert_eq!(events.len(), 4);
+        let segs = bus_segments(&events, BUS_SEGMENT_GAP);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].tx, 2, "два обмена, а не четыре записи");
+        assert_eq!(segs[0].tx_bytes, 10);
+        assert_eq!(segs[0].services_text(), "0x80×2");
+    }
 
     #[test]
     fn time_prefix_and_payload() {

@@ -236,6 +236,7 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
             meta.counts.untracked_channels
         ));
     }
+    out.push_str(&layers_text(meta));
     if let Some(tool) = &meta.tool_path {
         out.push_str(&format!("  инструмент: {tool}"));
         if let Some(pid) = meta.pid {
@@ -468,6 +469,61 @@ fn protocol_summary(meta: &SessionMeta) -> Option<String> {
     Some(format!("{} · {} из {}", protocol_label(proto), n, total))
 }
 
+/// Слои J2534 человеческим языком: `прокси + драйвер`.
+fn layers_label(meta: &SessionMeta) -> String {
+    if meta.counts.j2534_layers.is_empty() {
+        // Старая сессия без разметки: показываем хотя бы модули, которые
+        // реально открывались — по ним и видно схему «прокси → драйвер».
+        if !meta.counts.j2534_modules.is_empty() {
+            return meta.counts.j2534_modules.join(" + ");
+        }
+        return "не размечено".into();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for layer in &meta.counts.j2534_layers {
+        parts.push(match layer.as_str() {
+            "proxy" => "прокси".to_string(),
+            "driver" => "драйвер".to_string(),
+            other => other.to_string(),
+        });
+    }
+    parts.join(" + ")
+}
+
+/// Признак схемы «два слоя»: размеченные слои либо два разных модуля J2534.
+fn two_layers(meta: &SessionMeta) -> bool {
+    meta.counts.j2534_layers.len() > 1 || meta.counts.j2534_modules.len() > 1
+}
+
+/// Строка `report.txt` про слои и внутренние записи.
+///
+/// Две задачи: показать, что связь вызовов сработала (иначе «почему TX вдвое
+/// меньше, чем строк TX в логе» — вопрос без ответа), и предупредить, если в
+/// сессии видны два слоя, но связи нет: такую сессию снял старый агент, и её
+/// сводка может быть удвоена.
+fn layers_text(meta: &SessionMeta) -> String {
+    if meta.counts.j2534_layers.is_empty()
+        && meta.counts.inner_events == 0
+        && !two_layers(meta)
+    {
+        return String::new();
+    }
+    let mut out = format!(
+        "  слои J2534: {}; внутренних записей {}, из них TX {} / RX {} ({} B) — в счётчиках не учтены\n",
+        layers_label(meta),
+        meta.counts.inner_events,
+        meta.counts.inner_tx,
+        meta.counts.inner_rx,
+        meta.counts.inner_bytes
+    );
+    if two_layers(meta) && meta.counts.inner_events == 0 {
+        out.push_str(
+            "  ВНИМАНИЕ: два слоя без связи вызовов (старый агент) — сводка может быть удвоена\n",
+        );
+    }
+    out
+}
+
 fn md_cell(text: &str) -> String {
     text.replace('|', "/").replace('\n', " ")
 }
@@ -590,6 +646,31 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
                 "Каналов без Connect".into(),
                 meta.counts.untracked_channels.to_string(),
             ));
+        }
+        // Два слоя J2534: одна строка, по которой видно, что обмен посчитан
+        // один раз, а внутренние записи остались в деталях (docs/13 §6.2).
+        if !meta.counts.j2534_layers.is_empty() || meta.counts.inner_events > 0 || two_layers(meta)
+        {
+            rows.push(("Слои J2534".into(), layers_label(meta)));
+            if meta.counts.inner_events > 0 {
+                rows.push((
+                    "Внутренних записей".into(),
+                    format!(
+                        "{} (TX {} / RX {}, {} B) — не в счётчиках",
+                        meta.counts.inner_events,
+                        meta.counts.inner_tx,
+                        meta.counts.inner_rx,
+                        meta.counts.inner_bytes
+                    ),
+                ));
+            } else if two_layers(meta) {
+                // Старая сессия: два модуля/слоя есть, связи нет — предупреждаем,
+                // а не молчим (docs/13 §6.2).
+                rows.push((
+                    "Двойной учёт".into(),
+                    "возможен: два слоя без связи вызовов (старый агент)".into(),
+                ));
+            }
         }
         rows
     };

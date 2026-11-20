@@ -268,6 +268,32 @@ pub struct SessionCounts {
     /// Сумма байт сетевого обмена (TX+RX): в отчёте одна строка, а не две.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub net_bytes: u64,
+    /// Внутренние записи второго слоя (прокси → настоящий драйвер).
+    ///
+    /// Один обмен штатно виден дважды: на входе в `j2534proxy.dll` и на входе в
+    /// драйвер под ним. Обе строки остаются в `raw.log`/`events.jsonl` для
+    /// разбора, но в `tx/rx/tx_bytes/rx_bytes` входит только внешняя — иначе
+    /// сводка удваивала трафик (docs/13 §6.2). Здесь — сколько записей отнесено
+    /// к внутреннему слою: по этим числам видно, что связь сработала.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner_events: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner_tx: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner_rx: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner_bytes: u64,
+    /// Слои J2534, замеченные в сессии: `proxy`, `driver`. Пусто — один слой
+    /// или старый агент без разметки (тогда возможен двойной учёт, см. отчёт).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub j2534_layers: Vec<String>,
+    /// Модули J2534, которые реально открывались (`dll=` из `J2534 open`).
+    ///
+    /// Нужны там, где разметки слоёв ещё нет (старые сессии): два разных модуля
+    /// в одном процессе — признак схемы «прокси → драйвер», и о возможном
+    /// двойном учёте таких сессий отчёт предупреждает отдельной строкой.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub j2534_modules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

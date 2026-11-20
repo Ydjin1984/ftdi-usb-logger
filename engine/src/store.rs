@@ -525,6 +525,44 @@ impl SessionWriter {
         // 922 из 1706 B RX были HTTP-ответом чужого сокета, и отчёт показывал
         // объём в 2.2 раза больше фактического обмена ЭБУ.
         let on_bus = !matches!(ev.transport, crate::models::Transport::Lan);
+        // Два слоя J2534 (приложение → прокси → драйвер) дают по две записи на
+        // один обмен. Внешняя — то, что видит приложение; внутренняя помечена
+        // агентом `parent=<call>` по вложенности (docs/13 §6.2). Считаем один
+        // раз, но обе строки остаются в raw.log/events.jsonl для разбора.
+        let inner = crate::decode::is_inner(ev);
+        if inner {
+            self.meta.counts.inner_events += 1;
+        }
+        if let Some(layer) = ev.meta.get("layer").and_then(|value| value.as_str()) {
+            if !layer.is_empty()
+                && !self
+                    .meta
+                    .counts
+                    .j2534_layers
+                    .iter()
+                    .any(|seen| seen == layer)
+            {
+                self.meta.counts.j2534_layers.push(layer.to_string());
+            }
+        }
+        // Модули J2534 по строкам `J2534 open dll="…"`: работают и для старых
+        // сессий, где разметки слоёв ещё нет (docs/13 §6.2).
+        if ev.transport == crate::models::Transport::J2534 {
+            if let Some(dll) = ev.meta.get("dll").and_then(|value| value.as_str()) {
+                // Только имена файлов: в `J2534 version dll="…"` лежит версия
+                // («1.0.0.120 (built …)»), и она не модуль (docs/13 §6.2).
+                if dll.to_ascii_lowercase().ends_with(".dll")
+                    && !self
+                        .meta
+                        .counts
+                        .j2534_modules
+                        .iter()
+                        .any(|seen| seen.eq_ignore_ascii_case(dll))
+                {
+                    self.meta.counts.j2534_modules.push(dll.to_string());
+                }
+            }
+        }
         match ev.kind {
             EventKind::Tx if !on_bus => {
                 self.meta.counts.net_tx += 1;
@@ -533,6 +571,14 @@ impl SessionWriter {
             EventKind::Rx if !on_bus => {
                 self.meta.counts.net_rx += 1;
                 self.meta.counts.net_bytes += payload_len;
+            }
+            EventKind::Tx if inner => {
+                self.meta.counts.inner_tx += 1;
+                self.meta.counts.inner_bytes += payload_len;
+            }
+            EventKind::Rx if inner => {
+                self.meta.counts.inner_rx += 1;
+                self.meta.counts.inner_bytes += payload_len;
             }
             EventKind::Tx => {
                 self.meta.counts.tx += 1;
@@ -557,6 +603,9 @@ impl SessionWriter {
                 // DLL, хуки свежие, все вызовы rc=0). Держим отдельным счётчиком.
                 if ev.api == "J2534 chan-miss" {
                     self.meta.counts.untracked_channels += 1;
+                } else if inner {
+                    // Внутренняя копия ошибки того же вызова: строка остаётся
+                    // в логе, но второй раз ошибку не считаем (docs/13 §6.2).
                 } else {
                     self.meta.counts.errors += 1;
                     // Счётчик без расшифровки бесполезен: «ошибок=1» в отчёте
@@ -957,5 +1006,53 @@ fn open_steps_count(events: &[Event]) -> u32 {
         }
     }
     started.union(&ended).count() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(line: &str) -> Event {
+        crate::decode::parse_capture_line(line).expect("строка должна разбираться")
+    }
+
+    #[test]
+    fn inner_layer_is_kept_but_counted_once() {
+        // Штатный сценарий «приложение → прокси → драйвер»: на каждую посылку
+        // две строки. Внешняя идёт в счётчики, внутренняя — только в
+        // `inner_*`, обе остаются в потоке (docs/13 §6.2).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::open(dir.path()).expect("store");
+        let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+            "id": "",
+            "started_at": "2026-11-20 15:00:00",
+            "label": "dual",
+            "transport": "j2534",
+        }))
+        .expect("meta");
+        let mut writer = store.create(meta).expect("session");
+
+        for line in [
+            "[+1.000000s] J2534 TX ch=1 call=1 proto=0x8003 svc=0x80 len=5 layer=proxy : 00 03 80 e1 01",
+            "[+1.000100s] J2534 TX ch=1 call=2 proto=0x8003 svc=0x80 len=5 layer=driver parent=1 : 00 03 80 e1 01",
+            "[+1.001000s] J2534 TX ch=1 call=3 proto=0x8003 svc=0x80 len=5 layer=proxy : 00 03 80 e1 02",
+            "[+1.001100s] J2534 TX ch=1 call=4 proto=0x8003 svc=0x80 len=5 layer=driver parent=3 : 00 03 80 e1 02",
+        ] {
+            let mut ev = event(line);
+            writer.append(&mut ev).expect("append");
+        }
+        let snapshot = writer.meta.clone();
+        writer.finish(&snapshot).expect("finish");
+
+        let meta = writer.meta.clone();
+        assert_eq!(meta.counts.tx, 2, "два обмена, а не четыре записи");
+        assert_eq!(meta.counts.tx_bytes, 10);
+        assert_eq!(meta.counts.inner_tx, 2);
+        assert_eq!(meta.counts.inner_events, 2);
+        assert_eq!(meta.counts.inner_bytes, 10);
+        assert_eq!(meta.counts.events, 4, "строки остаются в потоке");
+        assert_eq!(meta.counts.protocols.get("0x8003").copied(), Some(2));
+        assert_eq!(meta.counts.j2534_layers, vec!["proxy", "driver"]);
+    }
 }
 

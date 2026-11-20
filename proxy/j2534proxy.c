@@ -37,7 +37,7 @@ typedef unsigned char u8;
 
 /* Kept in sync with proxy\version.rc; the proxy reports it in the header
  * without pulling in version.dll (that would be a second dependency). */
-#define PROXY_VERSION "1.0.0.121"
+#define PROXY_VERSION "1.0.0.122"
 #define PROXY_API     "04.04"
 #define PROXY_MAX_DATA 4128
 
@@ -193,6 +193,25 @@ static void TrimA(char *s)
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') s[--len] = 0;
         else break;
     }
+}
+
+/* Раскрыть %VAR% в пути из ini.
+ *
+ * GetPrivateProfileStringA переменные окружения НЕ раскрывает. Движок пишет
+ * `LogDir=%LOCALAPPDATA%\FTDI_USB_Logger\j2534proxy`, и без этого шага прокси
+ * создавала каталог с буквальным именем `%LOCALAPPDATA%` относительно рабочего
+ * каталога приложения (у PCMflash это `C:\Users\User\Documents`), а движок искал
+ * журнал в настоящем LogDir и писал «журналов нет», хотя прокси работала
+ * (docs/13 §4). Поэтому любое значение пути из ini проходит через это. */
+static void ExpandPath(char *path, DWORD cap)
+{
+    char  tmp[MAX_PATH];
+    DWORD n;
+
+    if (!path || !path[0]) return;
+    if (!strchr(path, '%')) return;
+    n = ExpandEnvironmentStringsA(path, tmp, MAX_PATH);
+    if (n > 0 && n <= MAX_PATH) SetStr(path, cap, tmp);
 }
 
 /* "C:\a\b.dll" -> "C:\a" */
@@ -724,8 +743,12 @@ static void InitOnce(void)
     enabled = (int)GetPrivateProfileIntA("proxy", "Enabled", 1, g_ini);
     ReadIniStr("proxy", "RealLibrary", "", g_realPath, MAX_PATH);
     TrimA(g_realPath);
+    ExpandPath(g_realPath, MAX_PATH);
     ReadIniStr("proxy", "LogDir", "", g_logDir, MAX_PATH);
     TrimA(g_logDir);
+    /* %LOCALAPPDATA% и подобное: без раскрытия журнал уходил в каталог с
+     * буквальным именем `%LOCALAPPDATA%` относительно CWD приложения. */
+    ExpandPath(g_logDir, MAX_PATH);
     g_maxData = (ulong)GetPrivateProfileIntA("proxy", "MaxDataBytes", PROXY_MAX_DATA, g_ini);
     if (g_maxData == 0 || g_maxData > PROXY_MAX_DATA) g_maxData = PROXY_MAX_DATA;
 
@@ -737,7 +760,9 @@ static void InitOnce(void)
 
     /* ---- environment overrides (priority 1, docs/13 section 4) ----- */
     (void)EnvStr("FTDI_J2534_REAL_DLL", g_realPath, MAX_PATH);
+    ExpandPath(g_realPath, MAX_PATH);
     (void)EnvStr("FTDI_J2534_PROXY_LOG", g_logExact, MAX_PATH);
+    ExpandPath(g_logExact, MAX_PATH);
     off[0] = 0;
     if (EnvStr("FTDI_J2534_PROXY_OFF", off, sizeof(off)) &&
         off[0] && lstrcmpiA(off, "0") != 0) {
@@ -749,6 +774,7 @@ static void InitOnce(void)
         char txt[MAX_PATH];
         JoinPath(txt, MAX_PATH, dir, "real_dll.txt");
         ReadFirstLine(txt, g_realPath, MAX_PATH);
+        ExpandPath(g_realPath, MAX_PATH);
     }
 
     g_enabled = enabled ? 1 : 0;
