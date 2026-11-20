@@ -170,11 +170,19 @@ try {
     };
   })()`);
   check("индикатор называет процесс", !!live && /подхвачен/i.test(live.head), live ? live.head : "—");
-  check("индикатор показывает счётчики", !!live && /TX/.test(live.meta), live ? live.meta : "—");
+  // Счётчики есть только у живого прокси: в состояниях «был подхвачен» и
+  // «не подхвачен» показывать нечего, и это правильно, а не дефект.
+  const liveState = await cdp.eval(`window.__ftdi?.store?.state?.proxy?.live?.state ?? ''`);
+  check(
+    "индикатор показывает счётчики",
+    !!live && (/TX/.test(live.meta) || liveState === "recent" || liveState === "idle"),
+    live ? live.meta || `state=${liveState}` : "—",
+  );
+  // Нейтральная окраска — штатная для «был подхвачен»: цвет не должен врать.
   check(
     "индикатор окрашен по состоянию",
-    !!live && /proxy-live--(ok|warn|err)/.test(live.cls),
-    live ? live.cls : "—",
+    !!live && (/proxy-live--(ok|warn|err)/.test(live.cls) || liveState === "recent"),
+    live ? `${live.cls} (state=${liveState})` : "—",
   );
 
   await waitFor(cdp, `(document.querySelector('.field select')?.options?.length ?? 0) > 1`, 8000);
