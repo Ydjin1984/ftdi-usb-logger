@@ -237,6 +237,20 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
         ));
     }
     out.push_str(&layers_text(meta));
+    // Вендорские вызовы: без них не видно, что конфигурация GPT вообще снята.
+    if meta.counts.vendor_calls > 0 {
+        out.push_str(&format!(
+            "  вендорские J2534: {} ({})\n",
+            meta.counts.vendor_calls,
+            vendor_ops_label(meta)
+        ));
+        if !meta.counts.vendor_gpt.is_empty() {
+            out.push_str(&format!(
+                "  GPT (1377 op=0x0b): {}\n",
+                meta.counts.vendor_gpt
+            ));
+        }
+    }
     if let Some(tool) = &meta.tool_path {
         out.push_str(&format!("  инструмент: {tool}"));
         if let Some(pid) = meta.pid {
@@ -469,6 +483,16 @@ fn protocol_summary(meta: &SessionMeta) -> Option<String> {
     Some(format!("{} · {} из {}", protocol_label(proto), n, total))
 }
 
+/// Вендорские вызовы по op: `0xb×11, 0x0×2`.
+fn vendor_ops_label(meta: &SessionMeta) -> String {
+    meta.counts
+        .vendor_ops
+        .iter()
+        .map(|(op, n)| format!("{op}×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Слои J2534 человеческим языком: `прокси + драйвер`.
 fn layers_label(meta: &SessionMeta) -> String {
     if meta.counts.j2534_layers.is_empty() {
@@ -670,6 +694,20 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
                     "Двойной учёт".into(),
                     "возможен: два слоя без связи вызовов (старый агент)".into(),
                 ));
+            }
+        }
+        // Вендорские вызовы: одна строка + разобранная конфигурация GPT.
+        if meta.counts.vendor_calls > 0 {
+            rows.push((
+                "Вендорские вызовы".into(),
+                format!(
+                    "{} ({})",
+                    meta.counts.vendor_calls,
+                    vendor_ops_label(meta)
+                ),
+            ));
+            if !meta.counts.vendor_gpt.is_empty() {
+                rows.push(("GPT (1377 op=0x0b)".into(), meta.counts.vendor_gpt.clone()));
             }
         }
         rows

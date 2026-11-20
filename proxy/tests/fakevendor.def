@@ -1,0 +1,11 @@
+LIBRARY fakevendor
+EXPORTS
+    PassThruOpen @1
+    PassThruClose @2
+    PassThruConnect @3
+    PassThruDisconnect @4
+    PassThruSetProgrammingVoltage @13
+    PassThruIoctl @14
+    V1377 @1377 NONAME
+    V1378 @1378 NONAME
+    V1379 @1379 NONAME

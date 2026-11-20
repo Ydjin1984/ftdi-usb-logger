@@ -294,6 +294,15 @@ pub struct SessionCounts {
     /// двойном учёте таких сессий отчёт предупреждает отдельной строкой.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub j2534_modules: Vec<String>,
+    /// Вендорские вызовы J2534 (ординалы 1377-1379): сколько и каких `op`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vendor_calls: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vendor_ops: BTreeMap<String, u64>,
+    /// Разобранные пары конфигурации GPT из `1377 op=0x0b`:
+    /// `11:0x1aa8c780=5000,…` — доказательство для отчёта (docs/13 §6.3).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vendor_gpt: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -626,7 +626,23 @@ impl SessionWriter {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // Вендорские ординалы 1377-1379: в счётчиках обмена их нет, но
+                // отчёт обязан показать, что конфигурация GPT была снята
+                // (docs/13 §6.3).
+                if ev.api == "J2534 vendor" {
+                    self.meta.counts.vendor_calls += 1;
+                    if let Some(op) = ev.meta.get("op").and_then(|v| v.as_str()) {
+                        *self.meta.counts.vendor_ops.entry(op.to_string()).or_insert(0) += 1;
+                    }
+                    let count = ev.meta.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if count >= 8 && self.meta.counts.vendor_gpt.is_empty() {
+                        if let Some(params) = ev.meta.get("params").and_then(|v| v.as_str()) {
+                            self.meta.counts.vendor_gpt = params.to_string();
+                        }
+                    }
+                }
+            }
         }
         // Холостые опросы (`J2534 rx-empty`) — не ошибки: это штатные таймауты,
         // которые иначе попадали в `errors` и портили картину (docs/12 §10).
@@ -1053,6 +1069,44 @@ mod tests {
         assert_eq!(meta.counts.events, 4, "строки остаются в потоке");
         assert_eq!(meta.counts.protocols.get("0x8003").copied(), Some(2));
         assert_eq!(meta.counts.j2534_layers, vec!["proxy", "driver"]);
+    }
+
+    #[test]
+    fn vendor_call_is_counted_and_gpt_params_are_kept() {
+        // Разбор 1377 живёт в отчёте: без него не видно, что конфигурация GPT
+        // вообще снималась (docs/13 §6.3, приёмка BitBox).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::open(dir.path()).expect("store");
+        let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+            "id": "",
+            "started_at": "2026-11-20 16:00:00",
+            "label": "vendor",
+            "transport": "j2534",
+        }))
+        .expect("meta");
+        let mut writer = store.create(meta).expect("session");
+
+        for line in [
+            "[+1.000000s] J2534 vendor ord=1377 op=0xb arg=0x1 a2=0x0 a3=0x0 \
+             ret=pcmflash.exe+0x837fd rc=0 th=1 dur=1 mem=0011 pre=22 \
+             params=11:0x1aa8c780=5000,0x1aa8c724=64000",
+            "[+1.100000s] J2534 vendor ord=1377 op=0x0 arg=0x1 a2=0x0 a3=0x0 \
+             ret=pcmflash.exe+0x837fd rc=0 th=1 dur=1 params=1:0x1aa8c781=4096",
+        ] {
+            let mut ev = event(line);
+            writer.append(&mut ev).expect("append");
+        }
+        let snapshot = writer.meta.clone();
+        writer.finish(&snapshot).expect("finish");
+        let meta = writer.meta.clone();
+
+        assert_eq!(meta.counts.vendor_calls, 2);
+        assert_eq!(meta.counts.vendor_ops.get("0xb").copied(), Some(1));
+        assert_eq!(meta.counts.vendor_ops.get("0x0").copied(), Some(1));
+        assert_eq!(
+            meta.counts.vendor_gpt,
+            "11:0x1aa8c780=5000,0x1aa8c724=64000"
+        );
     }
 }
 

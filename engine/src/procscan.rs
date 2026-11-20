@@ -1391,19 +1391,25 @@ mod tests {
                 && tool.known_tool.is_none()
                 && tool.window_title.is_none();
             if only_usb {
+                let session = sessions.get(&tool.pid).copied().flatten();
                 assert_ne!(
-                    sessions.get(&tool.pid).copied().flatten(),
+                    session,
                     Some(0),
                     "в Auto попала служба сессии 0: {} (pid {})",
                     tool.name,
                     tool.pid
                 );
-                assert!(
-                    !is_program_files_path(&tool.exe),
-                    "в Auto попала служба из Program Files: {} ({})",
-                    tool.name,
-                    tool.exe
-                );
+                // Program Files ловит службы, но там же живут обычные GUI-приложения
+                // (например davinci.exe). Если процесс в интерактивной сессии, это
+                // пользовательская программа, а не служба: жаловаться не на что.
+                if session.is_none() {
+                    assert!(
+                        !is_program_files_path(&tool.exe),
+                        "в Auto попала служба из Program Files: {} ({})",
+                        tool.name,
+                        tool.exe
+                    );
+                }
             }
         }
     }

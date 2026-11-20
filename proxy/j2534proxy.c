@@ -27,9 +27,12 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <intrin.h>   /* _ReturnAddress(): кто вызвал вендорский ординал */
 
 typedef unsigned long ulong;   /* J2534 04.04: 4 bytes on x86 and on x64 (LLP64) */
 typedef unsigned char u8;
+typedef unsigned int  u32;   /* 32-bit on x86 and x64: J2534 structures are LP64-agnostic */
 
 /* ------------------------------------------------------------------ */
 /* versions                                                            */
@@ -37,7 +40,7 @@ typedef unsigned char u8;
 
 /* Kept in sync with proxy\version.rc; the proxy reports it in the header
  * without pulling in version.dll (that would be a second dependency). */
-#define PROXY_VERSION "1.0.0.122"
+#define PROXY_VERSION "1.0.0.123"
 #define PROXY_API     "04.04"
 #define PROXY_MAX_DATA 4128
 
@@ -214,9 +217,176 @@ static void ExpandPath(char *path, DWORD cap)
     if (n > 0 && n <= MAX_PATH) SetStr(path, cap, tmp);
 }
 
-/* "C:\a\b.dll" -> "C:\a" */
-static void DirOf(const char *path, char *dst, DWORD cap)
+/* ------------------------------------------------------------------ */
+/* [log]: пределы дампов и разбор вендорских аргументов                */
+/*                                                                     */
+/* Живой разбор 1377 (BitBox, 20.11.2026): op=0x0B настраивает GPT,     */
+/* op=0x00 — общий вызов; параметры лежат в блоке по *(arg+8) как      */
+/* [count][ptr][tag,value]…, пара — два u32 ПО ЗНАЧЕНИЮ. Теги           */
+/* 0x1AA8C7xx — непрозрачные константы, не указатели: разыменование    */
+/* даёт ERROR_PARTIAL_COPY (299) даже в момент вызова.                 */
+/* ------------------------------------------------------------------ */
+
+static int  g_logArgs = 1;
+static int  g_vendorArgBytes = 512;
+static int  g_vendorBeforeBytes = 32;
+static int  g_vendorParamPairs = 1;
+static int  g_maxParamPairs = 16;
+static int  g_maxDumpPerCall = 4096;
+/* Белый список op для полного дампа: остальные — одной короткой строкой,
+ * иначе сессия чтения (33 187 вызовов) распухает с 12 МБ до сотен. */
+static int  g_vendorFullOp[8] = { 0x0b, 0x00 };
+static int  g_vendorFullOpN = 2;
+/* Какие ординалы вообще разбирать: остальные — короткой строкой. */
+static int  g_vendorOrds[8] = { 1377, 1378, 1379 };
+static int  g_vendorOrdN = 3;
+
+static int ClampInt(int value, int lo, int hi)
 {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+/* "0x0b,0x00" / "1377,1378" -> массив чисел. Пустая строка — не ошибка:
+ * тогда остаётся значение по умолчанию. */
+static void ParseNumList(const char *text, int *dst, int cap, int *count)
+{
+    const char *p = text;
+    int n = 0;
+
+    if (!text || !dst || !count) return;
+    while (*p && n < cap) {
+        char *end = NULL;
+        unsigned long v;
+        while (*p == ' ' || *p == '\t' || *p == ',') ++p;
+        if (!*p) break;
+        v = strtoul(p, &end, 0);
+        if (end == p) break;
+        dst[n++] = (int)v;
+        p = end;
+    }
+    if (n > 0) *count = n;
+}
+
+static int AppendFmt(char *dst, int cap, int used, const char *fmt, ...)
+{
+    va_list ap;
+    int     n;
+
+    if (used < 0) used = 0;
+    if (used >= cap - 1) return cap - 1;
+    va_start(ap, fmt);
+    n = _vsnprintf(dst + used, (size_t)(cap - used), fmt, ap);
+    va_end(ap);
+    if (n < 0) return cap - 1;
+    used += n;
+    if (used >= cap) used = cap - 1;
+    dst[used] = 0;
+    return used;
+}
+
+/* Чтение чужой/своей памяти — только после VirtualQuery: MEM_COMMIT, без
+ * PAGE_NOACCESS и PAGE_GUARD, весь диапазон внутри одного региона. Ошибка
+ * чтения не роняет процесс: вызывающий пишет <unreadable> (docs/13 §6.3). */
+static int SafeRead(const void *p, void *dst, SIZE_T n)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    uintptr_t start, end, region_end;
+
+    if (!p || !dst || n == 0) return 0;
+    start = (uintptr_t)p;
+    end = start + n;
+    if (end < start) return 0;
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    region_end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    if (end > region_end) return 0;
+    return ReadProcessMemory(GetCurrentProcess(), p, dst, n, NULL) != 0;
+}
+
+/* hexdump в строку: `00112233` — без пробелов, чтобы не рвать длинную строку
+ * и не тратить её длину (движок разбирает как одно значение). */
+static void DumpHex(char *dst, int cap, const void *p, int n)
+{
+    static const char hx[] = "0123456789abcdef";
+    u8  buf[8192];
+    int i, k = 0;
+
+    if (!dst || cap <= 1) return;
+    dst[0] = 0;
+    if (n <= 0) return;
+    if (n > (int)sizeof(buf)) n = (int)sizeof(buf);
+    if (!SafeRead(p, buf, (SIZE_T)n)) {
+        SetStr(dst, (DWORD)cap, "<unreadable>");
+        return;
+    }
+    for (i = 0; i < n && k + 3 < cap; ++i) {
+        dst[k++] = hx[(buf[i] >> 4) & 0xF];
+        dst[k++] = hx[buf[i] & 0xF];
+    }
+    dst[k] = 0;
+}
+
+/* Кто вызвал: `pcmflash.exe+0x837fd`. Без этого 11 пар конфигурации GPT и одна
+ * пара питания неотличимы — обе идут через op=0x0b (docs/13 §6.3). */
+static void NameOf(const char *path, char *dst, DWORD cap);
+
+static void AddrToModule(const void *addr, char *dst, DWORD cap)
+{
+    HMODULE mod = NULL;
+    char    path[MAX_PATH];
+    char    base[MAX_PATH];
+
+    if (!dst || cap == 0) return;
+    dst[0] = 0;
+    if (!addr) { SetStr(dst, cap, "0"); return; }
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)addr, &mod) || !mod) {
+        _snprintf(dst, cap, "0x%p", addr);
+        dst[cap - 1] = 0;
+        return;
+    }
+    GetModuleFileNameA(mod, path, MAX_PATH);
+    NameOf(path, base, MAX_PATH);
+    _snprintf(dst, cap, "%s+0x%lx", base,
+              (unsigned long)((uintptr_t)addr - (uintptr_t)mod));
+    dst[cap - 1] = 0;
+}
+
+/* Имя параметра SET_CONFIG (J2534 04.04) — чтобы `cfg=` читался глазами. */
+static const char *CfgName(ulong id)
+{
+    switch (id) {
+    case 0x01: return "DATA_RATE";
+    case 0x02: return "LOOPBACK";
+    case 0x03: return "NODE_ADDRESS";
+    case 0x04: return "NETWORK_LINE";
+    case 0x05: return "P1_MIN";
+    case 0x06: return "P1_MAX";
+    case 0x07: return "P2_MIN";
+    case 0x08: return "P2_MAX";
+    case 0x09: return "P3_MIN";
+    case 0x0A: return "P3_MAX";
+    case 0x0B: return "P4_MIN";
+    case 0x0C: return "P4_MAX";
+    case 0x0D: return "W1";
+    case 0x0E: return "W2";
+    case 0x0F: return "W3";
+    case 0x10: return "W4";
+    case 0x11: return "W5";
+    case 0x14: return "ISO15765_BS";
+    case 0x15: return "ISO15765_STMIN";
+    case 0x1A: return "BS_TX";
+    case 0x1B: return "STMIN_TX";
+    default:   return NULL;
+    }
+}
+
+/* "C:\a\b.dll" -> "C:\a" */
+static void DirOf(const char *path, char *dst, DWORD cap){
     size_t i, len;
 
     SetStr(dst, cap, path);
@@ -758,6 +928,21 @@ static void InitOnce(void)
     ReadIniStr("device", "Vendor", "DaVinci Cyber Engineering", g_devVendor, MAX_PATH);
     TrimA(g_devVendor);
 
+    /* ---- [log]: пределы дампов вендорских вызовов (docs/13 §6.3) ---- */
+    g_logArgs = (int)GetPrivateProfileIntA("log", "LogArgs", 1, g_ini) ? 1 : 0;
+    g_vendorArgBytes = ClampInt((int)GetPrivateProfileIntA("log", "VendorArgBytes", 512, g_ini), 0, 4096);
+    g_vendorBeforeBytes = ClampInt((int)GetPrivateProfileIntA("log", "VendorBeforeBytes", 32, g_ini), 0, 256);
+    g_vendorParamPairs = (int)GetPrivateProfileIntA("log", "VendorParamPairs", 1, g_ini) ? 1 : 0;
+    g_maxParamPairs = ClampInt((int)GetPrivateProfileIntA("log", "MaxParamPairs", 16, g_ini), 1, 64);
+    g_maxDumpPerCall = ClampInt((int)GetPrivateProfileIntA("log", "MaxDumpPerCall", 4096, g_ini), 64, 8192);
+    {
+        char list[128];
+        ReadIniStr("log", "VendorFullOps", "0x0b,0x00", list, sizeof(list));
+        ParseNumList(list, g_vendorFullOp, 8, &g_vendorFullOpN);
+        ReadIniStr("log", "VendorOrds", "1377,1378,1379", list, sizeof(list));
+        ParseNumList(list, g_vendorOrds, 8, &g_vendorOrdN);
+    }
+
     /* ---- environment overrides (priority 1, docs/13 section 4) ----- */
     (void)EnvStr("FTDI_J2534_REAL_DLL", g_realPath, MAX_PATH);
     ExpandPath(g_realPath, MAX_PATH);
@@ -1034,9 +1219,9 @@ ulong __stdcall PassThruConnect(ulong DeviceID, ulong ProtocolID, ulong Flags,
 
     dur = UsSince(t0);
     if (pChannelID) ch = *pChannelID;
-    LogLine("J2534 connect dev=%lu ch=%lu proto=0x%02lx flags=0x%lx baud=%lu "
+    LogLine("J2534 connect dev=%lu ch=%lu proto=0x%02lx protocol=0x%02lx flags=0x%lx baud=%lu "
             "rc=%s gen=%ld th=%lu dur=%llu",
-            DeviceID, ch, ProtocolID, Flags, BaudRate, RcStr(rc),
+            DeviceID, ch, ProtocolID, ProtocolID, Flags, BaudRate, RcStr(rc),
             (long)g_gen, (ulong)th, dur);
     LeaveCriticalSection(&g_cs);
     return rc;
@@ -1302,7 +1487,22 @@ ulong __stdcall PassThruSetProgrammingVoltage(ulong DeviceID, ulong PinNumber,
     }
 
     dur = UsSince(t0);
-    LogCall(seq, "PassThruSetProgrammingVoltage", 0, 0, rc, th, dur, NULL);
+    {
+        /* pin/voltage — единственное доказательство, что питание подаётся
+         * ПОСЛЕ настройки GPT, а не до (docs/13 §6.3). */
+        char extra[96];
+        if (Voltage == 0) {
+            _snprintf(extra, sizeof(extra), " pin=%lu voltage=0(OFF)", PinNumber);
+        } else if (Voltage == 0xFFFFFFFEUL || Voltage == 0xFFFFFFFFUL) {
+            _snprintf(extra, sizeof(extra), " pin=%lu voltage=0x%08lx(keep)",
+                      PinNumber, Voltage);
+        } else {
+            _snprintf(extra, sizeof(extra), " pin=%lu voltage=%lu(0x%08lx)",
+                      PinNumber, Voltage, Voltage);
+        }
+        extra[sizeof(extra) - 1] = 0;
+        LogCall(seq, "PassThruSetProgrammingVoltage", 0, 0, rc, th, dur, extra);
+    }
     LeaveCriticalSection(&g_cs);
     return rc;
 }
@@ -1332,7 +1532,27 @@ ulong __stdcall PassThruReadVersion(ulong DeviceID, char *pFirmwareVersion,
     }
 
     dur = UsSince(t0);
-    LogCall(seq, "PassThruReadVersion", 0, 0, rc, th, dur, NULL);
+    {
+        /* Строки версий — то, по чему видно, что прокси форвардит в тот же
+         * драйвер, что и раньше (docs/13 §6.3). */
+        char fw[96], dll[128], api[64], extra[360];
+        fw[0] = dll[0] = api[0] = 0;
+        if (pFirmwareVersion) {
+            if (SafeRead(pFirmwareVersion, fw, sizeof(fw) - 1)) fw[sizeof(fw) - 1] = 0;
+            else fw[0] = 0;
+        }
+        if (pDllVersion) {
+            if (SafeRead(pDllVersion, dll, sizeof(dll) - 1)) dll[sizeof(dll) - 1] = 0;
+            else dll[0] = 0;
+        }
+        if (pApiVersion) {
+            if (SafeRead(pApiVersion, api, sizeof(api) - 1)) api[sizeof(api) - 1] = 0;
+            else api[0] = 0;
+        }
+        _snprintf(extra, sizeof(extra), " fw=\"%s\" dll=\"%s\" api=\"%s\"", fw, dll, api);
+        extra[sizeof(extra) - 1] = 0;
+        LogCall(seq, "PassThruReadVersion", 0, 0, rc, th, dur, extra);
+    }
     LeaveCriticalSection(&g_cs);
     return rc;
 }
@@ -1373,13 +1593,59 @@ ulong __stdcall PassThruIoctl(ulong ChannelID, ulong IoctlID, void *pInput,
     DWORD       th;
     LONGLONG    t0;
     ULONGLONG   dur;
-    char        extra[96];
+    char        extra[8192];
+    int         used = 0;
 
     EnsureInit();
     EnterCriticalSection(&g_cs);
     seq = InterlockedIncrement(&g_calls);
     th  = GetCurrentThreadId();
     t0  = QpcNow();
+
+    used = AppendFmt(extra, sizeof(extra), 0, " ioctl=0x%02lx(%s)",
+                     IoctlID, IoctlName(IoctlID));
+
+    /* Входной буфер — ДО вызова: FAST_INIT перезаписывает его ответом. */
+    if (g_logArgs && pInput) {
+        if (IoctlID == 0x02) {
+            u32 num = 0, ptr = 0;
+            if (SafeRead(pInput, &num, sizeof(num)) &&
+                SafeRead((const u8 *)pInput + 4, &ptr, sizeof(ptr))) {
+                u32 i;
+                if (num > 32) num = 32;
+                used = AppendFmt(extra, sizeof(extra), used, " num=%lu",
+                                 (unsigned long)num);
+                for (i = 0; i < num; ++i) {
+                    u32 pair[2];
+                    const char *nm;
+                    if (!ptr ||
+                        !SafeRead((const u8 *)(uintptr_t)ptr + (size_t)i * 8,
+                                  pair, sizeof(pair))) {
+                        break;
+                    }
+                    nm = CfgName(pair[0]);
+                    used = AppendFmt(extra, sizeof(extra), used, " %s=0x%lx",
+                                     nm ? nm : "param", (unsigned long)pair[1]);
+                }
+            }
+        } else if (IoctlID == 0x05) {
+            PASSTHRU_MSG hdr;
+            if (SafeRead(pInput, &hdr, 24)) {
+                char data[700];
+                int  n = (int)hdr.DataSize;
+                if (n > (int)sizeof(data) / 2 - 1) n = (int)sizeof(data) / 2 - 1;
+                DumpHex(data, sizeof(data), (const u8 *)pInput + 24, n);
+                used = AppendFmt(extra, sizeof(extra), used,
+                                 " proto=0x%lx in_len=%lu in=%s",
+                                 (unsigned long)hdr.ProtocolID,
+                                 (unsigned long)hdr.DataSize, data);
+            }
+        } else {
+            char buf[160];
+            DumpHex(buf, sizeof(buf), pInput, 64);
+            used = AppendFmt(extra, sizeof(extra), used, " in=%s", buf);
+        }
+    }
 
     if (g_fatal || !pIoctl) {
         rc = ERR_DEVICE_NOT_CONNECTED;
@@ -1390,8 +1656,33 @@ ulong __stdcall PassThruIoctl(ulong ChannelID, ulong IoctlID, void *pInput,
     }
 
     dur = UsSince(t0);
-    _snprintf(extra, sizeof(extra), " ioctl=0x%02lx(%s)", IoctlID, IoctlName(IoctlID));
-    extra[sizeof(extra) - 1] = 0;
+
+    /* Выходной буфер — ПОСЛЕ вызова: ради него дамп и делается. */
+    if (g_logArgs) {
+        if (IoctlID == 0x03 && pOutput) {
+            u32 v = 0;
+            if (SafeRead(pOutput, &v, sizeof(v))) {
+                used = AppendFmt(extra, sizeof(extra), used, " vbat=%lu",
+                                 (unsigned long)v);
+            }
+        } else if (IoctlID == 0x05 && pInput) {
+            PASSTHRU_MSG hdr;
+            if (SafeRead(pInput, &hdr, 24)) {
+                char data[700];
+                int  n = (int)hdr.DataSize;
+                if (n > (int)sizeof(data) / 2 - 1) n = (int)sizeof(data) / 2 - 1;
+                DumpHex(data, sizeof(data), (const u8 *)pInput + 24, n);
+                used = AppendFmt(extra, sizeof(extra), used, " ret_len=%lu out=%s",
+                                 (unsigned long)hdr.DataSize, data);
+            }
+        } else if (pOutput) {
+            char buf[160];
+            DumpHex(buf, sizeof(buf), pOutput, 64);
+            used = AppendFmt(extra, sizeof(extra), used, " out=%s", buf);
+        }
+    }
+    (void)used;
+
     LogCall(seq, "PassThruIoctl", 1, ChannelID, rc, th, dur, extra);
     LeaveCriticalSection(&g_cs);
     return rc;
@@ -1410,6 +1701,120 @@ ulong __stdcall PassThruIoctl(ulong ChannelID, ulong IoctlID, void *pInput,
 /* so the vendor line reports rc=0 as the contract shape requires.      */
 /* ------------------------------------------------------------------ */
 
+/* Разобрать блок параметров вендорского вызова: `*(arg+8)` -> [count][ptr][tag,value]…
+ *
+ * Пара — два u32 ПО ЗНАЧЕНИЮ; теги 0x1AA8C7xx непрозрачны, их нельзя
+ * разыменовывать (ReadProcessMemory даёт ERROR_PARTIAL_COPY 299 даже в момент
+ * вызова). Поэтому читаем только блок и массив пар, всё остальное — как числа.
+ */
+static void VendorParamsText(const void *arg, char *dst, int cap)
+{
+    u32       block = 0, count = 0, ptr = 0;
+    u32       pair[2];
+    const u8 *pairs = NULL;
+    int       i, used;
+
+    if (!dst || cap <= 1) return;
+    dst[0] = 0;
+    if (!g_vendorParamPairs || !arg) return;
+    if (!SafeRead((const u8 *)arg + 8, &block, sizeof(block)) || !block) {
+        SetStr(dst, (DWORD)cap, "n/a");
+        return;
+    }
+    if (!SafeRead((const void *)(uintptr_t)block, &count, sizeof(count))) {
+        SetStr(dst, (DWORD)cap, "<unreadable>");
+        return;
+    }
+    if (count > (u32)g_maxParamPairs) count = (u32)g_maxParamPairs;
+    /* Пара может лежать по указателю из блока или сразу за ним: пробуем оба
+     * варианта, чтобы не гадать по одной раскладке. */
+    if (SafeRead((const u8 *)(uintptr_t)block + 4, &ptr, sizeof(ptr)) && ptr &&
+        SafeRead((const void *)(uintptr_t)ptr, pair, sizeof(pair))) {
+        pairs = (const u8 *)(uintptr_t)ptr;
+    } else if (SafeRead((const u8 *)(uintptr_t)block + 8, pair, sizeof(pair))) {
+        pairs = (const u8 *)(uintptr_t)block + 8;
+    }
+    used = AppendFmt(dst, cap, 0, "%lu:", (unsigned long)count);
+    for (i = 0; i < (int)count; ++i) {
+        if (!pairs || !SafeRead(pairs + (size_t)i * 8, pair, sizeof(pair))) break;
+        used = AppendFmt(dst, cap, used, "%s0x%08lx=%lu",
+                         i ? "," : "",
+                         (unsigned long)pair[0], (unsigned long)pair[1]);
+    }
+}
+
+static int VendorFullOp(ulong op)
+{
+    int i;
+    for (i = 0; i < g_vendorFullOpN; ++i) {
+        if ((ulong)g_vendorFullOp[i] == op) return 1;
+    }
+    return 0;
+}
+
+static int VendorOrdWanted(int ord)
+{
+    int i;
+    for (i = 0; i < g_vendorOrdN; ++i) {
+        if (g_vendorOrds[i] == ord) return 1;
+    }
+    return 0;
+}
+
+/* Одна строка на вендорский вызов (docs/13 §6.3): ord, op, arg, a2/a3, ret
+ * (модуль+RVA вызывающего), rc, и для op из белого списка — mem/pre/params. */
+static void LogVendor(int ord, ulong op, const void *arg, ulong a2, ulong a3,
+                      const void *ret, ulong rc, DWORD th, ULONGLONG dur)
+{
+    char line[16384];
+    char argtxt[32], rettxt[96], mem[2300], pre[220], params[1024];
+    char a2mem[160], a3mem[160];
+    int  full, used;
+
+    full = g_logArgs && VendorOrdWanted(ord) && VendorFullOp(op);
+    mem[0] = pre[0] = params[0] = a2mem[0] = a3mem[0] = 0;
+    _snprintf(argtxt, sizeof(argtxt), "0x%p", arg);
+    argtxt[sizeof(argtxt) - 1] = 0;
+    AddrToModule(ret, rettxt, sizeof(rettxt));
+
+    if (full) {
+        int n = g_vendorArgBytes;
+        int before = g_vendorBeforeBytes;
+        if (n + before > g_maxDumpPerCall) {
+            n = g_maxDumpPerCall;
+            before = 0;
+        }
+        DumpHex(mem, sizeof(mem), arg, n);
+        if (before > 0 && arg) {
+            DumpHex(pre, sizeof(pre), (const u8 *)arg - before, before);
+        }
+        VendorParamsText(arg, params, sizeof(params));
+        if (a2 && (const void *)(uintptr_t)a2 != arg) {
+            DumpHex(a2mem, sizeof(a2mem), (const void *)(uintptr_t)a2, 64);
+            if (!strcmp(a2mem, "<unreadable>")) a2mem[0] = 0;
+        }
+        if (a3 && (const void *)(uintptr_t)a3 != arg) {
+            DumpHex(a3mem, sizeof(a3mem), (const void *)(uintptr_t)a3, 64);
+            if (!strcmp(a3mem, "<unreadable>")) a3mem[0] = 0;
+        }
+    }
+
+    used = AppendFmt(line, sizeof(line), 0,
+                     "J2534 vendor ord=%d op=0x%lx arg=%s a2=0x%lx a3=0x%lx "
+                     "ret=%s rc=%s th=%lu dur=%llu",
+                     ord, op, argtxt, (unsigned long)a2, (unsigned long)a3,
+                     rettxt, RcStr(rc), (ulong)th, dur);
+    if (full) {
+        used = AppendFmt(line, sizeof(line), used, " mem=%s pre=%s params=%s",
+                         mem[0] ? mem : "-", pre[0] ? pre : "-",
+                         params[0] ? params : "n/a");
+        if (a2mem[0]) used = AppendFmt(line, sizeof(line), used, " a2mem=%s", a2mem);
+        if (a3mem[0]) used = AppendFmt(line, sizeof(line), used, " a3mem=%s", a3mem);
+    }
+    (void)used;
+    LogLine("%s", line);
+}
+
 #ifdef _M_IX86
 
 static void *g_vendor[3];
@@ -1417,8 +1822,9 @@ static void *g_vendor[3];
 /* a[-1] = return address, a[0] = first argument, a[1] = second argument */
 static void LogVendorCall(int idx, const ulong *a)
 {
-    ulong     op = a ? a[0] : 0;
-    LONGLONG  t0;
+    ulong      op = a ? a[0] : 0;
+    ulong      arg = a ? a[1] : 0;
+    LONGLONG   t0;
 
     EnsureInit();
     t0 = QpcNow();
@@ -1430,8 +1836,8 @@ static void LogVendorCall(int idx, const ulong *a)
     }
 
     EnterCriticalSection(&g_cs);
-    LogLine("J2534 vendor ord=%d op=0x%lx rc=0 th=%lu dur=%llu",
-            idx, op, (ulong)GetCurrentThreadId(), UsSince(t0));
+    LogVendor(idx, op, (const void *)(uintptr_t)arg, 0, 0,
+              (const void *)a[-1], 0, GetCurrentThreadId(), UsSince(t0));
     LeaveCriticalSection(&g_cs);
 }
 
@@ -1496,18 +1902,23 @@ fail3:
 
 #else /* x64: same ordinals, stubs only -- docs/13 section 7 */
 
-static ulong VendorStub(int idx, DWORD th)
+/* На x64 трамплина к настоящему драйверу нет: ординалы только логируются,
+ * вызов возвращает ERR_FAILED (как и раньше). Но аргументы читаются из
+ * регистров по тому же __stdcall-соглашению, поэтому дамп и разбор параметров
+ * работают одинаково на обеих разрядностях. */
+static ulong VendorStub(int idx, ulong a0, ulong a1, ulong a2, ulong a3)
 {
     EnsureInit();
     EnterCriticalSection(&g_cs);
-    LogLine("J2534 vendor ord=%d rc=%lu th=%lu dur=0", idx, ERR_FAILED, (ulong)th);
+    LogVendor(idx, a0, (const void *)(uintptr_t)a1, a2, a3,
+              _ReturnAddress(), ERR_FAILED, GetCurrentThreadId(), 0);
     LeaveCriticalSection(&g_cs);
     return ERR_FAILED;
 }
 
-ulong Vnd1377(void) { return VendorStub(1377, GetCurrentThreadId()); }
-ulong Vnd1378(void) { return VendorStub(1378, GetCurrentThreadId()); }
-ulong Vnd1379(void) { return VendorStub(1379, GetCurrentThreadId()); }
+ulong Vnd1377(ulong a0, ulong a1, ulong a2, ulong a3) { return VendorStub(1377, a0, a1, a2, a3); }
+ulong Vnd1378(ulong a0, ulong a1, ulong a2, ulong a3) { return VendorStub(1378, a0, a1, a2, a3); }
+ulong Vnd1379(ulong a0, ulong a1, ulong a2, ulong a3) { return VendorStub(1379, a0, a1, a2, a3); }
 
 #endif /* _M_IX86 */
 

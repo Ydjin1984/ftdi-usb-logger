@@ -950,6 +950,29 @@ fn tag_quoted(text: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Значение «до пробела» — для полей, внутри которых есть запятые и `=`
+/// (`params=11:0x1aa8c780=5000,…`): `tag_quoted` такие рвёт по запятой.
+fn tag_word(text: &str, key: &str) -> Option<String> {
+    let pat = format!("{key}=");
+    let mut search = 0usize;
+    while let Some(p) = text[search..].find(&pat) {
+        let abs = search + p;
+        let before_ok = abs == 0
+            || matches!(
+                text.as_bytes()[abs - 1],
+                b' ' | b'\t' | b',' | b'('
+            );
+        if !before_ok {
+            search = abs + pat.len();
+            continue;
+        }
+        let rest = &text[abs + pat.len()..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        return Some(rest[..end].to_string());
+    }
+    None
+}
+
 fn set_meta_str(ev: &mut Event, key: &str, value: Option<String>) {
     if let Some(v) = value {
         if !v.is_empty() {
@@ -1385,6 +1408,45 @@ fn parse_j2534_line(rest: &str, t: f64, raw: &str) -> Event {
             set_meta_str(&mut ev, "channel", tag_quoted(body, "ch"));
             set_meta_str(&mut ev, "op", tag_quoted(body, "op"));
             ev.text = Some(body.to_string());
+            ev
+        }
+        // Вендорские ординалы 1377-1379: дамп аргументов и разобранные пары
+        // (docs/13 §6.3). Дампы mem/pre в meta не копируем — только длины:
+        // они и так лежат в raw и в raw-proxy.log, а JSONL не должен пухнуть.
+        "vendor" => {
+            let mut ev = make_event(EventKind::Sys, Transport::J2534, t, raw);
+            let ord = tag_quoted(body, "ord").unwrap_or_default();
+            ev.api = "J2534 vendor".into();
+            set_meta_str(&mut ev, "ord", Some(ord.clone()));
+            set_meta_str(&mut ev, "op", tag_quoted(body, "op"));
+            set_meta_str(&mut ev, "arg", tag_quoted(body, "arg"));
+            set_meta_str(&mut ev, "a2", tag_quoted(body, "a2"));
+            set_meta_str(&mut ev, "a3", tag_quoted(body, "a3"));
+            set_meta_str(&mut ev, "ret", tag_quoted(body, "ret"));
+            if let Some(params) = tag_word(body, "params") {
+                if let Some((count, _)) = params.split_once(':') {
+                    if let Ok(n) = count.parse::<u64>() {
+                        set_meta(&mut ev, "count", json!(n));
+                    }
+                }
+                set_meta_str(&mut ev, "params", Some(params));
+            }
+            for key in ["mem", "pre"] {
+                if let Some(dump) = tag_word(body, key) {
+                    if dump != "-" && dump != "<unreadable>" {
+                        set_meta(&mut ev, format!("{key}_len").as_str(), json!(dump.len() / 2));
+                    }
+                }
+            }
+            if let Some(rc) = tag_i32(body, "rc") {
+                ev.rc = Some(rc);
+            }
+            ev.text = Some(format!(
+                "vendor {ord} op={} ret={} params={}",
+                tag_quoted(body, "op").unwrap_or_default(),
+                tag_quoted(body, "ret").unwrap_or_default(),
+                tag_word(body, "params").unwrap_or_default()
+            ));
             ev
         }
         // PassThruSetProgrammingVoltage: питание на пине (BitBox/Scanmatik включают 12 В им),
@@ -3043,6 +3105,33 @@ mod tests {
         assert_eq!(inner.meta.get("parent").and_then(Value::as_u64), Some(1));
         assert_eq!(inner.meta.get("layer").and_then(Value::as_str), Some("driver"));
         assert_eq!(inner.hex, "00 03 80 e1 01");
+    }
+
+    #[test]
+    fn vendor_line_is_parsed_with_params() {
+        // Строка из proxy\tests\out\vendor\log.txt (фикстура vendor_dump.ps1):
+        // ровно тот формат, который пишет прокси для 1377 (docs/13 §6.3).
+        let line = "[+0.019497s] J2534 vendor ord=1377 op=0xb arg=0x004FE67C a2=0x0 a3=0x0 \
+                    ret=vendor_host.exe+0x1343 rc=0 th=17588 dur=6 \
+                    mem=0011223344556677 pre=8899aabbccddeeff \
+                    params=11:0x1aa8c780=5000,0x1aa8c721=1,0x1aa8c724=64000";
+        let ev = parse_capture_line(line).expect("vendor line");
+        assert_eq!(ev.kind, EventKind::Sys);
+        assert_eq!(ev.transport, Transport::J2534);
+        assert_eq!(ev.api, "J2534 vendor");
+        assert_eq!(ev.meta.get("ord").and_then(Value::as_str), Some("1377"));
+        assert_eq!(ev.meta.get("op").and_then(Value::as_str), Some("0xb"));
+        assert_eq!(
+            ev.meta.get("ret").and_then(Value::as_str),
+            Some("vendor_host.exe+0x1343")
+        );
+        assert_eq!(ev.meta.get("count").and_then(Value::as_u64), Some(11));
+        // Дампы в meta не копируются — только их длина в байтах.
+        assert_eq!(ev.meta.get("mem_len").and_then(Value::as_u64), Some(8));
+        assert_eq!(ev.meta.get("pre_len").and_then(Value::as_u64), Some(8));
+        let params = ev.meta.get("params").and_then(Value::as_str).unwrap_or("");
+        assert!(params.starts_with("11:0x1aa8c780=5000,"), "{params}");
+        assert!(ev.text.unwrap_or_default().starts_with("vendor 1377 op=0xb"));
     }
 
     #[test]
