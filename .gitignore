@@ -32,3 +32,9 @@ Thumbs.db
 # Артефакты сборки J2534-прокси (перегенерируются proxy\build.ps1 и smoke.ps1)
 /proxy/out/
 /proxy/tests/out/
+
+# Артефакты сборки фикстуры вендорских вызовов (vendor_dump.ps1)
+/proxy/tests/*.obj
+/proxy/tests/*.exp
+/proxy/tests/*.lib
+/proxy/tests/*.pdb
