@@ -777,9 +777,15 @@ fn parse_channels_value(value: &Value) -> Result<Vec<ChannelInfo>, String> {
         let full_scale_v = get_f64(item, "range_v")
             .or_else(|| get_f64(item, "full_scale_v"))
             .unwrap_or(0.0);
-        let range = get_str(item, "range")
-            .filter(|text| !text.is_empty())
-            .unwrap_or_else(|| range_label(full_scale_v));
+        // Строка `range` службы бывает противоречивой: у CH1/CH2 она «±20 V»
+        // при `range_v` 6 В и кадре ±6 В. Подпись строим по фактической шкале;
+        // строку службы берём только если шкала неизвестна (иначе интерфейс
+        // показывал бы не тот предел).
+        let range = if full_scale_v > 0.0 {
+            range_label(full_scale_v)
+        } else {
+            get_str(item, "range").unwrap_or_default()
+        };
         out.push(ChannelInfo {
             ch: raw + 1,
             raw_ch: raw,
