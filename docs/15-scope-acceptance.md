@@ -266,7 +266,8 @@ export-20261122-142950.zip          (установленная сборка 0.5
 | SHA-256 установщика | `8608b48f3d6f747dab36252697fa7708946e76cb2e0d26fc0c93108a028bd547` |
 | Portable | `FTDI_USB_Logger_portable.zip`, 77 217 192 B |
 | Короткий запуск | скачанный Setup запущен `/VERYSILENT ...` — exit 0, лог `build\install-release-0.5.0.log`: «Installation process succeeded», «j2534proxy: зарегистрирован» |
-| После установки | `ftdi-logger --version` → 0.5.0, `/api/health.version` → 0.5.0, `prefs.json` сохранён (`scope.enabled=true`, url 7411) |
+| После установки | `ftdi-logger --version` → 0.5.0, `/api/health.version` → 0.5.0, `prefs.json` сохранён (`scope.enabled=true`, url 7411); e2e 18/18 на релизном движке |
+| Прокси из релиза | CI-сборка: 144 384 B, SHA-256 `96c33126…62cc5` (локальная B8 — 139 264 B, `5a8dd512…`; разные сборочные окружения) |
 
 Хеш релизного установщика отличается от локального (`daba139c…`): CI собирает
 portable-сборку в своём окружении, а установщик упаковывает её целиком. Поэтому
