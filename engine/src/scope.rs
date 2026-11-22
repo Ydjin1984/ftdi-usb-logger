@@ -171,6 +171,13 @@ pub struct ChannelInfo {
     pub freq: Option<f64>,
     pub duty: Option<f64>,
     pub aliased: bool,
+    /// АЦП в насыщении на этом канале (кадр это видел).
+    pub saturated: bool,
+    /// Одиночные сбои АЦП, которые служба починила в этом кадре.
+    pub dropouts: usize,
+    /// Кумулятивные экстремумы за сеанс на момент кадра.
+    pub peak_min: Option<f64>,
+    pub peak_max: Option<f64>,
 }
 
 /// Измерения кадра по одному каналу (`stats` в ответе API).
@@ -786,7 +793,11 @@ fn parse_channels_value(value: &Value) -> Result<Vec<ChannelInfo>, String> {
             pp: get_f64(item, "pp"),
             freq: get_f64(item, "freq"),
             duty: get_f64(item, "duty"),
-            aliased: false,
+            aliased: get_bool(item, "aliased").unwrap_or(false),
+            saturated: get_bool(item, "saturated").unwrap_or(false),
+            dropouts: get_usize(item, "dropouts").unwrap_or(0),
+            peak_min: get_f64(item, "peak_min"),
+            peak_max: get_f64(item, "peak_max"),
         });
     }
     out.sort_by_key(|info| info.ch);
@@ -841,6 +852,10 @@ fn parse_channel_meta(
             freq: None,
             duty: None,
             aliased: false,
+            saturated: get_bool(item, "saturated").unwrap_or(false),
+            dropouts: get_usize(item, "dropouts").unwrap_or(0),
+            peak_min,
+            peak_max,
         });
     }
     out.sort_by_key(|info| info.ch);
@@ -1851,6 +1866,10 @@ mod tests {
                 freq: None,
                 duty: None,
                 aliased: false,
+                saturated: false,
+                dropouts: 0,
+                peak_min: Some(-1.0),
+                peak_max: Some(1.0),
             }],
             stats: vec![Stat {
                 ch: 1,

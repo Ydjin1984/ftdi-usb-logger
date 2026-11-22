@@ -1223,7 +1223,10 @@ struct SessionWriterTask {
     scope_task: Option<std::thread::JoinHandle<()>>,
     /// Было ли последнее состояние связи «есть» — чтобы писать событие только на
     /// переходах, а не на каждом кадре.
-    scope_link: bool,
+    /// Последнее состояние связи, о котором писали событие. `None` — ещё не
+    /// знаем; `Some(true)` по умолчанию: пока служба не ответила отказом, считаем
+    /// связь установленной (иначе первый же сбой не дал бы `phase=lost`).
+    scope_link: Option<bool>,
     scope_heartbeat: Instant,
     /// Время последнего принятого кадра по часам опросчика: `t` не должна идти
     /// назад, даже если системные часы прыгнули.
@@ -1293,7 +1296,7 @@ impl SessionWriterTask {
             scope_rx: None,
             scope_stop: None,
             scope_task: None,
-            scope_link: false,
+            scope_link: Some(true),
             scope_heartbeat: Instant::now(),
             scope_last_t: 0.0,
             scope_gap_pending: 0,
@@ -1456,8 +1459,8 @@ impl SessionWriterTask {
             } => {
                 // Событие — только на переходе: иначе связь писала бы строку на
                 // каждый кадр и утопила журнал.
-                let changed = ok != self.scope_link;
-                self.scope_link = ok;
+                let changed = self.scope_link != Some(ok);
+                self.scope_link = Some(ok);
                 {
                     let mut st = self.shared.scope.lock();
                     st.page_ok = page_ok;
@@ -1547,6 +1550,7 @@ impl SessionWriterTask {
                     self.writer.meta.counts = counts.clone();
                     *self.shared.counts.lock() = counts;
                 }
+
                 {
                     let mut st = self.shared.scope.lock();
                     st.state = "recording".into();
