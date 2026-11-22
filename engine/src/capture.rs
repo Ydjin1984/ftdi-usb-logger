@@ -1278,14 +1278,11 @@ fn map_line_clock(
             offset: rel_wall - raw_t,
             last_raw: raw_t,
         },
-        Some(mut current) if raw_t + 0.5 < current.last_raw => {
-            // Агент перезапустился: его t снова с нуля. Новый якорь — по
-            // стенным часам этой строки, а не по разнице с прошлой шкалой.
-            current.offset = rel_wall - raw_t;
-            current.last_raw = raw_t;
-            current
-        }
         Some(mut current) => {
+            // Поздняя пачка: строка написана раньше, а дошла сейчас (Frida
+            // буферизует `send`, прокси — свой лог). Её собственное `t` верное,
+            // поэтому якорь не трогаем: уменьшение `raw_t` здесь означает не
+            // перезапуск агента, а именно задержку доставки.
             current.last_raw = current.last_raw.max(raw_t);
             current
         }
@@ -3487,11 +3484,11 @@ mod tests {
         let t2 = map_line_clock(&mut clock, 24.870_9, 1_025.916, session);
         assert!((t2 - 25.916).abs() < 1e-3, "t2={t2}");
         assert!(t2 > t1);
-        // Перезапуск агента: t снова с нуля — якорь пересчитывается, а не
-        // тянет время на 60 с назад.
-        let t3 = map_line_clock(&mut clock, 0.5, 1_060.0, session);
-        assert!((t3 - 60.0).abs() < 1e-3, "t3={t3}");
-        assert!(t3 > t2);
+        // Поздняя пачка: строка с `t` 10.26 дошла только на 40-й секунде.
+        // Её время — 11.3 с сессии, а не 40: якорь не пересчитывается, иначе
+        // весь журнал уехал бы вперёд.
+        let late = map_line_clock(&mut clock, 10.262, 1_040.0, session);
+        assert!((late - 11.307).abs() < 1e-3, "late={late}");
     }
 
     #[test]
