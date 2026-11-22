@@ -88,6 +88,17 @@ msg({
   "команда": "command",
   "операция": "operation",
   "адрес": "address",
+  // События осциллографа и нажатий кнопок целевой программы.
+  "действие": "action",
+  "тип элемента": "control type",
+  "окно": "window",
+  "источник": "source",
+  "состояние": "state",
+  "кадры": "frames",
+  "пропуски": "gaps",
+  "деградация": "degraded",
+  "название": "name",
+  "описание": "description",
 });
 
 
@@ -198,6 +209,16 @@ export class Inspector {
     if (ev.rc != null) prop(props, "rc", String(ev.rc));
     if (ev.step != null) prop(props, t("шаг"), String(ev.step));
     sec.append(props);
+
+    // Новые типы (осциллограф и нажатия кнопок): в meta лежит всё содержательное,
+    // и без отдельной ветки инспектор показывал бы только «RAW».
+    const kindMeta = kindMetaProps(ev);
+    if (kindMeta.length) {
+      sec.append(el("hr", "hr"));
+      const box = el("div", "decoded");
+      for (const [k, v] of kindMeta) prop(box, k, v);
+      sec.append(box);
+    }
 
     if (ev.hex) {
       sec.append(el("hr", "hr"));
@@ -657,6 +678,54 @@ function j2534CallProps(ev: Event): Array<[string, string]> {
     out.push([t("начало сообщения"), on ? t("да") : t("нет")]);
   }
 
+  return out;
+}
+
+/**
+ * Поля meta событий осциллографа и нажатий кнопок (`kind: scope | ui_action`).
+ *
+ * Движок кладёт сюда действие, AutomationId, окно и процесс, а для scope —
+ * состояние и счётчики. Незнакомые скалярные ключи тоже показываем: старые и
+ * новые сборки не должны терять данные молча.
+ */
+function kindMetaProps(ev: Event): Array<[string, string]> {
+  if (ev.kind !== "scope" && ev.kind !== "ui_action") return [];
+  const m = ev.meta;
+  if (!m) return [];
+  const labels: Record<string, string> = {
+    action: t("действие"),
+    automation_id: "automation_id",
+    control_type: t("тип элемента"),
+    window: t("окно"),
+    process: t("процесс"),
+    pid: "pid",
+    source: t("источник"),
+    event: t("событие"),
+    state: t("состояние"),
+    frames: t("кадры"),
+    gaps: t("пропуски"),
+    bytes: t("байт"),
+    last_error: t("ошибка"),
+    degraded: t("деградация"),
+  };
+  const out: Array<[string, string]> = [];
+  // Название кнопки движок кладёт в text: без него в meta остаётся только action.
+  if (ev.text) {
+    out.push([ev.kind === "ui_action" ? t("название") : t("описание"), ev.text]);
+  }
+  for (const key of Object.keys(labels)) {
+    const value = m[key];
+    if (value == null || value === "" || typeof value === "object") continue;
+    out.push([labels[key], String(value)]);
+  }
+  const known = new Set(Object.keys(labels));
+  for (const key of Object.keys(m)) {
+    if (known.has(key)) continue;
+    const value = m[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out.push([key, String(value)]);
+    }
+  }
   return out;
 }
 

@@ -19,6 +19,10 @@ import type {
   StepEvent,
   StepSummary,
   ToolProcess,
+  ScopeConfig,
+  ScopeConfigResult,
+  ScopeStatus,
+  ScopeTestResult,
 } from "./types";
 import { msg, t } from "./i18n";
 
@@ -148,6 +152,17 @@ export const api = {
   /** Подхватить журналы прокси в открытую сессию прямо сейчас. */
   sessionProxyCollect: (id: string) =>
     req<ProxyCollect>(`/api/sessions/${encodeURIComponent(id)}/proxy/collect`, json({})),
+
+  /* Осциллограф: восьмиканальный сервис на 127.0.0.1:7411. */
+  /** Текущие настройки интеграции (адрес, интервал, ширина, лимит файла). */
+  scopeConfig: () => req<ScopeConfig>("/api/scope/config"),
+  /** Частичное обновление настроек; ответ — уже сохранённая конфигурация. */
+  scopeSetConfig: (patch: Partial<ScopeConfig>) =>
+    req<ScopeConfigResult>("/api/scope/config", json(patch)),
+  /** Живое состояние: стадия, счётчики, каналы. 404 — движок старой версии. */
+  scopeStatus: () => req<ScopeStatus>("/api/scope/status"),
+  /** Проверка связи с сервисом (страница + кадр). `url` необязателен. */
+  scopeTest: (url?: string) => req<ScopeTestResult>("/api/scope/test", json(url ? { url } : {})),
 
   toolDetail: (pid: number) => req<ProcessDetail>(`/api/tools/${pid}/detail`),
 

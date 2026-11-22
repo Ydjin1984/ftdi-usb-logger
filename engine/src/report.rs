@@ -30,6 +30,8 @@ pub fn kind_name(kind: EventKind) -> &'static str {
         EventKind::Note => "note",
         EventKind::Shot => "shot",
         EventKind::Summary => "summary",
+        EventKind::Scope => "scope",
+        EventKind::UiAction => "ui_action",
         EventKind::Error => "error",
         EventKind::Raw => "raw",
     }
@@ -439,6 +441,9 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     if !by_steps {
         out.push_str("  объём — по счётчикам сессии (шаги не распознаны)\n");
     }
+    for line in scope_lines(meta) {
+        out.push_str(&format!("  {line}\n"));
+    }
     if !meta.notes.is_empty() {
         out.push_str(DASH);
         out.push('\n');
@@ -548,6 +553,35 @@ fn layers_text(meta: &SessionMeta) -> String {
     out
 }
 
+/// Строки раздела «Осциллограф»: только когда запись действительно была.
+///
+/// Ограничения напечатаны рядом с числами, а не только в документации: отчёт
+/// читают, чтобы понять, что наблюдалось на самом деле, — и «между кадрами
+/// сигнал не наблюдался» является частью ответа (ТЗ §4.2, §5 B7).
+fn scope_lines(meta: &SessionMeta) -> Vec<String> {
+    let c = &meta.counts;
+    if c.scope_frames == 0 && c.scope_bytes == 0 && !c.scope_degraded && c.ui_actions == 0 {
+        return Vec::new();
+    }
+    let mb = c.scope_bytes as f64 / (1024.0 * 1024.0);
+    let mut out = vec![
+        format!(
+            "Осциллограф: кадров {}, {:.1} МБ, пропусков {} ({} блоков)",
+            c.scope_frames, mb, c.scope_gaps, c.scope_gap_blocks
+        ),
+        format!("Действий пользователя (UI Automation): {}", c.ui_actions),
+        "Файлы: scope/frames.jsonl · scope/meta.json · scope/summary.json".to_string(),
+        "Время кадра — время приёма на логгере: часов источника нет, точность ±интервал опроса".to_string(),
+        "Кадр — окно блока АЦП; столбец samples = один отсчёт, envelope = min/max (пики сохранены), пустой столбец lo>hi".to_string(),
+    ];
+    if c.scope_degraded {
+        out.push(
+            "ВНИМАНИЕ: запись шла в режиме только статистики (лимит объёма) — отсчётов в этих строках нет"
+                .to_string(),
+        );
+    }
+    out
+}
 fn md_cell(text: &str) -> String {
     text.replace('|', "/").replace('\n', " ")
 }
@@ -829,6 +863,14 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     }
     out.push('\n');
 
+    let scope = scope_lines(meta);
+    if !scope.is_empty() {
+        out.push_str("## Осциллограф\n\n");
+        for line in &scope {
+            out.push_str(&format!("- {}\n", md_cell(line)));
+        }
+        out.push('\n');
+    }
     // Пустой раздел «## Шаги / Шагов нет» дублировал «## Обмен» выше: если
     // шагов нет, о них уже сказано там.
 

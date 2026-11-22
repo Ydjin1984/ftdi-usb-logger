@@ -17,6 +17,8 @@
 
 use crate::config::Config;
 use crate::ediabas;
+use crate::scope;
+use crate::uiactions;
 use crate::models::{
     now_rfc3339, AdapterInfo, BridgeMsg, CaptureStatus, Event, EventKind, Note, ServerMsg,
     SessionCounts, SessionMeta, StepEvent, StepSummary, ToolProcess, Transport, WinkfpJob,
@@ -102,6 +104,9 @@ struct Shared {
     bridge_ready: AtomicBool,
     /// Активен сырой USB-режим (USBPcapCMD), а не Frida-мост.
     raw_usb: AtomicBool,
+    /// Живое состояние осциллографа: опрашивает ли движок службу 7411, сколько
+    /// кадров записано, есть ли связь. Читается `GET /api/scope/status`.
+    scope: Mutex<scope::Status>,
 }
 
 /// Пути EDIABAS/WinKFP. Каждый путь можно подменить переменной окружения, чтобы
@@ -345,6 +350,56 @@ enum Cmd {
     },
 }
 
+/// `recv` у опционального приёмника: `None` — ветка `select!` навсегда выключена.
+///
+/// Так писатель не держит второй цикл на каждый выключенный канал: осциллограф
+/// и UI Automation могут быть не включены вовсе.
+async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Дополнить список каналов свежими измерениями из кадра.
+///
+/// `/api/channels` перечисляет все восемь каналов (включая выключенные), а кадр
+/// содержит только присутствующие. Поэтому кадр не заменяет список, а обновляет
+/// строки: иначе CH4–CH8 исчезали бы из интерфейса, как только их выключат.
+fn merge_channels(list: &mut Vec<scope::ChannelInfo>, frame: &scope::Frame) {
+    for meta in &frame.channel_meta {
+        let stat = frame.stats.iter().find(|s| s.ch == meta.ch);
+        if let Some(slot) = list.iter_mut().find(|c| c.ch == meta.ch) {
+            slot.enabled = true;
+            slot.range = meta.range.clone();
+            slot.range_id = meta.range_id;
+            slot.full_scale_v = meta.full_scale_v;
+            slot.center_v = meta.center_v;
+            if let Some(s) = stat {
+                slot.min = s.vmin;
+                slot.max = s.vmax;
+                slot.pp = s.vpp;
+                slot.freq = s.freq;
+                slot.duty = s.duty;
+                slot.aliased = s.aliased;
+            }
+        } else {
+            let mut info = meta.clone();
+            info.enabled = true;
+            if let Some(s) = stat {
+                info.min = s.vmin;
+                info.max = s.vmax;
+                info.pp = s.vpp;
+                info.freq = s.freq;
+                info.duty = s.duty;
+                info.aliased = s.aliased;
+            }
+            list.push(info);
+            list.sort_by_key(|c| c.ch);
+        }
+    }
+}
+
 impl CaptureManager {
     pub fn new(cfg: Arc<Config>, store: Arc<SessionStore>, bus: broadcast::Sender<ServerMsg>) -> Self {
         let bridge = crate::frida::BridgeManager::new(cfg.clone());
@@ -369,6 +424,7 @@ impl CaptureManager {
                 stopping: AtomicBool::new(false),
                 bridge_ready: AtomicBool::new(false),
                 raw_usb: AtomicBool::new(false),
+                scope: Mutex::new(scope::status_shell(&scope::ScopeConfig::default())),
             }),
             raw_usb: Mutex::new(None),
         }
@@ -964,6 +1020,33 @@ impl CaptureManager {
     /// Активная сессия для API привязки (`require_active`). Если Frida-мост умер, а writer
     /// ещё не успел закрыть сессию, отдаём статус `aborted`, а не «recording».
     /// В сыром USB-режиме моста нет — статус не трогаем (транспорт `usb`).
+    /// Живое состояние осциллографа для `GET /api/scope/status`.
+    ///
+    /// Счётчики ведёт писатель сессии, а галку и адрес читаем из `prefs.json`
+    /// каждый раз: пользователь мог выключить запись только что, и интерфейс
+    /// обязан показать это сразу, хотя текущая сессия продолжится (ТЗ §4.1).
+    pub fn scope_status(&self) -> scope::Status {
+        let cfg = scope::load_config(&self.cfg.root).sanitized();
+        let mut st = self.shared.scope.lock().clone();
+        st.enabled = cfg.enabled;
+        st.url = cfg.url.clone();
+        st.interval_ms = cfg.interval_ms;
+        st.width = cfg.width;
+        if !cfg.enabled {
+            st.state = "off".into();
+            return st;
+        }
+        if st.state.is_empty() || st.state == "off" {
+            st.state = if self.shared.active.lock().is_some() {
+                "connecting"
+            } else {
+                "idle"
+            }
+            .into();
+        }
+        st
+    }
+
     pub fn active(&self) -> Option<SessionMeta> {
         let mut meta = self.shared.active.lock().clone()?;
         let raw_usb = self.shared.raw_usb.load(Ordering::SeqCst);
@@ -1130,6 +1213,35 @@ struct SessionWriterTask {
     /// Адаптер, определённый по логу (`J2534 open`/`J2534 version`), если
     /// оператор не выбрал его вручную (docs/12 §10: в session.json был null).
     adapter_seen: Option<crate::models::AdapterInfo>,
+    /// Настройки осциллографа на момент открытия сессии: смена галки во время
+    /// записи применяется со следующей сессии (docs/14 §1).
+    scope_cfg: scope::ScopeConfig,
+    /// Запись кадров в `<session>/scope/` (None — галка выключена или диск не дал).
+    scope_rec: Option<scope::Recorder>,
+    scope_rx: Option<mpsc::Receiver<scope::PollMsg>>,
+    scope_stop: Option<Arc<AtomicBool>>,
+    scope_task: Option<std::thread::JoinHandle<()>>,
+    /// Было ли последнее состояние связи «есть» — чтобы писать событие только на
+    /// переходах, а не на каждом кадре.
+    scope_link: bool,
+    scope_heartbeat: Instant,
+    /// Время последнего принятого кадра по часам опросчика: `t` не должна идти
+    /// назад, даже если системные часы прыгнули.
+    scope_last_t: f64,
+    /// Пропуски, ещё не отражённые отдельным событием, и время последнего такого
+    /// события: при опросе 50 мс «двойная публикация» — норма, и писать строку
+    /// на каждую нельзя (журнал превращался в спам).
+    scope_gap_pending: u64,
+    scope_gap_frames: u64,
+    scope_gap_last: Instant,
+    /// Деградация уже отмечена событием — второй раз не пишем.
+    scope_degraded_reported: bool,
+    /// Слушатель UI Automation целевого процесса (docs/14 §4).
+    uia_rx: Option<mpsc::Receiver<uiactions::ActionEvent>>,
+    uia_stop: Option<Arc<AtomicBool>>,
+    uia_task: Option<std::thread::JoinHandle<()>>,
+    /// Клик-канал: нужен программам без Invoke-провайдера (Delphi/VCL).
+    uia_click_task: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SessionWriterTask {
@@ -1176,6 +1288,463 @@ impl SessionWriterTask {
             contract_violations: 0,
             agent_counters: None,
             adapter_seen: None,
+            scope_cfg: scope::ScopeConfig::default(),
+            scope_rec: None,
+            scope_rx: None,
+            scope_stop: None,
+            scope_task: None,
+            scope_link: false,
+            scope_heartbeat: Instant::now(),
+            scope_last_t: 0.0,
+            scope_gap_pending: 0,
+            scope_gap_frames: 0,
+            scope_gap_last: Instant::now(),
+            scope_degraded_reported: false,
+            uia_rx: None,
+            uia_stop: None,
+            uia_task: None,
+            uia_click_task: None,
+        }
+    }
+
+    // ─────────────────── осциллограф и действия пользователя ───────────────
+
+    /// Поднять наблюдателей сессии: опрос осциллографа и подписку UI Automation.
+    ///
+    /// Оба — best effort. Недоступный осциллограф или отсутствие UIA-событий не
+    /// имеют права мешать записи DLL: ошибки уходят событиями, а захват идёт.
+    async fn start_watchdogs(&mut self) {
+        let cfg = scope::load_config(&self.cfg_root()).sanitized();
+        self.scope_cfg = cfg.clone();
+        let mut status = scope::status_shell(&cfg);
+        if !cfg.enabled {
+            status.state = "off".into();
+            *self.shared.scope.lock() = status;
+            return;
+        }
+
+        let mut notes: Vec<String> = Vec::new();
+        match scope::Recorder::open(self.writer.dir(), &cfg, &self.meta.id) {
+            Ok(rec) => self.scope_rec = Some(rec),
+            Err(err) => notes.push(format!("запись кадров не открылась: {err}")),
+        }
+        let (tx, rx) = mpsc::channel(64);
+        let stop = Arc::new(AtomicBool::new(false));
+        self.scope_stop = Some(stop.clone());
+        self.scope_rx = Some(rx);
+        self.scope_task = Some(scope::spawn_poller(
+            cfg.clone(),
+            self.meta.id.clone(),
+            tx,
+            stop,
+        ));
+        status.state = "connecting".into();
+        status.session = Some(self.meta.id.clone());
+        status.started_at = Some(now_rfc3339());
+        *self.shared.scope.lock() = status;
+
+        let mut ev = Event::new(EventKind::Scope, Transport::None, self.t(), now_rfc3339());
+        ev.api = "SCOPE".into();
+        ev.text = Some(format!("запись сигнала включена: {}", cfg.url));
+        ev.meta = serde_json::json!({
+            "phase": "start",
+            "url": cfg.url,
+            "interval_ms": cfg.interval_ms,
+            "width": cfg.width,
+            "max_mb": cfg.max_mb,
+            "notes": notes,
+        });
+        if let Err(err) = self.append_event(ev).await {
+            tracing::warn!("событие старта осциллографа не записано: {err}");
+        }
+
+        // UI Automation: только для живой цели. Проверка доступности сама по себе
+        // ценный факт — по ней видно, поддерживает ли программа семантические
+        // события, или остаётся только ручная метка (ТЗ §4.3).
+        if self.pid != 0 {
+            let pid = self.pid;
+            let avail = match tokio::task::spawn_blocking(move || uiactions::availability(pid)).await
+            {
+                Ok(a) => a,
+                Err(err) => uiactions::Availability {
+                    pid: self.pid,
+                    error: Some(format!("поток проверки UIA: {err}")),
+                    ..Default::default()
+                },
+            };
+            let text = if avail.ok {
+                format!(
+                    "UIA: окно «{}» — кнопок {}, из них с Invoke {}",
+                    avail.window, avail.buttons, avail.invokable
+                )
+            } else {
+                format!(
+                    "UIA недоступен: {}",
+                    avail.error.clone().unwrap_or_else(|| "причина неизвестна".into())
+                )
+            };
+            let mut ev = Event::new(EventKind::Sys, Transport::None, self.t(), now_rfc3339());
+            ev.api = "UIA".into();
+            ev.text = Some(text);
+            ev.meta = serde_json::json!({
+                "phase": "probe",
+                "ok": avail.ok,
+                "pid": self.pid,
+                "window": avail.window,
+                "elements": avail.elements,
+                "buttons": avail.buttons,
+                "invokable": avail.invokable,
+                "events": avail.events_registered,
+                "error": avail.error,
+            });
+            if let Err(err) = self.append_event(ev).await {
+                tracing::warn!("событие проверки UIA не записано: {err}");
+            }
+            // Семантические события (Invoke/focus) — если окно нашлось. Клик-канал
+            // включаем, когда Invoke-провайдера нет или проверка не удалась:
+            // Delphi/VCL (PCMflash) отдаёт кнопки как Pane без InvokePattern, и
+            // без него автоматическая регистрация невозможна (docs/14 §6).
+            let (tx, rx) = mpsc::channel(64);
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut spawned = false;
+            if avail.ok {
+                if let Some(handle) = uiactions::spawn(self.pid, tx.clone(), stop.clone()) {
+                    self.uia_task = Some(handle);
+                    spawned = true;
+                }
+            }
+            if !avail.ok || avail.invokable == 0 {
+                if let Some(handle) = uiactions::spawn_click_watch(self.pid, tx, stop.clone()) {
+                    self.uia_click_task = Some(handle);
+                    spawned = true;
+                }
+            }
+            if spawned {
+                self.uia_stop = Some(stop);
+                self.uia_rx = Some(rx);
+            }
+        }
+    }
+
+    fn cfg_root(&self) -> PathBuf {
+        self.cfg.root.clone()
+    }
+
+    /// Сообщение опросчика осциллографа.
+    async fn on_scope(&mut self, msg: scope::PollMsg) {
+        match msg {
+            scope::PollMsg::Channels(list) => {
+                if !list.is_empty() {
+                    if let Some(rec) = self.scope_rec.as_ref() {
+                        if let Err(err) = rec.write_channels(&list) {
+                            tracing::warn!("паспорт каналов не записан: {err:#}");
+                        }
+                    }
+                }
+                let mut st = self.shared.scope.lock();
+                if !list.is_empty() {
+                    st.channels = list;
+                }
+                st.updated_at = now_rfc3339();
+            }
+            scope::PollMsg::Link {
+                ok,
+                page_ok,
+                frame_ok,
+                error,
+                service,
+            } => {
+                // Событие — только на переходе: иначе связь писала бы строку на
+                // каждый кадр и утопила журнал.
+                let changed = ok != self.scope_link;
+                self.scope_link = ok;
+                {
+                    let mut st = self.shared.scope.lock();
+                    st.page_ok = page_ok;
+                    st.frame_ok = frame_ok;
+                    st.state = if ok {
+                        if st.frames > 0 {
+                            "recording"
+                        } else {
+                            "connecting"
+                        }
+                    } else {
+                        "no_link"
+                    }
+                    .into();
+                    if let Some(svc) = service.as_ref() {
+                        if let Some(v) = svc.get("sample_rate").and_then(|v| v.as_f64()) {
+                            st.sample_rate = v;
+                        }
+                        if let Some(v) = svc.get("block_samples").and_then(|v| v.as_u64()) {
+                            st.n_block = v as usize;
+                        }
+                    }
+                    if let Some(err) = error.clone() {
+                        st.errors = st.errors.saturating_add(1);
+                        st.last_error = Some(err);
+                    } else if ok {
+                        st.last_error = None;
+                    }
+                    st.updated_at = now_rfc3339();
+                }
+                if changed {
+                    let mut ev =
+                        Event::new(EventKind::Scope, Transport::None, self.t(), now_rfc3339());
+                    ev.api = "SCOPE".into();
+                    ev.text = Some(if ok {
+                        format!("связь с осциллографом есть: {}", self.scope_cfg.url)
+                    } else {
+                        format!(
+                            "нет связи с осциллографом {}: {}",
+                            self.scope_cfg.url,
+                            error.clone().unwrap_or_else(|| "нет ответа".into())
+                        )
+                    });
+                    ev.meta = serde_json::json!({
+                        "phase": if ok { "link" } else { "lost" },
+                        "ok": ok,
+                        "page_ok": page_ok,
+                        "frame_ok": frame_ok,
+                        "url": self.scope_cfg.url,
+                        "error": error,
+                        "service": service,
+                    });
+                    if let Err(err) = self.append_event(ev).await {
+                        tracing::warn!("событие связи осциллографа не записано: {err}");
+                    }
+                }
+            }
+            scope::PollMsg::Frame {
+                frame,
+                wall,
+                recv_epoch,
+            } => {
+                // Время приёма от опросчика, а не момент обработки в писателе:
+                // иначе в t попадала бы задержка очереди, а на всплеске событий
+                // J2534 она доходила до сотен миллисекунд (замер: max 650 мс).
+                let t = if recv_epoch > 0.0 && self.raw_t0_epoch > 0.0 {
+                    let rel = (recv_epoch - self.raw_t0_epoch).max(self.scope_last_t);
+                    self.scope_last_t = rel;
+                    rel
+                } else {
+                    self.t()
+                };
+                let (outcome, counters) = {
+                    let Some(rec) = self.scope_rec.as_mut() else {
+                        return;
+                    };
+                    let outcome = rec.accept(t, &wall, &frame);
+                    (outcome, rec.counters())
+                };
+                {
+                    let mut counts = self.writer.meta.counts.clone();
+                    counts.scope_frames = counters.frames;
+                    counts.scope_bytes = counters.bytes;
+                    counts.scope_gaps = counters.gaps;
+                    counts.scope_gap_blocks = counters.gap_blocks;
+                    counts.scope_degraded = counters.degraded;
+                    self.writer.meta.counts = counts.clone();
+                    *self.shared.counts.lock() = counts;
+                }
+                {
+                    let mut st = self.shared.scope.lock();
+                    st.state = "recording".into();
+                    st.frames = counters.frames;
+                    st.lines = counters.lines;
+                    st.bytes = counters.bytes;
+                    st.gaps = counters.gaps;
+                    st.gap_blocks = counters.gap_blocks;
+                    st.degraded = counters.degraded;
+                    st.last_frame_id = counters.last_frame_id;
+                    st.last_t = counters.t_last;
+                    st.last_wall = Some(wall.clone());
+                    st.sample_rate = frame.sample_rate;
+                    st.dt_s = frame.dt_s;
+                    st.n_block = frame.n_block;
+                    merge_channels(&mut st.channels, &frame);
+                    st.updated_at = now_rfc3339();
+                }
+
+                // Пропуски копим и пишем не чаще раза в 5 с: при опросе 50 мс
+                // «через одну публикацию» — штатная фаза, а не потеря, и строка
+                // на каждый такой случай забивала журнал (замер: 44 события за
+                // 30 с). Числа при этом не теряются — они в пульсе и в итоге.
+                if let scope::Accept::Frame { gap_blocks, .. }
+                | scope::Accept::Degraded { gap_blocks } = &outcome
+                {
+                    if *gap_blocks > 0 {
+                        self.scope_gap_pending = self.scope_gap_pending.saturating_add(*gap_blocks);
+                        self.scope_gap_frames = self.scope_gap_frames.saturating_add(1);
+                    }
+                }
+                let mut phase: Option<serde_json::Value> = None;
+                if self.scope_gap_pending > 0
+                    && self.scope_gap_last.elapsed() >= Duration::from_secs(5)
+                {
+                    self.scope_gap_last = Instant::now();
+                    phase = Some(serde_json::json!({
+                        "phase": "gap",
+                        "gap_blocks": self.scope_gap_pending,
+                        "gap_events": self.scope_gap_frames,
+                        "frame_id": frame.frame_id,
+                    }));
+                    self.scope_gap_pending = 0;
+                    self.scope_gap_frames = 0;
+                }
+                if matches!(outcome, scope::Accept::Degraded { .. })
+                    && !self.scope_degraded_reported
+                {
+                    self.scope_degraded_reported = true;
+                    phase = Some(serde_json::json!({
+                        "phase": "degraded",
+                        "gap_blocks": self.scope_gap_pending,
+                        "frame_id": frame.frame_id,
+                        "bytes": counters.bytes,
+                    }));
+                }
+                if let Some(meta) = phase {
+                    let mut ev =
+                        Event::new(EventKind::Scope, Transport::None, t, now_rfc3339());
+                    ev.api = "SCOPE".into();
+                    ev.text = Some(match meta.get("phase").and_then(|v| v.as_str()) {
+                        Some("gap") => format!(
+                            "пропуск кадров осциллографа: {} публикаций в {} разрывах",
+                            meta.get("gap_blocks").and_then(|v| v.as_u64()).unwrap_or(0),
+                            meta.get("gap_events").and_then(|v| v.as_u64()).unwrap_or(0),
+                        ),
+                        _ => "запись осциллографа перешла в режим только статистики".to_string(),
+                    });
+                    ev.meta = meta;
+                    if let Err(err) = self.append_event(ev).await {
+                        tracing::warn!("событие пропуска осциллографа не записано: {err}");
+                    }
+                }
+                // Пульс раз в 5 с: индексы кадров и объём, чтобы в общем
+                // таймлайне было видно, что запись жива (ТЗ §4.2).
+                if self.scope_heartbeat.elapsed() >= Duration::from_secs(5) {
+                    self.scope_heartbeat = Instant::now();
+                    let mut ev =
+                        Event::new(EventKind::Scope, Transport::None, t, now_rfc3339());
+                    ev.api = "SCOPE".into();
+                    ev.text = Some(format!(
+                        "кадров {}, {:.1} МБ, пропусков {} ({} блоков)",
+                        counters.frames,
+                        counters.bytes as f64 / (1024.0 * 1024.0),
+                        counters.gaps,
+                        counters.gap_blocks
+                    ));
+                    ev.meta = serde_json::json!({
+                        "phase": "frames",
+                        "frames": counters.frames,
+                        "bytes": counters.bytes,
+                        "gaps": counters.gaps,
+                        "gap_blocks": counters.gap_blocks,
+                        "last_frame_id": counters.last_frame_id,
+                        "degraded": counters.degraded,
+                        "sample_rate": frame.sample_rate,
+                        "n_block": frame.n_block,
+                        "channels": frame.channels,
+                    });
+                    if let Err(err) = self.append_event(ev).await {
+                        tracing::warn!("пульс осциллографа не записан: {err}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Нажатие кнопки в целевой программе, поймавшее UI Automation.
+    async fn on_action(&mut self, action: uiactions::ActionEvent) {
+        let wall = if action.wall.trim().is_empty() {
+            now_rfc3339()
+        } else {
+            action.wall.clone()
+        };
+        let mut ev = Event::new(EventKind::UiAction, Transport::App, self.t(), wall);
+        ev.api = "UIA".into();
+        ev.text = Some(action.name.clone());
+        ev.meta = serde_json::json!({
+            "action": action.action,
+            "automation_id": action.automation_id,
+            "control_type": action.control_type,
+            "window": action.window,
+            "process": action.process,
+            "pid": action.pid,
+            "source": action.source,
+            "event": action.event,
+            "rect": [action.x, action.y, action.w, action.h],
+        });
+        if let Err(err) = self.append_event(ev).await {
+            tracing::warn!("действие пользователя не записано: {err}");
+        }
+    }
+
+    /// Остановить наблюдателей и закрыть файл кадров (пишет `scope/summary.json`).
+    async fn stop_watchdogs(&mut self) {
+        if let Some(stop) = self.scope_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        if let Some(stop) = self.uia_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        // Приёмники закрываем: поток-опросчик увидит закрытый канал и выйдет сам,
+        // не задерживая финализацию на своём HTTP-таймауте.
+        self.scope_rx = None;
+        self.uia_rx = None;
+        // JoinHandle не join'им: поток может быть внутри 2-секундного чтения,
+        // а терять сессию из-за этого нельзя. Он завершится сам.
+        self.scope_task.take();
+        self.uia_task.take();
+        self.uia_click_task.take();
+
+        let Some(mut rec) = self.scope_rec.take() else {
+            return;
+        };
+        let counters = rec.finish(self.t());
+        {
+            let mut counts = self.writer.meta.counts.clone();
+            counts.scope_frames = counters.frames;
+            counts.scope_bytes = counters.bytes;
+            counts.scope_gaps = counters.gaps;
+            counts.scope_gap_blocks = counters.gap_blocks;
+            counts.scope_degraded = counters.degraded;
+            self.writer.meta.counts = counts.clone();
+            *self.shared.counts.lock() = counts;
+        }
+        {
+            let mut st = self.shared.scope.lock();
+            st.state = "stopped".into();
+            st.frames = counters.frames;
+            st.lines = counters.lines;
+            st.bytes = counters.bytes;
+            st.gaps = counters.gaps;
+            st.gap_blocks = counters.gap_blocks;
+            st.degraded = counters.degraded;
+            st.last_frame_id = counters.last_frame_id;
+            st.updated_at = now_rfc3339();
+        }
+        let mut ev = Event::new(EventKind::Scope, Transport::None, self.t(), now_rfc3339());
+        ev.api = "SCOPE".into();
+        ev.text = Some(format!(
+            "запись сигнала остановлена: кадров {}, {:.1} МБ, пропусков {} ({} блоков)",
+            counters.frames,
+            counters.bytes as f64 / (1024.0 * 1024.0),
+            counters.gaps,
+            counters.gap_blocks
+        ));
+        ev.meta = serde_json::json!({
+            "phase": "stop",
+            "frames": counters.frames,
+            "lines": counters.lines,
+            "bytes": counters.bytes,
+            "gaps": counters.gaps,
+            "gap_blocks": counters.gap_blocks,
+            "degraded": counters.degraded,
+            "last_frame_id": counters.last_frame_id,
+        });
+        if let Err(err) = self.append_event(ev).await {
+            tracing::warn!("событие остановки осциллографа не записано: {err}");
         }
     }
 
@@ -1183,6 +1752,11 @@ impl SessionWriterTask {
     async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) {
         let mut ticker = tokio::time::interval(BATCH_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Наблюдатели поднимаются до первой команды: нажатие кнопки в программе
+        // может случиться раньше первого кадра DLL.
+        self.start_watchdogs().await;
+        let mut scope_rx = self.scope_rx.take();
+        let mut uia_rx = self.uia_rx.take();
         loop {
             tokio::select! {
                 maybe = rx.recv() => {
@@ -1197,6 +1771,16 @@ impl SessionWriterTask {
                             self.finalize("aborted").await;
                             break;
                         }
+                    }
+                }
+                msg = recv_opt(&mut scope_rx) => {
+                    if let Some(msg) = msg {
+                        self.on_scope(msg).await;
+                    }
+                }
+                action = recv_opt(&mut uia_rx) => {
+                    if let Some(action) = action {
+                        self.on_action(action).await;
                     }
                 }
                 _ = ticker.tick() => {
@@ -1889,6 +2473,9 @@ impl SessionWriterTask {
 
     /// Финализация сессии: дозакрыть шаг, сбросить буферы, отчёты, `session.json`.
     async fn finalize(&mut self, status: &str) -> Option<SessionMeta> {
+        // Сначала закрываем побочные каналы: их события (итог осциллографа)
+        // должны попасть в сессию до записи отчёта и session.json.
+        self.stop_watchdogs().await;
         if self.open.is_some() {
             let _ = self.end_step(false).await;
         }
@@ -3208,6 +3795,7 @@ for line in sys.stdin:
             stopping: AtomicBool::new(false),
             bridge_ready: AtomicBool::new(false),
             raw_usb: AtomicBool::new(false),
+            scope: Mutex::new(scope::status_shell(&scope::ScopeConfig::default())),
         });
         let writer = store.create(SessionMeta::new("pipeline-test", "pipeline")).unwrap();
         let meta = writer.meta.clone();
@@ -3355,6 +3943,7 @@ for line in sys.stdin:
             stopping: AtomicBool::new(false),
             bridge_ready: AtomicBool::new(false),
             raw_usb: AtomicBool::new(false),
+            scope: Mutex::new(scope::status_shell(&scope::ScopeConfig::default())),
         });
         let mut session_meta = SessionMeta::new("j2534-nosteps", "pcmflash");
         session_meta.transport = "vcp".into(); // стартовая догадка «ftd2xx не загружен»
@@ -3451,6 +4040,7 @@ for line in sys.stdin:
             stopping: AtomicBool::new(false),
             bridge_ready: AtomicBool::new(false),
             raw_usb: AtomicBool::new(false),
+            scope: Mutex::new(scope::status_shell(&scope::ScopeConfig::default())),
         });
         let writer = store.create(SessionMeta::new("snapshot-test", "pcmflash")).unwrap();
         let meta = writer.meta.clone();
@@ -3694,6 +4284,7 @@ Error (134) API-0014: RESULT NOT FOUND\n";
             stopping: AtomicBool::new(false),
             bridge_ready: AtomicBool::new(false),
             raw_usb: AtomicBool::new(false),
+            scope: Mutex::new(scope::status_shell(&scope::ScopeConfig::default())),
         });
         let mut session_meta = SessionMeta::new("j2534-proxy", "pcmflash");
         session_meta.transport = "j2534".into();

@@ -1303,3 +1303,259 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .row__delta{color:var(--text-mute);white-space:nowrap;text-align:right;font-size:10px}
 @media(max-width:460px){.row,.stream-columns{grid-template-columns:52px 32px minmax(0,1fr) 30px 60px}.traffic-meter{margin-inline:5px}}
 @media(max-width:590px){.app-shell{grid-template-rows:auto auto minmax(490px,66vh) 65px auto}}
+
+/* ── восьмиканальный осциллограф ──────────────────────────────────────────
+   Пилюля и кнопка живут в статусбаре рядом с прокси; диалог — обычный modal.
+   Цвет — не единственный носитель смысла: рядом всегда текст состояния. */
+.scope-btn {
+  flex: none;
+}
+.scope-btn .ico {
+  color: var(--text-dim);
+}
+.pill.scope-pill {
+  cursor: pointer;
+}
+.pill.scope-pill:hover {
+  border-color: var(--line-3);
+}
+/* Предупреждение «со следующей сессии»: жёлтая рамка, но текст обязателен. */
+.scope-warn {
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 171, 74, 0.4);
+  border-left-width: 3px;
+  border-radius: var(--r-2);
+  background: rgba(255, 171, 74, 0.07);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.scope-unsupported {
+  padding: 8px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+/* Живая строка диалога: состояние, кадры, ошибка — как у прокси (docs/13 §6.1). */
+.scope-live {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.scope-live__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.scope-live__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-mute);
+  align-self: center;
+}
+.scope-live__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.scope-live__note {
+  font-size: 11px;
+  color: var(--text-mute);
+  line-height: 1.45;
+}
+.scope-live--ok {
+  border-left-color: var(--ok);
+}
+.scope-live--ok .scope-live__dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(88, 214, 141, 0.16);
+}
+.scope-live--warn {
+  border-left-color: var(--warn);
+}
+.scope-live--warn .scope-live__dot {
+  background: var(--warn);
+}
+.scope-live--err {
+  border-left-color: var(--err);
+}
+.scope-live--err .scope-live__dot {
+  background: var(--err);
+}
+/* Кнопки диалога: «Проверить связь», «Открыть веб-интерфейс», «открыть кадры». */
+.scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.scope-test {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.scope-test__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+}
+.scope-test__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-mute);
+}
+.scope-test__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.scope-test--ok {
+  border-left-color: var(--ok);
+}
+.scope-test--ok .scope-test__dot {
+  background: var(--ok);
+}
+.scope-test--err {
+  border-left-color: var(--err);
+}
+.scope-test--err .scope-test__dot {
+  background: var(--err);
+}
+.scope-error {
+  color: var(--err);
+}
+.field input.is-invalid {
+  border-color: var(--err);
+}
+/* Секция в настройках: отделена от блока J2534, чтобы не читалась как его часть. */
+.scope-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+/* CH1–CH8: восемь строк; выключенный канал серый и говорит об этом текстом. */
+.scope-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow: auto;
+}
+.scope-ch {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--bg-2);
+}
+.scope-ch.is-off {
+  background: transparent;
+  border-color: var(--line);
+}
+.scope-ch__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: default;
+}
+.scope-ch__head input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+  accent-color: var(--acc);
+}
+.scope-ch__name {
+  color: var(--text);
+  font-weight: 600;
+}
+.scope-ch.is-off .scope-ch__name {
+  color: var(--text-mute);
+  font-weight: 400;
+}
+.scope-ch__range {
+  color: var(--text-mute);
+  font-size: 10px;
+}
+.scope-ch__alias {
+  color: var(--mark);
+  border: 1px solid rgba(255, 200, 87, 0.4);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.scope-ch__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.scope-ch.is-off .scope-ch__stats {
+  color: var(--text-mute);
+}
+/* Новые типы в потоке: SCOPE — бирюзовый, UI — янтарный. */
+.chip--scope .chip__dot {
+  background: #5eead4;
+}
+.chip--ui .chip__dot {
+  background: #ffb86b;
+}
+.row--scope {
+  border-left-color: rgba(94, 234, 212, 0.5);
+}
+.row--scope .row__kind {
+  color: #5eead4;
+  border-color: rgba(94, 234, 212, 0.3);
+  background: rgba(94, 234, 212, 0.08);
+}
+.row--scope .row__api {
+  color: #5eead4;
+  opacity: 0.8;
+}
+.row--ui {
+  border-left-color: rgba(255, 184, 107, 0.5);
+}
+.row--ui .row__kind {
+  color: #ffb86b;
+  border-color: rgba(255, 184, 107, 0.3);
+  background: rgba(255, 184, 107, 0.08);
+}
+.row--ui .row__api {
+  color: #ffb86b;
+  opacity: 0.8;
+}

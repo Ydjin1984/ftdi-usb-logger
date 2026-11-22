@@ -41,6 +41,17 @@ pub enum EventKind {
     Shot,
     /// Сводка (например, разбор после шага).
     Summary,
+    /// Осциллограф: подключение, пропуск кадров, деградация, итог.
+    ///
+    /// Сами отсчёты в журнал не идут — они лежат в `scope/frames.jsonl`
+    /// (docs/14). Здесь только редкие отметки, чтобы общий таймлайн показывал,
+    /// что запись сигнала шла и где в ней дырки.
+    Scope,
+    /// Семантическое действие пользователя в целевой программе (UI Automation).
+    ///
+    /// Отдельно от вызовов прокси: нажатие кнопки, вызов DLL и результат
+    /// операции — три разные записи, и склеивать их нельзя (docs/14 §4).
+    UiAction,
     /// Ошибка.
     Error,
     /// Неизвестная строка, сохранена как есть.
@@ -206,6 +217,10 @@ impl Event {
                     dur
                 )
             }
+            // Осциллограф и действия UI Automation живут в events.jsonl, но НЕ в
+            // raw.log: raw.log обязан оставаться в грамматике старого логера,
+            // иначе импорт своего же лога даст лишние kind=raw строки (docs/14).
+            EventKind::Scope | EventKind::UiAction => String::new(),
             _ => {
                 let mut s = format!("[+{:.3}s] {} {}", self.t, self.api, self.text.clone().unwrap_or_default());
                 if !self.hex.is_empty() {
@@ -303,6 +318,26 @@ pub struct SessionCounts {
     /// `11:0x1aa8c780=5000,…` — доказательство для отчёта (docs/13 §6.3).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vendor_gpt: String,
+    // ── осциллограф и действия пользователя (docs/14) ─────────────────────
+    /// Кадров осциллографа, записанных в `scope/frames.jsonl`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scope_frames: u64,
+    /// Байт в `scope/frames.jsonl` (то, что реально легло на диск).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scope_bytes: u64,
+    /// Сколько раз между принятыми кадрами был разрыв.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scope_gaps: u64,
+    /// Сколько блоков АЦП попало в эти разрывы (по `blocks_total`, не по `frame_id`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scope_gap_blocks: u64,
+    /// Запись перешла в режим «только статистика» из-за лимита объёма.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_degraded: bool,
+    /// Действий пользователя, зарегистрированных UI Automation (и ручных меток
+    /// с `source=manual` — они попадают в тот же счётчик).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ui_actions: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -19,6 +19,8 @@ import type {
   UsbDevice,
   J2534Driver,
   ProxyStatus,
+  ScopeConfig,
+  ScopeStatus,
 } from "./types";
 
 const RING = 60_000;
@@ -58,6 +60,12 @@ export interface StoreState {
   j2534Drivers: J2534Driver[];
   /** Состояние J2534-прокси: индикатор «подхвачен» в шапке (docs/13 §6.1). */
   proxy: ProxyStatus | null;
+  /**
+   * Осциллограф: живое состояние сервиса на 127.0.0.1:7411.
+   * `scopeSupported === false` — движок старой версии (404), интеграции нет.
+   */
+  scope: ScopeStatus | null;
+  scopeSupported: boolean | null;
   toolsMode: "auto" | "usb" | "window" | "all";
   loadingTargets: boolean;
 
@@ -87,6 +95,9 @@ const ALL_KINDS: EventKind[] = [
   "note",
   "sys",
   "error",
+  // События осциллографа и нажатий кнопок видны по умолчанию, как и остальные.
+  "scope",
+  "ui_action",
 ];
 
 msg({
@@ -99,6 +110,12 @@ msg({
   "Сброс адаптаций": "Reset adaptations",
   "Верификация": "Verification",
   "запись тюна": "tune write",
+  "осциллограф включён": "oscilloscope enabled",
+  "осциллограф выключен": "oscilloscope disabled",
+  "настройки осциллографа сохранены": "oscilloscope settings saved",
+  "демо-режим: осциллограф недоступен": "demo mode: the oscilloscope is unavailable",
+  "движок не поддерживает осциллограф": "the engine does not support the oscilloscope",
+  "осциллограф: {msg}": "oscilloscope: {msg}",
 });
 
 /**
@@ -159,6 +176,10 @@ class Store {
   private pollTimer: number | null = null;
   private healthFails = 0;
   private tickTimer: number | null = null;
+  /** Осциллограф: опрос статуса (2 с, только при видимой вкладке). */
+  private scopeTimer: number | null = null;
+  private scopeInFlight = false;
+  private scopeVisibilityBound = false;
 
   constructor() {
     const demo = isDemoMode();
@@ -185,6 +206,8 @@ class Store {
       usbDevices: [],
       j2534Drivers: [],
       proxy: null,
+      scope: null,
+      scopeSupported: null,
       toolsMode: "auto",
       loadingTargets: false,
       filters: new Set(ALL_KINDS),
@@ -254,6 +277,9 @@ class Store {
       const preferred = health.capture?.session || sessions[0]?.id || null;
       if (preferred) await this.selectSession(preferred);
       this.startPolling();
+      // Осциллограф: первый статус — сразу, дальше — опрос раз в 2 с.
+      void this.refreshScope();
+      this.startScopePolling();
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : errText(e);
       this.state.bootError = msg;
@@ -360,6 +386,105 @@ class Store {
       this.emit();
     } catch {
       /* движок не ответил: прежнее состояние не затираем, чтобы индикатор не мигал */
+    }
+  }
+
+  /* ───────────────────────────── осциллограф ─────────────────────────── */
+
+  /**
+   * Прочитать живое состояние осциллографа.
+   *
+   * Ошибка не показывает тост: опрос идёт каждые 2 с, иначе уведомления
+   * перекрывали бы работу. 404 — движок старой сборки: интеграции нет,
+   * пилюля не рисуется, опрос останавливаем, чтобы не долбить сервер.
+   */
+  async refreshScope(): Promise<void> {
+    if (this.state.mode === "demo") return;
+    if (this.state.scopeSupported === false) return;
+    if (this.scopeInFlight) return;
+    this.scopeInFlight = true;
+    try {
+      this.state.scope = await api.scopeStatus();
+      this.state.scopeSupported = true;
+      this.emit();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        this.state.scope = null;
+        this.state.scopeSupported = false;
+        this.stopScopePolling();
+        this.emit();
+      }
+      // Прочие ошибки (движок перезапускается) — молча: прежнее состояние не
+      // затираем, следующий опрос попробует снова.
+    } finally {
+      this.scopeInFlight = false;
+    }
+  }
+
+  /** Включить/выключить осциллограф. Ответ сервера — источник правды. */
+  async setScopeEnabled(enabled: boolean): Promise<boolean> {
+    const ok = await this.postScopeConfig({ enabled });
+    if (ok) this.toast("ok", enabled ? t("осциллограф включён") : t("осциллограф выключен"));
+    return ok;
+  }
+
+  /** Сохранить адрес и параметры из диалога. */
+  async saveScopeConfig(patch: Partial<ScopeConfig>): Promise<boolean> {
+    const ok = await this.postScopeConfig(patch);
+    if (ok) this.toast("ok", t("настройки осциллографа сохранены"));
+    return ok;
+  }
+
+  private async postScopeConfig(patch: Partial<ScopeConfig>): Promise<boolean> {
+    if (this.state.mode === "demo") {
+      this.toast("info", t("демо-режим: осциллограф недоступен"));
+      return false;
+    }
+    try {
+      const res = await api.scopeSetConfig(patch);
+      // Частичный ответ не затирает прочитанное: обновляем только пришедшее.
+      if (res.config && this.state.scope) this.state.scope = { ...this.state.scope, ...res.config };
+      this.state.scopeSupported = true;
+      this.emit();
+      await this.refreshScope();
+      return res.ok !== false;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        this.state.scope = null;
+        this.state.scopeSupported = false;
+        this.stopScopePolling();
+        this.emit();
+        this.toast("error", t("движок не поддерживает осциллограф"));
+      } else {
+        this.toast("error", t("осциллограф: {msg}", { msg: errText(e) }));
+      }
+      // Перечитываем состояние, чтобы переключатель не врал.
+      await this.refreshScope();
+      return false;
+    }
+  }
+
+  /**
+   * Опрос статуса раз в 2 с. Скрытая вкладка не опрашивается (без пользы
+   * грузит движок и сервис), а при возврате статус читается сразу.
+   */
+  private startScopePolling(): void {
+    if (this.scopeTimer != null) window.clearInterval(this.scopeTimer);
+    if (!this.scopeVisibilityBound) {
+      this.scopeVisibilityBound = true;
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void this.refreshScope();
+      });
+    }
+    this.scopeTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void this.refreshScope();
+    }, 2000);
+  }
+
+  private stopScopePolling(): void {
+    if (this.scopeTimer != null) {
+      window.clearInterval(this.scopeTimer);
+      this.scopeTimer = null;
     }
   }
 

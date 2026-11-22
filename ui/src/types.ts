@@ -15,7 +15,11 @@ export type EventKind =
   | "shot"
   | "summary"
   | "error"
-  | "raw";
+  | "raw"
+  /** Восьмиканальный осциллограф: подключение, пропуски, деградация, итог. */
+  | "scope"
+  /** Нажатие/фокус кнопки целевой программы (UI Automation). */
+  | "ui_action";
 
 export type Transport = "ftd2xx" | "vcp" | "usb" | "j2534" | "lan" | "file" | "app" | "none";
 export type Direction = "tx" | "rx";
@@ -467,4 +471,102 @@ export interface NewSessionResult {
   usb_devices: UsbDevice[];
   j2534_drivers: J2534Driver[];
   capabilities?: EnvCapabilities;
+}
+
+/* ── восьмиканальный осциллограф (сервис на 127.0.0.1:7411) ─────────────── */
+
+/** Состояние интеграции: `off` — выключена в настройках, `no_link` — сервис не отвечает. */
+export type ScopeState = "off" | "connecting" | "recording" | "idle" | "no_link" | "stopped";
+
+export interface ScopeConfig {
+  enabled: boolean;
+  /** Адрес HTTP-сервиса осциллографа (`http://host:port`). */
+  url: string;
+  interval_ms: number;
+  width: number;
+  max_mb: number;
+}
+
+/** Один канал в ответе `GET /api/scope/status`. */
+export interface ScopeChannel {
+  ch: number;
+  raw_ch?: number;
+  enabled: boolean;
+  /** Диапазон как его называет сервис: `±20 V`. */
+  range: string;
+  range_id?: number;
+  /** Полная шкала канала в вольтах. */
+  full_scale_v: number;
+  center_v?: number;
+  min: number | null;
+  max: number | null;
+  /** Размах, В. */
+  pp: number | null;
+  /** Частота, Гц; null — не измерена (постоянный уровень/не включён). */
+  freq: number | null;
+  duty: number | null;
+  /** Частота выше предела Найквиста: значение нельзя трактовать. */
+  aliased?: boolean;
+}
+
+export interface ScopeStatus extends ScopeConfig {
+  state: ScopeState;
+  session: string | null;
+  frames: number;
+  lines: number;
+  bytes: number;
+  last_frame_id: number;
+  last_t: number;
+  last_wall: string | null;
+  gaps: number;
+  gap_blocks: number;
+  errors: number;
+  last_error: string | null;
+  degraded: boolean;
+  channels: ScopeChannel[];
+  page_ok: boolean;
+  frame_ok: boolean;
+  sample_rate: number;
+  dt_s: number;
+  n_block: number;
+  updated_at: string | null;
+  started_at: string | null;
+}
+
+/** Кадр из ответа проверки связи: идентификатор, частота, размер блока. */
+export interface ScopeTestFrame {
+  frame_id: number;
+  sample_rate: number;
+  dt_s: number;
+  n_block: number;
+  window_s: number;
+  channels: number[];
+  stats: Array<Record<string, unknown>>;
+}
+
+export interface ScopeTestService {
+  running: boolean;
+  sample_rate: number;
+  state: string;
+  trigger?: Record<string, unknown> | null;
+}
+
+export interface ScopeTestResult {
+  ok: boolean;
+  page_ok: boolean;
+  page_status: number;
+  page_ms: number;
+  frame_ok: boolean;
+  frame_ms: number;
+  url: string;
+  error: string | null;
+  frame?: ScopeTestFrame | null;
+  service?: ScopeTestService | null;
+  channels?: ScopeChannel[];
+}
+
+/** Ответ `POST /api/scope/config`. */
+export interface ScopeConfigResult {
+  ok: boolean;
+  config: ScopeConfig;
 }

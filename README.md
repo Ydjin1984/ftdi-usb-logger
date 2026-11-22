@@ -63,6 +63,8 @@ USB/COM/J2534-устройств, а не только FTDI.
 | **Импорт** | старые `capture.log`/`logger.out` → сессия `imported`; переразбор (`reparse`) |
 | **Скорости и тайминги** | в поток пишутся `FT_SetBaudRate`, `FT_SetLatencyTimer`, `FT_SetTimeouts`, `FT_SetDataCharacteristics`, `FT_SetFlowControl`, `COM SetCommState/SetCommTimeouts/SetupComm` (+ снимок текущих DCB/таймаутов для порта, открытого до attach), `J2534 config` (`DATA_RATE`, W1..W5, ISO15765_*); у каждого события есть `t` и `wall` — интервалы и смены скорости видно |
 | **Надёжность** | watchdog «движок не отвечает», detach с бюджетом и принудительной остановкой, восстановление незакрытых сессий при старте |
+| **Осциллограф** | восемь каналов Hantek 1008C в той же сессии: галка в настройках, кнопка и статус в шапке, проверка связи, `scope/frames.jsonl` с точными отсчётами в мВ, пропуски и сегменты видны явно ([docs/14](docs/14-scope-integration.md)) |
+| **Действия пользователя** | нажатия кнопок целевой программы через UI Automation (`kind=ui_action`, `action=identify/read/write/…`) на общей шкале времени с вызовами DLL и сигналом |
 
 ---
 
@@ -454,6 +456,9 @@ sequenceDiagram
 | `POST /api/session/new` | завершить текущую и пересканировать окружение |
 | `GET /api/tools?mode=auto\|usb\|window\|all` | процессы-кандидаты |
 | `GET /api/devices` · `GET /api/usb/devices` · `GET /api/j2534/drivers` | FTDI / USB / J2534 |
+| `GET /api/scope/config` · `POST /api/scope/config` | настройки осциллографа (`enabled/url/interval_ms/width/max_mb`), хранятся в `prefs.json` |
+| `GET /api/scope/status` | состояние записи: `off/connecting/recording/idle/no_link/stopped`, кадры, пропуски, каналы |
+| `POST /api/scope/test` | проверка связи: страница + валидный кадр, CH1–CH8 |
 | `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter/set-real/repair/restart-pcmflash`); ответ содержит живое состояние (`live`), список драйверов (`devices`) и признаки DLL (`dll.ours/company/arch`) |
 | `POST /api/sessions/{id}/proxy/collect` | подхватить журналы прокси в открытую сессию сейчас |
 | `POST /api/usbpcap/start` | сырой захват шины (нужен USBPcap) |
@@ -544,6 +549,8 @@ sessions/20261109-154706-bmw-scanner-e2e/
 | [docs/06-smoke.md](docs/06-smoke.md) | приёмка собранного dist |
 | [docs/07-review.md](docs/07-review.md) | ревью и исправленные дефекты |
 | [docs/08-universal-research.md](docs/08-universal-research.md) | как MS4x/BMW Scanner/J2534 общаются с адаптером, что ловится хуками, а что нужно USBPcap |
+| [docs/14-scope-integration.md](docs/14-scope-integration.md) | осциллограф: кадры, точность выборок, общая шкала времени, UI Automation, границы |
+| [docs/15-scope-acceptance.md](docs/15-scope-acceptance.md) | приёмка 0.5.0: что и чем проверено, PASS/FAIL/BLOCKED по матрице |
 
 ---
 

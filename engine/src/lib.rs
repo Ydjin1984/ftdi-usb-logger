@@ -15,6 +15,8 @@ pub mod usbdevices;
 pub mod j2534;
 pub mod proxy;
 pub mod usbpcap;
+pub mod scope;
+pub mod uiactions;
 
 use std::sync::Arc;
 use anyhow::Context;

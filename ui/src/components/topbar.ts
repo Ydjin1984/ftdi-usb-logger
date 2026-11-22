@@ -4,9 +4,10 @@ import { store } from "../store";
 import { isMuted, setMuted } from "../sound";
 import { button, el, icon, iconButton } from "../dom";
 import { fmtTimeOnly } from "../format";
-import { openHelpDialog, openNewSessionDialog, openSettingsDialog } from "./dialogs";
+import { openHelpDialog, openNewSessionDialog, openScopeDialog, openSettingsDialog } from "./dialogs";
 import { getLang, msg, setLang, t, type Lang } from "../i18n";
 import { proxyLiveShort, proxyLiveTitle, proxyLiveTone } from "../proxy";
+import { buildScopeControls } from "../scope";
 
 msg({
   "DAVINCI  /  КОНСОЛЬ ЗАХВАТА": "DAVINCI  /  CAPTURE CONSOLE",
@@ -135,7 +136,13 @@ export class Topbar {
     const proxyKey = s.proxy
       ? `${s.proxy.live?.state ?? ""}:${firstLive?.pid ?? 0}:${firstLive?.alive ? 1 : 0}:${s.proxy.dll?.present ? 1 : 0}`
       : "";
-    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey, String(admin), proxyKey].join("|");
+    // Осциллограф: состояние, счётчики и включённые каналы — часть ключа,
+    // иначе пилюля обновилась бы только после смены другого статуса.
+    const scopeChannels = s.scope?.channels?.filter((c) => c.enabled).map((c) => c.ch).join(",") ?? "";
+    const scopeKey = s.scope
+      ? `${s.scope.state}:${s.scope.frames}:${s.scope.gaps}:${s.scope.bytes}:${scopeChannels}:${s.scope.last_error ?? ""}`
+      : String(s.scopeSupported);
+    const key = [bridge, hooks, target?.pid ?? 0, s.active?.id ?? "", ws, s.mode, capsKey, String(admin), proxyKey, scopeKey].join("|");
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -203,6 +210,10 @@ export class Topbar {
       chip.addEventListener("click", () => openSettingsDialog());
       this.pills.append(chip);
     }
+
+    // Осциллограф: кнопка «Осциллограф» и статус-пилюля рядом с прокси.
+    // При 404 от движка пилюля не рисуется, кнопка остаётся (диалог объяснит).
+    for (const node of buildScopeControls(() => openScopeDialog())) this.pills.append(node);
   }
 }
 

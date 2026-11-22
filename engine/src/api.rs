@@ -11,7 +11,7 @@ use crate::models::{
     ToolProcess, UsbDevice,
 };
 use crate::store::SessionStore;
-use crate::{decode, import, procscan, report};
+use crate::{decode, import, procscan, report, scope};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -136,6 +136,9 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/prefs", get(prefs_get).post(prefs_set))
+        .route("/scope/config", get(scope_config_get).post(scope_config_set))
+        .route("/scope/status", get(scope_status))
+        .route("/scope/test", post(scope_test))
         .route("/devices", get(devices))
         .route("/tools", get(tools))
         .route("/tools/:pid/detail", get(tool_detail))
@@ -323,32 +326,161 @@ fn prefs_path(st: &AppState) -> PathBuf {
     st.cfg.root.join("prefs.json")
 }
 
-/// Текущий сохранённый язык: `null`, если выбор ещё не делали.
+/// Текущие сохранённые настройки: язык и интеграция с осциллографом.
+///
+/// `lang = null` — выбор ещё не делали. Осциллограф отдаётся всегда (по
+/// умолчанию выключен): интерфейсу нужно знать адрес до первого включения.
 async fn prefs_get(State(st): State<AppState>) -> Json<Value> {
+    let scope_cfg = scope::load_config(&st.cfg.root).sanitized();
     let lang = std::fs::read_to_string(prefs_path(&st))
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|v| v.get("lang").and_then(Value::as_str).map(str::to_string))
         .filter(|l| l == "en" || l == "ru");
-    Json(json!({ "lang": lang }))
+    Json(json!({ "lang": lang, "scope": scope_cfg }))
 }
 
 #[derive(Debug, Deserialize)]
 struct PrefsReq {
-    lang: String,
+    /// Поле необязательное: интерфейс может сохранить только галку осциллографа.
+    #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
+    scope: Option<scope::ScopeConfig>,
 }
 
-/// Сохранить выбранный язык. Ошибка записи не критична для UI, но видна.
+/// Сохранить настройки. Пишем merge: ключи, которых нет в запросе, остаются как
+/// были — иначе смена языка затирала бы адрес осциллографа и наоборот.
 async fn prefs_set(State(st): State<AppState>, Json(req): Json<PrefsReq>) -> ApiResult<Json<Value>> {
-    let lang = match req.lang.as_str() {
-        "en" => "en",
-        "ru" => "ru",
-        other => return Err(AppError::bad(format!("язык: ожидается ru|en, получено {other}"))),
-    };
-    let body = serde_json::to_vec_pretty(&json!({ "lang": lang }))
+    let path = prefs_path(&st);
+    let mut doc: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    if let Some(lang) = req.lang {
+        let lang = match lang.as_str() {
+            "en" => "en",
+            "ru" => "ru",
+            other => return Err(AppError::bad(format!("язык: ожидается ru|en, получено {other}"))),
+        };
+        doc["lang"] = json!(lang);
+    }
+    let mut saved_scope = None;
+    if let Some(cfg) = req.scope {
+        let cfg = cfg.sanitized();
+        if !(cfg.url.starts_with("http://") || cfg.url.starts_with("https://")) {
+            return Err(AppError::bad(
+                "адрес осциллографа: ожидается http://host:port",
+            ));
+        }
+        doc["scope"] = serde_json::to_value(&cfg)
+            .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        saved_scope = Some(cfg);
+    }
+    let body = serde_json::to_vec_pretty(&doc)
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    std::fs::write(prefs_path(&st), body)?;
-    Ok(Json(json!({ "ok": true, "lang": lang })))
+    std::fs::write(&path, body)?;
+    Ok(Json(json!({
+        "ok": true,
+        "lang": doc.get("lang").cloned().unwrap_or(Value::Null),
+        "scope": saved_scope,
+    })))
+}
+
+// ───────────────────────────── осциллограф ──────────────────────────────
+
+async fn scope_config_get(State(st): State<AppState>) -> Json<Value> {
+    let cfg = scope::load_config(&st.cfg.root).sanitized();
+    Json(json!(cfg))
+}
+
+/// Частичное обновление настроек осциллографа.
+///
+/// Интерфейс при переключении галки присылает только `{"enabled":true}`. Если
+/// разбирать это как полный `ScopeConfig`, отсутствующие поля получат значения
+/// по умолчанию и затрут настроенный адрес. Поэтому каждое поле — `Option`, а
+/// недостающие берутся из `prefs.json`.
+#[derive(Debug, Deserialize)]
+struct ScopeConfigPatch {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    interval_ms: Option<u64>,
+    #[serde(default)]
+    width: Option<usize>,
+    #[serde(default)]
+    max_mb: Option<u64>,
+}
+
+async fn scope_config_set(
+    State(st): State<AppState>,
+    Json(req): Json<ScopeConfigPatch>,
+) -> ApiResult<Json<Value>> {
+    let mut cfg = scope::load_config(&st.cfg.root);
+    if let Some(enabled) = req.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(url) = req.url {
+        cfg.url = url.trim().to_string();
+    }
+    if let Some(interval_ms) = req.interval_ms {
+        cfg.interval_ms = interval_ms;
+    }
+    if let Some(width) = req.width {
+        cfg.width = width;
+    }
+    if let Some(max_mb) = req.max_mb {
+        cfg.max_mb = max_mb;
+    }
+    let cfg = cfg.sanitized();
+    if !(cfg.url.starts_with("http://") || cfg.url.starts_with("https://")) {
+        return Err(AppError::bad(
+            "адрес осциллографа: ожидается http://host:port",
+        ));
+    }
+    let saved = scope::save_config(&st.cfg.root, &cfg)?;
+    Ok(Json(json!({ "ok": true, "config": saved })))
+}
+
+async fn scope_status(State(st): State<AppState>) -> Json<scope::Status> {
+    Json(st.capture.scope_status())
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopeTestReq {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Проверка связи: различает «страница отвечает» и «пришёл валидный кадр»
+/// (ТЗ §4.1). Оба запроса — с коротким таймаутом; при недоступной службе ответ
+/// придёт через ~6 с (3 запроса × 2 с), интерфейс показывает «проверяю…».
+async fn scope_test(
+    State(st): State<AppState>,
+    Json(req): Json<ScopeTestReq>,
+) -> ApiResult<Json<scope::Probe>> {
+    let mut cfg = scope::load_config(&st.cfg.root).sanitized();
+    if let Some(url) = req.url {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err(AppError::bad("пустой адрес осциллографа"));
+        }
+        cfg.url = url;
+    }
+    if !(cfg.url.starts_with("http://") || cfg.url.starts_with("https://")) {
+        return Err(AppError::bad(
+            "адрес осциллографа: ожидается http://host:port",
+        ));
+    }
+    let probe = tokio::task::spawn_blocking(move || scope::probe(&cfg))
+        .await
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("поток проверки: {e}")))?;
+    Ok(Json(probe))
 }
 
 async fn health(State(st): State<AppState>) -> Json<Value> {    let sessions = st.store.list().len();

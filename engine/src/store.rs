@@ -596,6 +596,13 @@ impl SessionWriter {
                 self.meta.counts.rx_bytes += payload_len;
             }
             EventKind::File => self.meta.counts.files += 1,
+            // Осциллограф: кадры в счётчиках обмена не участвуют (они не шина).
+            // Число кадров/байт ставит writer из `scope::Counters` — здесь только
+            // отметки, поэтому счётчик не трогаем.
+            EventKind::Scope => {}
+            // Действие пользователя — отдельный счётчик: он нужен в отчёте рядом
+            // с вызовами прокси, но не должен попадать в errors/files.
+            EventKind::UiAction => self.meta.counts.ui_actions += 1,
             EventKind::Error => {
                 // `chan-miss` — не ошибка сессии: канал, открытый мимо
                 // `PassThruConnect`, штатно встречается у приложений, которые

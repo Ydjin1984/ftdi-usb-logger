@@ -1,6 +1,6 @@
 [package]
 name = "ftdi-logger"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
 description = "FTDI/USB logger engine: capture, storage, replay and reporting for Quickflash-family tools"
 default-run = "ftdi-logger"
@@ -44,6 +44,16 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    # UI Automation нужна для семантических событий целевого окна (docs/14):
+    # нажатия кнопок пишутся в журнал сессии, соседние окна отфильтрованы по PID.
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    # GetAsyncKeyState/GetCursorPos для клик-канала: программы на VCL не
+    # поднимают ни Invoke, ни focus, и единственный автоматический источник
+    # действия — клик по кнопке целевого окна (docs/14 §6).
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [dev-dependencies]

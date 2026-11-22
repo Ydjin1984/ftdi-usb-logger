@@ -1,11 +1,25 @@
 /** Диалоги: настройки (J2534/прокси), экспорт/отправка, метки, шаги, шаблоны, справка, светофор. */
 
 import { el, iconButton } from "../dom";
-import { api } from "../api";
+import { api, sessionFileUrl } from "../api";
 import { store } from "../store";
 import { fmtNum } from "../format";
-import type { NewSessionResult, ProxyStatus } from "../types";
+import type {
+  NewSessionResult,
+  ProxyStatus,
+  ScopeStatus,
+  ScopeTestResult,
+} from "../types";
 import { errText, msg, t } from "../i18n";
+import {
+  SCOPE_DEFAULT_URL,
+  buildScopeChannels,
+  fmtSampleRate,
+  normalizeScopeUrl,
+  scopeSessionActive,
+  scopeSettingsLine,
+  scopeStateLabel,
+} from "../scope";
 import {
   proxyDeviceLabel,
   proxyDllDetail,
@@ -178,6 +192,34 @@ msg({
   "перезапустить": "restart",
   "прокси-DLL восстановлена": "the proxy DLL was restored",
   "PCMflash перезапущен": "PCMflash was restarted",
+
+  // Настройки → осциллограф и отдельный диалог.
+  "Использовать осциллограф": "Use the oscilloscope",
+  "события осциллографа и нажатия кнопок программы попадут в поток сессии":
+    "oscilloscope events and button presses from the tool go into the session stream",
+  "восьмиканальный осциллограф: события и нажатия кнопок попадут в поток":
+    "eight-channel oscilloscope: events and button presses go into the stream",
+  "изменения применятся со следующей сессии": "changes apply from the next session",
+  "движок не поддерживает осциллограф": "the engine does not support the oscilloscope",
+  "адрес сервиса": "service address",
+  "например: http://127.0.0.1:7411": "e.g. http://127.0.0.1:7411",
+  "Проверить связь": "Test connection",
+  "Открыть веб-интерфейс": "Open web interface",
+  "открыть кадры": "open frames",
+  "каналы": "channels",
+  "проверяю связь…": "testing the connection…",
+  "связь есть": "connection is up",
+  "связи нет": "no connection",
+  "страница: HTTP {status} · {ms} мс": "page: HTTP {status} · {ms} ms",
+  "кадр #{id} · частота {rate} · блок {n} · {ms} мс":
+    "frame #{id} · rate {rate} · block {n} · {ms} ms",
+  "кадр: нет": "frame: none",
+  "неверный адрес: нужен http://host:port": "invalid address: http://host:port is required",
+  "Настроить…": "Configure…",
+  "Закрыть": "Close",
+  "кадров {n} · пропусков {gaps} · байт {bytes}":
+    "frames {n} · gaps {gaps} · bytes {bytes}",
+  "сессия {id}": "session {id}",
 });
 
 interface ModalOpts {
@@ -700,6 +742,13 @@ export function openSettingsDialog(): void {
   );
   body.append(collectBox);
 
+  // Осциллограф: общий переключатель и вход в отдельный диалог (пункт D).
+  const scopeSection = buildScopeSettingsSection(() => {
+    m.close();
+    openScopeDialog();
+  });
+  body.append(scopeSection.el);
+
   const setBusy = (value: boolean): void => {
     busy = value;
     toggle.disabled = value;
@@ -968,7 +1017,10 @@ export function openSettingsDialog(): void {
     body,
     footer: [primary(t("закрыть"), () => m.close())],
     width: 640,
-    onClose: () => window.clearInterval(timer),
+    onClose: () => {
+      window.clearInterval(timer);
+      scopeSection.dispose();
+    },
   });
   setBusy(false);
   void (async () => {
@@ -985,6 +1037,382 @@ export function openSettingsDialog(): void {
       adapter.disabled = true;
     }
   })();
+}
+
+/* ───────────────────────────── осциллограф ─────────────────────────────── */
+
+/**
+ * Диалог осциллографа: переключатель, адрес сервиса, проверка связи и CH1–CH8.
+ *
+ * Открывается кнопкой в шапке и кнопкой «Настроить…» из настроек. Живое
+ * состояние берётся из store (там опрос раз в 2 с): открытый диалог сам
+ * обновляет каналы и предупреждение, второго таймера нет.
+ */
+export function openScopeDialog(): void {
+  /** Идёт запрос: поля блокируются, чтобы не отправить два конфига подряд. */
+  let busy = false;
+  /** Показывать ли блок результата проверки (после «Проверить связь»). */
+  let testShown = false;
+  /** Последнее отрисованное состояние: подписка store не должна мигать. */
+  let shownStatus: ScopeStatus | null | undefined;
+  let shownSupported: boolean | null | undefined;
+  /** Пользователь правил адрес — фоновое обновление его не перезаписывает. */
+  let urlDirty = false;
+
+  const body = el("div");
+
+  const toggle = el("input") as HTMLInputElement;
+  toggle.type = "checkbox";
+  toggle.id = "scope-enabled";
+  const toggleRow = checkRow(
+    toggle,
+    t("Использовать осциллограф"),
+    t("события осциллографа и нажатия кнопок программы попадут в поток сессии"),
+  );
+  body.append(toggleRow);
+
+  const sessionWarn = el("div", "scope-warn");
+  sessionWarn.hidden = true;
+  sessionWarn.textContent = t("изменения применятся со следующей сессии");
+  body.append(sessionWarn);
+
+  // Старая сборка движка (404): вместо полей — честное объяснение.
+  const unsupported = el("div", "scope-unsupported");
+  unsupported.hidden = true;
+  unsupported.textContent = t("движок не поддерживает осциллограф");
+  body.append(unsupported);
+
+  const liveBox = el("div", "scope-live");
+  liveBox.hidden = true;
+  body.append(liveBox);
+
+  const urlInput = textInput("http://127.0.0.1:7411", store.state.scope?.url || SCOPE_DEFAULT_URL);
+  urlInput.id = "scope-url";
+  const urlField = field(t("адрес сервиса"), urlInput, t("например: http://127.0.0.1:7411"));
+  urlField.classList.add("scope-url");
+  const urlError = el("div", "field__hint scope-error");
+  urlError.hidden = true;
+  body.append(urlField, urlError);
+
+  const testBtn = el("button", "btn btn--sm", t("Проверить связь"));
+  testBtn.type = "button";
+  testBtn.dataset.testid = "scope-test";
+  const webBtn = el("button", "btn btn--sm", t("Открыть веб-интерфейс"));
+  webBtn.type = "button";
+  const framesBtn = el("button", "btn btn--sm", t("открыть кадры"));
+  framesBtn.type = "button";
+  framesBtn.dataset.testid = "scope-frames";
+  framesBtn.hidden = true;
+  const actions = el("div", "scope-actions");
+  actions.append(testBtn, webBtn, framesBtn);
+  body.append(actions);
+
+  const testBox = el("div", "scope-test");
+  testBox.hidden = true;
+  body.append(testBox);
+
+  const channelsTitle = el("div", "field__label", t("каналы"));
+  const channelsHost = el("div", "scope-channels-host");
+  channelsHost.append(buildScopeChannels(store.state.scope?.channels));
+  body.append(channelsTitle, channelsHost);
+
+  const save = primary(t("сохранить"), () => saveConfig());
+  save.dataset.testid = "scope-save";
+  const closeBtn = ghost(t("Закрыть"), () => m.close());
+  closeBtn.dataset.testid = "scope-close";
+
+  function setBusy(value: boolean): void {
+    busy = value;
+    const off = store.state.scopeSupported === false;
+    toggle.disabled = value || off;
+    testBtn.disabled = value;
+    webBtn.disabled = value;
+    save.disabled = value || off;
+  }
+
+  function showUrlError(text: string | null): void {
+    urlError.hidden = !text;
+    urlError.textContent = text ?? "";
+    urlInput.classList.toggle("is-invalid", !!text);
+  }
+
+  /** Живая строка: состояние, кадры, пропуски, байты, частота, ошибка. */
+  function renderLive(st: ScopeStatus): void {
+    const tone =
+      st.state === "recording"
+        ? "ok"
+        : st.state === "connecting"
+          ? "warn"
+          : st.state === "no_link"
+            ? "err"
+            : "";
+    liveBox.className = `scope-live${tone ? ` scope-live--${tone}` : ""}`;
+    const head = el("div", "scope-live__head");
+    head.append(
+      el("span", "scope-live__dot"),
+      el("b", "", scopeStateLabel(st.state)),
+      el(
+        "span",
+        "scope-live__meta",
+        t("кадров {n} · пропусков {gaps} · байт {bytes}", {
+          n: st.frames ?? 0,
+          gaps: st.gaps ?? 0,
+          bytes: st.bytes ?? 0,
+        }),
+      ),
+    );
+    liveBox.replaceChildren(head);
+    const meta = [
+      t("частота: {rate}", { rate: fmtSampleRate(st.sample_rate) }),
+      st.session ? t("сессия {id}", { id: st.session }) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    if (meta) liveBox.append(el("div", "scope-live__meta", meta));
+    if (st.degraded) {
+      liveBox.append(el("div", "scope-live__note", t("деградация: часть кадров не записана")));
+    }
+    if (st.last_error) {
+      liveBox.append(el("div", "scope-live__note scope-error", t("ошибка: {msg}", { msg: st.last_error })));
+    }
+    liveBox.hidden = false;
+  }
+
+  /** Перерисовать всё из store: вызывается и по подписке, и после действий. */
+  function renderStatus(): void {
+    const supported = store.state.scopeSupported;
+    const st = store.state.scope;
+    shownStatus = st;
+    shownSupported = supported;
+    const off = supported === false;
+    unsupported.hidden = !off;
+    toggleRow.hidden = off;
+    urlField.hidden = off;
+    actions.hidden = off;
+    testBox.hidden = off || !testShown;
+    channelsTitle.hidden = off;
+    channelsHost.hidden = off;
+    sessionWarn.hidden = off || !scopeSessionActive(st);
+    // На старом движке сохранять нечего: кнопка в футере не должна обещать действие.
+    save.disabled = off || busy;
+    if (off) {
+      liveBox.hidden = true;
+      return;
+    }
+    toggle.checked = !!st?.enabled;
+    toggle.disabled = busy;
+    if (!urlDirty && st?.url) urlInput.value = st.url;
+    if (st) renderLive(st);
+    else liveBox.hidden = true;
+    channelsHost.replaceChildren(buildScopeChannels(st?.channels));
+    framesBtn.hidden = !st?.session;
+  }
+
+  function renderTest(res: ScopeTestResult): void {
+    testShown = true;
+    testBox.hidden = false;
+    const ok = !!(res.ok && res.page_ok && res.frame_ok);
+    testBox.className = `scope-test ${ok ? "scope-test--ok" : "scope-test--err"}`;
+    const head = el("div", "scope-test__head");
+    head.append(el("span", "scope-test__dot"), el("b", "", ok ? t("связь есть") : t("связи нет")));
+    const rows = el("div", "scope-test__rows");
+    rows.append(
+      el(
+        "div",
+        "",
+        t("страница: HTTP {status} · {ms} мс", {
+          status: res.page_status ?? 0,
+          ms: Math.round(res.page_ms ?? 0),
+        }),
+      ),
+    );
+    if (res.frame) {
+      rows.append(
+        el(
+          "div",
+          "",
+          t("кадр #{id} · частота {rate} · блок {n} · {ms} мс", {
+            id: res.frame.frame_id,
+            rate: fmtSampleRate(res.frame.sample_rate),
+            n: res.frame.n_block,
+            ms: Math.round(res.frame_ms ?? 0),
+          }),
+        ),
+      );
+    } else {
+      rows.append(el("div", "", t("кадр: нет")));
+    }
+    if (res.error) rows.append(el("div", "scope-error", t("ошибка: {msg}", { msg: res.error })));
+    testBox.replaceChildren(head, rows);
+    // Каналы из ответа проверки: список обновляется и без записи сессии.
+    if (res.channels?.length) channelsHost.replaceChildren(buildScopeChannels(res.channels));
+    testBox.dataset.ok = ok ? "1" : "0";
+  }
+
+  function runTest(url: string): void {
+    setBusy(true);
+    testShown = true;
+    testBox.hidden = false;
+    testBox.className = "scope-test";
+    testBox.dataset.ok = "";
+    testBox.replaceChildren(el("div", "muted", t("проверяю связь…")));
+    void api
+      .scopeTest(url)
+      .then((res) => renderTest(res))
+      .catch((e) => {
+        testBox.className = "scope-test scope-test--err";
+        testBox.dataset.ok = "0";
+        testBox.replaceChildren(
+          el("div", "", t("связи нет")),
+          el("div", "scope-error", errText(e)),
+        );
+      })
+      .finally(() => setBusy(false));
+  }
+
+  function saveConfig(): void {
+    if (busy) return;
+    const url = normalizeScopeUrl(urlInput.value);
+    if (!url) {
+      showUrlError(t("неверный адрес: нужен http://host:port"));
+      urlInput.focus();
+      return;
+    }
+    showUrlError(null);
+    setBusy(true);
+    void store.saveScopeConfig({ url, enabled: toggle.checked }).then((ok) => {
+      setBusy(false);
+      if (ok) urlDirty = false;
+      renderStatus();
+    });
+  }
+
+  toggle.addEventListener("change", () => {
+    if (busy) return;
+    const next = toggle.checked;
+    setBusy(true);
+    void store.setScopeEnabled(next).then(() => {
+      setBusy(false);
+      // При отказе состояние вернётся из store, а не останется «нажатым».
+      renderStatus();
+    });
+  });
+
+  urlInput.addEventListener("input", () => {
+    urlDirty = true;
+    if (normalizeScopeUrl(urlInput.value)) showUrlError(null);
+  });
+
+  testBtn.addEventListener("click", () => {
+    if (busy) return;
+    const url = normalizeScopeUrl(urlInput.value);
+    if (!url) {
+      showUrlError(t("неверный адрес: нужен http://host:port"));
+      return;
+    }
+    showUrlError(null);
+    runTest(url);
+  });
+
+  webBtn.addEventListener("click", () => {
+    const url = normalizeScopeUrl(urlInput.value);
+    if (!url) {
+      showUrlError(t("неверный адрес: нужен http://host:port"));
+      return;
+    }
+    window.open(url, "_blank", "noopener");
+  });
+
+  framesBtn.addEventListener("click", () => {
+    const session = store.state.scope?.session;
+    if (!session) return;
+    window.open(sessionFileUrl(session, "scope/frames.jsonl"), "_blank", "noopener");
+  });
+
+  const unsub = store.subscribe(() => {
+    if (busy) return;
+    if (store.state.scope === shownStatus && store.state.scopeSupported === shownSupported) return;
+    renderStatus();
+  });
+
+  const m = modal({
+    title: t("Осциллограф"),
+    body,
+    footer: [save, closeBtn],
+    width: 620,
+    onClose: () => unsub(),
+  });
+  renderStatus();
+  // Свежий статус и адрес: диалог мог открыться между опросами.
+  void store.refreshScope();
+}
+
+/**
+ * Секция «Осциллограф» в настройках: чекбокс, краткий статус, вход в диалог.
+ * Возвращает элемент и отписку — настройки закрываются, подписка не должна жить.
+ */
+function buildScopeSettingsSection(openDialog: () => void): {
+  el: HTMLElement;
+  dispose: () => void;
+} {
+  const box = el("div", "scope-settings");
+  box.append(el("div", "sec__title", t("Осциллограф")));
+
+  const toggle = el("input") as HTMLInputElement;
+  toggle.type = "checkbox";
+  toggle.id = "scope-settings-enabled";
+  const toggleRow = checkRow(
+    toggle,
+    t("Использовать осциллограф"),
+    t("восьмиканальный осциллограф: события и нажатия кнопок попадут в поток"),
+  );
+  box.append(toggleRow);
+
+  const status = el("div", "field__hint");
+  box.append(status);
+
+  const openBtn = el("button", "btn btn--sm", t("Настроить…"));
+  openBtn.type = "button";
+  openBtn.dataset.testid = "scope-configure";
+  openBtn.addEventListener("click", openDialog);
+  const actions = el("div", "scope-actions");
+  actions.append(openBtn);
+  box.append(actions);
+
+  let busy = false;
+  const render = (): void => {
+    const supported = store.state.scopeSupported;
+    const st = store.state.scope;
+    const off = supported === false;
+    if (!busy) {
+      toggle.checked = !!st?.enabled;
+      toggle.disabled = off;
+    }
+    if (off) {
+      status.className = "field__hint scope-error";
+      status.textContent = t("движок не поддерживает осциллограф");
+    } else {
+      status.className = "field__hint";
+      status.textContent = scopeSettingsLine(st);
+    }
+  };
+
+  toggle.addEventListener("change", () => {
+    if (busy) return;
+    busy = true;
+    render();
+    void store.setScopeEnabled(toggle.checked).then(() => {
+      busy = false;
+      render();
+    });
+  });
+
+  const unsub = store.subscribe(render);
+  render();
+  // Открыли настройки — читаем конфиг сразу, не ждём двухсекундного опроса:
+  // чекбокс не должен показывать устаревшее состояние.
+  void store.refreshScope();
+  return { el: box, dispose: unsub };
 }
 
 /* ─────────────────────────────── справка ───────────────────────────────── */

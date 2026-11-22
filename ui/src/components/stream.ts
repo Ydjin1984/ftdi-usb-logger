@@ -65,6 +65,9 @@ const GROUPS: FilterGroup[] = [
   { id: "step", label: "ШАГ", kinds: ["step_start", "step_end"] },
   { id: "file", label: "ФАЙЛ", kinds: ["file", "file_hash"] },
   { id: "sys", label: "SYS", kinds: ["sys", "module", "vcp"] },
+  // Осциллограф: события сервиса и нажатия кнопок целевой программы.
+  { id: "scope", label: "SCOPE", kinds: ["scope"] },
+  { id: "ui", label: "UI", kinds: ["ui_action"] },
   { id: "err", label: "ОШИБКА", kinds: ["error"] },
 ];
 
@@ -343,13 +346,23 @@ export class Stream {
   }
 
   private rowFor(ev: Event): HTMLElement {
-    const row = el("div", `row ${kindClass(ev.kind)}`);
+    const row = el("div", `row ${rowKindClass(ev.kind)}`);
     row.dataset.seq = String(ev.seq);
-    row.append(el("span", "row__t", fmtTime(ev.t)), el("span", "row__kind", kindLabel(ev.kind)));
+    row.append(el("span", "row__t", fmtTime(ev.t)), el("span", "row__kind", rowKindLabel(ev.kind)));
 
     const main = el("div", "row__main");
-    const showApi = ["tx", "rx", "file", "file_hash", "module", "vcp", "error"].includes(ev.kind);
-    const apiText = showApi && ev.api && ev.api !== kindLabel(ev.kind) ? ev.api : "";
+    const showApi = [
+      "tx",
+      "rx",
+      "file",
+      "file_hash",
+      "module",
+      "vcp",
+      "error",
+      "scope",
+      "ui_action",
+    ].includes(ev.kind);
+    const apiText = showApi && ev.api && ev.api !== rowKindLabel(ev.kind) ? ev.api : "";
     const api = el("span", "row__api", apiText);
     const text = el(
       "span",
@@ -368,7 +381,11 @@ export class Stream {
     deltaCell.title = deltaHint();
 
     row.append(main, bytes, deltaCell);
-    row.title = localizeEventText(ev.raw || `${ev.api} ${ev.hex}`.trim());
+    // Подсказка: сырой текст плюс meta новых типов (действие, окно, кадры).
+    const metaHint = scopeMetaHint(ev);
+    row.title = [localizeEventText(ev.raw || `${ev.api} ${ev.hex}`.trim()), metaHint]
+      .filter(Boolean)
+      .join("\n");
     row.addEventListener("click", () => {
       store.selectEvent(ev);
       this.viewport.focus({ preventScroll: true });
@@ -496,4 +513,41 @@ function recordStepShortcut(ev: Event): void {
   if (ev.kind === "step_start" || ev.kind === "step_end") {
     store.selectEvent(ev);
   }
+}
+
+/* ── SCOPE и UI: новые типы событий ─────────────────────────────────────── */
+
+/**
+ * Подпись бейджа. `format.ts` знает только старые kind и вернул бы «RAW»,
+ * поэтому новые типы подписываем здесь, не трогая общий форматер.
+ */
+function rowKindLabel(kind: EventKind): string {
+  if (kind === "scope") return "SCOPE";
+  if (kind === "ui_action") return "UI";
+  return kindLabel(kind);
+}
+
+/** Класс строки: свои цвета для SCOPE/UI, остальные — прежние. */
+function rowKindClass(kind: EventKind): string {
+  if (kind === "scope") return "row--scope";
+  if (kind === "ui_action") return "row--ui";
+  return kindClass(kind);
+}
+
+/**
+ * Скалярные поля meta в подсказку строки: у новых событий нет hex, и без
+ * этого наведение показывало бы только «SCOPE  ».
+ */
+function scopeMetaHint(ev: Event): string {
+  if (ev.kind !== "scope" && ev.kind !== "ui_action") return "";
+  const meta = ev.meta as Record<string, unknown> | null | undefined;
+  if (!meta || typeof meta !== "object") return "";
+  const parts: string[] = [];
+  for (const key of Object.keys(meta)) {
+    const value = meta[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      parts.push(`${key}=${String(value)}`);
+    }
+  }
+  return parts.join(" · ");
 }
