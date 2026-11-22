@@ -334,10 +334,40 @@ pub struct SessionCounts {
     /// Запись перешла в режим «только статистика» из-за лимита объёма.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub scope_degraded: bool,
+    /// Суммарная длительность записанных окон сигнала, с. Кадр — окно блока АЦП
+    /// (обычно 1.66 мс), а не весь интервал опроса: по этой сумме считается
+    /// реальное покрытие, иначе 20 кадров/с выглядят как «непрерывная запись».
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scope_signal_s: f64,
+    /// Типичная длительность окна кадра, мс (медиана по записанным кадрам).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scope_window_ms: f64,
+    /// Интервал между публикациями кадров, мс: медиана, p95 и максимум.
+    /// Это наблюдаемые величины, а не заявленная точность привязки.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scope_interval_p50_ms: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scope_interval_p95_ms: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scope_interval_max_ms: f64,
     /// Действий пользователя, зарегистрированных UI Automation (и ручных меток
     /// с `source=manual` — они попадают в тот же счётчик).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ui_actions: u64,
+    /// Из них подтверждённых нажатий: провайдер поднял `Invoke` или клик-канал
+    /// увидел нажатие кнопки мыши. `focus` без подтверждения сюда не входит:
+    /// переход по Tab — не команда, и отчёт не должен считать его нажатием.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ui_actions_confirmed: u64,
+    /// Из них только фокус (в том числе Tab): событие остаётся в журнале, но
+    /// команда не считается выполненной.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ui_actions_focus: u64,
+    /// Диагностические события, которые не являются ошибками сессии
+    /// (`J2534 chan-miss`, предупреждения трассировки). Держим отдельно, чтобы
+    /// «Ошибок: 0» не скрывало две строки в `events.jsonl`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub diagnostics: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -385,6 +415,11 @@ fn note_author() -> String {
 /// serde: не писать поле, если оно ноль (компактный JSONL для шагов).
 fn is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+/// То же для дробных счётчиков (покрытие, интервалы осциллографа).
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

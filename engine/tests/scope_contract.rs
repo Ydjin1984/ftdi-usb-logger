@@ -268,7 +268,9 @@ fn channels_come_back_in_human_numbering() {
     }
     // Живая служба отдаёт ch 1..8, контракт обещает 0..7: клиент приводит к
     // CH1..CH8 сам, иначе подписи съехали бы на единицу.
-    assert_eq!(channels[0].range, "±20 V");
+    // Подпись диапазона строится по фактической шкале (`range_v`), а не по
+    // строке службы: у CH1/CH2 она «±20 V» при range_v 6 В (docs/14 §2).
+    assert_eq!(channels[0].range, "±6 V");
     assert_eq!(channels[0].range_id, 3);
     assert_eq!(channels[0].full_scale_v, 6.0);
     assert_eq!(channels[0].freq, Some(1000.0));

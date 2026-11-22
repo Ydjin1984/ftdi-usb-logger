@@ -48,8 +48,21 @@ pub struct ActionEvent {
     pub window: String,
     pub process: String,
     pub pid: u32,
-    /// `"invoke"` — провайдер поднял Invoke; `"focus"` — резервный канал (смена фокуса).
+    /// `"invoke"` — провайдер поднял Invoke; `"focus"` — резервный канал (смена фокуса);
+    /// `"click"` — клик-канал увидел нажатие кнопки мыши над элементом.
     pub event: String,
+    /// Чем действие **подтверждено**: `"invoke"`, `"click"` или `""` (только фокус).
+    ///
+    /// `focus` — это ещё не нажатие: фокус приходит и при переходе по Tab, и при
+    /// возврате фокуса в окно после закрытия диалога. Раньше журнал показывал все
+    /// такие события как «нажата кнопка», и отметка «Сохранить» появлялась позже
+    /// фактической записи файла. Теперь вид канала хранится отдельно, а команда
+    /// считается выполненной только при `confirmed=true`.
+    #[serde(default)]
+    pub activation: String,
+    /// `true` — нажатие подтверждено (`invoke`/`click`); `false` — только фокус.
+    #[serde(default)]
+    pub confirmed: bool,
     pub source: String,
     pub action: String,
     pub x: i32,
@@ -133,6 +146,20 @@ pub fn dedupe_key(e: &ActionEvent) -> String {
         collapse(&e.automation_id),
         collapse(&e.control_type),
         collapse(&e.event)
+    )
+}
+
+/// Ключ элемента без вида события: `name|automation_id|control_type`.
+///
+/// Один клик по кнопке VCL приходит двумя записями — `focus` от UIA и `click`
+/// от клик-канала. Ключ позволяет считать их одним действием при разборе, не
+/// теряя ни одну запись в журнале.
+pub fn element_key(e: &ActionEvent) -> String {
+    format!(
+        "{}|{}|{}",
+        collapse(&e.name),
+        collapse(&e.automation_id),
+        collapse(&e.control_type)
     )
 }
 
@@ -235,7 +262,7 @@ mod platform {
         GA_ROOT, GWL_STYLE, WS_OVERLAPPEDWINDOW,
     };
 
-    use super::{classify, collapse, ActionEvent, Availability, Deduper};
+    use super::{classify, element_key, ActionEvent, Availability, Deduper};
 
     /// Предел обхода дерева при разовом подсчёте: `FindAll` по всему поддереву большого
     /// приложения — это сотни cross-process вызовов, а для индикатора «есть ли кнопки»
@@ -642,6 +669,8 @@ mod platform {
                 process: self.shared.process.clone(),
                 pid: self.shared.pid,
                 event: event.to_string(),
+                activation: event.to_string(),
+                confirmed: event == "invoke",
                 source: "uia".to_string(),
                 action: action.to_string(),
                 x,
@@ -655,12 +684,7 @@ mod platform {
             // ключ подавления склеивает их — имя, AutomationId и тип элемента,
             // без вида события. Публичный `dedupe_key` вид события различает
             // (нужен для диагностики), здесь — пара.
-            let pair = format!(
-                "{}|{}|{}",
-                collapse(&ev.name),
-                collapse(&ev.automation_id),
-                collapse(&ev.control_type)
-            );
+            let pair = super::element_key(&ev);
             if !self.dedup.lock().accept(&pair) {
                 debug!(pid = self.shared.pid, event, name, "дубль события UIA подавлен");
                 return;
@@ -1024,12 +1048,7 @@ mod platform {
             if down && !was_down {
                 was_down = true;
                 if let Some(ev) = click_event(&uia, pid, &process) {
-                    let pair = format!(
-                        "{}|{}|{}",
-                        collapse(&ev.name),
-                        collapse(&ev.automation_id),
-                        collapse(&ev.control_type)
-                    );
+                    let pair = element_key(&ev);
                     if dedup.accept(&pair) && tx.blocking_send(ev).is_err() {
                         break;
                     }
@@ -1102,6 +1121,8 @@ mod platform {
             process: process.to_string(),
             pid,
             event: "click".to_string(),
+            activation: "click".to_string(),
+            confirmed: true,
             source: "uia_click".to_string(),
             action: classify(&name).to_string(),
             x,

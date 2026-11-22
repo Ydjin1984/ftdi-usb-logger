@@ -67,6 +67,19 @@ export interface SessionCounts {
   j2534_layers?: string[];
   /** Модули J2534, которые открывались (для старых логов без разметки). */
   j2534_modules?: string[];
+  /** Диагностические события (не ошибки): `chan-miss`, предупреждения. */
+  diagnostics?: number;
+  /** Суммарная длительность записанных окон сигнала, с (покрытие). */
+  scope_signal_s?: number;
+  /** Средняя длительность окна кадра, мс. */
+  scope_window_ms?: number;
+  /** Наблюдаемые интервалы публикаций кадров, мс. */
+  scope_interval_p50_ms?: number;
+  scope_interval_p95_ms?: number;
+  scope_interval_max_ms?: number;
+  /** Действия пользователя: всего / подтверждённые / только фокус. */
+  ui_actions_confirmed?: number;
+  ui_actions_focus?: number;
 }
 
 export interface AdapterInfo {

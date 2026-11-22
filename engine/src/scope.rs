@@ -48,6 +48,9 @@ const STOP_SLICE: Duration = Duration::from_millis(50);
 /// (3 канала), и 499 (8 каналов), поэтому первый же кадр пишется точными
 /// отсчётами, а не огибающей.
 const AUTO_WIDTH: usize = 1200;
+/// Сколько интервалов публикаций держим для медианы/p95. 50 000 — это больше
+/// двух часов при 6.5 кадрах/с; дальше храним только максимум.
+const INTERVALS_CAP: usize = 50_000;
 
 const META_FORMAT: &str = "scope-session/1";
 const FRAME_FORMAT: &str = "scope-frame/1";
@@ -304,6 +307,16 @@ pub struct Counters {
     pub last_frame_id: Option<u64>,
     pub t_first: Option<f64>,
     pub t_last: Option<f64>,
+    /// Суммарная длительность окон сигнала, с: кадр — окно блока АЦП (1.66 мс),
+    /// а не интервал опроса. По этой сумме считается реальное покрытие.
+    pub window_s_sum: f64,
+    /// Сколько кадров дало вклад в `window_s_sum` (для среднего окна).
+    pub window_count: u64,
+    /// Интервалы между публикациями кадров, мс: медиана/p95/максимум. Это
+    /// наблюдаемые величины; точность привязки к фронту ими не измеряется.
+    pub interval_p50_ms: f64,
+    pub interval_p95_ms: f64,
+    pub interval_max_ms: f64,
 }
 
 /// Что произошло с кадром при записи.
@@ -1235,6 +1248,14 @@ struct SummaryLine<'a> {
     last_frame_id: Option<u64>,
     t_first: Option<f64>,
     t_last: Option<f64>,
+    /// Суммарная длительность записанных окон сигнала, с, и средняя длина окна.
+    signal_s: f64,
+    window_ms: f64,
+    /// Наблюдаемые интервалы публикаций, мс. Не «точность»: по ним видно, как
+    /// часто кадр реально приходил (в разборе 0.5.0 — медиана 52 мс, максимум 597).
+    interval_p50_ms: f64,
+    interval_p95_ms: f64,
+    interval_max_ms: f64,
     /// Сегмент записи: сколько раз служба перезапускалась за сессию.
     segment: u32,
     /// Последняя ошибка записи (диск/сериализация), если была.
@@ -1338,6 +1359,18 @@ pub struct Recorder {
     repeats: u64,
     t_first: Option<f64>,
     t_last: Option<f64>,
+    /// Суммарная длительность окон и число кадров: покрытие сигнала, а не
+    /// длительность сессии. Кадр — 1.66 мс окна, поэтому 20 кадров/с дают ~3 %.
+    window_sum: f64,
+    window_count: u64,
+    /// Интервалы публикаций, мс: копим для медианы/p95. Предел — чтобы часовая
+    /// запись не держала в памяти миллионы чисел; хвост распределения всё равно
+    /// виден по `interval_max`.
+    intervals: Vec<f64>,
+    interval_max: f64,
+    /// Медиана и p95, посчитанные в `finish()` (в живых счётчиках — 0).
+    p50: f64,
+    p95: f64,
     /// Последняя ошибка записи (диск/сериализация) — попадает в `summary.json`.
     last_error: Option<String>,
 }
@@ -1410,6 +1443,12 @@ impl Recorder {
             repeats: 0,
             t_first: None,
             t_last: None,
+            window_sum: 0.0,
+            window_count: 0,
+            intervals: Vec::new(),
+            interval_max: 0.0,
+            p50: 0.0,
+            p95: 0.0,
             last_error: None,
         })
     }
@@ -1547,6 +1586,19 @@ impl Recorder {
         self.bytes = self.bytes.saturating_add(line_bytes);
         self.n_frames = self.n_frames.saturating_add(1);
         self.n_lines = self.n_lines.saturating_add(1);
+        if let Some(prev) = self.t_last {
+            let dt_ms = (t - prev) * 1000.0;
+            if dt_ms > 0.0 {
+                self.interval_max = self.interval_max.max(dt_ms);
+                if self.intervals.len() < INTERVALS_CAP {
+                    self.intervals.push(dt_ms);
+                }
+            }
+        }
+        if frame.window_s > 0.0 {
+            self.window_sum += frame.window_s;
+            self.window_count = self.window_count.saturating_add(1);
+        }
         if first {
             self.t_first = Some(t);
         }
@@ -1603,6 +1655,11 @@ impl Recorder {
             last_frame_id: self.last_frame_id,
             t_first: self.t_first,
             t_last: self.t_last,
+            window_s_sum: self.window_sum,
+            window_count: self.window_count,
+            interval_p50_ms: self.p50,
+            interval_p95_ms: self.p95,
+            interval_max_ms: self.interval_max,
         }
     }
 
@@ -1622,8 +1679,21 @@ impl Recorder {
         if self.errors > 0 {
             notes.push(format!("ошибок записи: {}", self.errors));
         }
+        // Медиана/p95 считаются здесь, а не на каждом кадре: живой статус в них
+        // не нуждается, а сортировка десятков тысяч чисел на кадр — лишняя работа.
+        if !self.intervals.is_empty() {
+            let mut sorted = self.intervals.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            self.p50 = percentile(&sorted, 0.50);
+            self.p95 = percentile(&sorted, 0.95);
+        }
         let stopped_at = now_rfc3339();
         let counters = self.counters();
+        let window_ms = if counters.window_count > 0 {
+            counters.window_s_sum / counters.window_count as f64 * 1000.0
+        } else {
+            0.0
+        };
         let summary = SummaryLine {
             format: SUMMARY_FORMAT,
             stopped_at: &stopped_at,
@@ -1637,6 +1707,11 @@ impl Recorder {
             last_frame_id: counters.last_frame_id,
             t_first: counters.t_first,
             t_last: counters.t_last,
+            signal_s: counters.window_s_sum,
+            window_ms,
+            interval_p50_ms: counters.interval_p50_ms,
+            interval_p95_ms: counters.interval_p95_ms,
+            interval_max_ms: counters.interval_max_ms,
             segment: self.segment,
             last_error: self.last_error.as_deref(),
             notes: &notes,
@@ -1837,6 +1912,15 @@ pub fn status_shell(cfg: &ScopeConfig) -> Status {
 }
 
 // ─────────────────────────────── тесты ──────────────────────────────────
+
+/// Квантиль по уже отсортированному ряду (ближайший ранг).
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
 
 #[cfg(test)]
 mod tests {
@@ -2383,6 +2467,15 @@ mod tests {
         assert_eq!(summary["t_first"], json!(1.0));
         assert_eq!(summary["t_last"], json!(2.0));
         assert_eq!(summary["t_stop"], json!(9.5));
+        // Покрытие: два окна по 1.666 мс, интервал публикаций 1 с. Без этих
+        // полей «2 кадра» читались бы как записанные 9.5 с сигнала.
+        assert!((summary["signal_s"].as_f64().unwrap() - 0.003_332).abs() < 1e-9);
+        assert!((summary["window_ms"].as_f64().unwrap() - 1.666).abs() < 1e-6);
+        assert!((summary["interval_p50_ms"].as_f64().unwrap() - 1000.0).abs() < 1e-6);
+        assert!((summary["interval_p95_ms"].as_f64().unwrap() - 1000.0).abs() < 1e-6);
+        assert!((summary["interval_max_ms"].as_f64().unwrap() - 1000.0).abs() < 1e-6);
+        assert!((counters.window_s_sum - 0.003_332).abs() < 1e-9);
+        assert_eq!(counters.window_count, 2);
         let stopped = summary["stopped_at"].as_str().unwrap();
         assert!(stopped.ends_with('Z'));
         // bytes в сводке — это реальный размер frames.jsonl.
@@ -2392,6 +2485,52 @@ mod tests {
         assert_eq!(summary["bytes"], json!(file_len));
         assert_eq!(counters.bytes, file_len);
         assert!(summary["notes"].is_array());
+    }
+
+    #[test]
+    fn recorder_keeps_all_eight_channels() {
+        // Стенд с тремя щупами не доказывает, что восемь каналов не потеряются:
+        // проверяем запись кадра со всеми CH1..CH8 и паспорт каналов.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ScopeConfig {
+            enabled: true,
+            width: 500,
+            ..ScopeConfig::default()
+        };
+        let mut rec = Recorder::open(dir.path(), &cfg, "sess-8").unwrap();
+        let mut frame = frame_with(1, "AAAA");
+        frame.channels = (1..=8).collect();
+        frame.channel_meta = (1..=8)
+            .map(|ch| ChannelInfo {
+                ch,
+                raw_ch: ch - 1,
+                enabled: true,
+                range: if ch <= 2 { "±6 V" } else { "±20 V" }.to_string(),
+                range_id: if ch <= 2 { 3 } else { 7 },
+                full_scale_v: if ch <= 2 { 6.0 } else { 20.0 },
+                center_v: 0.0,
+                min: Some(-0.1),
+                max: Some(0.1),
+                pp: Some(0.2),
+                freq: None,
+                duty: None,
+                aliased: false,
+                saturated: false,
+                dropouts: 0,
+                peak_min: Some(-0.2),
+                peak_max: Some(0.2),
+            })
+            .collect();
+        frame.stats = Vec::new();
+        assert!(matches!(rec.accept(1.0, "2026-01-01T00:00:01.000Z", &frame), Accept::Frame { .. }));
+        rec.finish(2.0);
+
+        let raw = fs::read_to_string(dir.path().join("scope").join("frames.jsonl")).unwrap();
+        let line: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(line["channels"].as_array().unwrap().len(), 8);
+        assert_eq!(line["channel_meta"].as_array().unwrap().len(), 8);
+        assert_eq!(line["channel_meta"][7]["ch"], json!(8));
+        assert_eq!(line["channel_meta"][7]["range"], json!("±20 V"));
     }
 
     #[test]

@@ -116,6 +116,9 @@ msg({
   "демо-режим: осциллограф недоступен": "demo mode: the oscilloscope is unavailable",
   "движок не поддерживает осциллограф": "the engine does not support the oscilloscope",
   "осциллограф: {msg}": "oscilloscope: {msg}",
+  "нажатие (клик)": "press (click)",
+  "нажатие (Invoke)": "press (Invoke)",
+  "фокус (не подтверждено)": "focus (not confirmed)",
 });
 
 /**
@@ -180,6 +183,8 @@ class Store {
   private scopeTimer: number | null = null;
   private scopeInFlight = false;
   private scopeVisibilityBound = false;
+  /** Кэш хронологического порядка: `src` — массив событий, `out` — тот же или отсортированный. */
+  private orderCache: { src: Event[]; out: Event[] } | null = null;
 
   constructor() {
     const demo = isDemoMode();
@@ -734,8 +739,32 @@ class Store {
     return out.toLowerCase();
   }
 
+  /**
+   * События в порядке времени, а не прихода.
+   *
+   * `seq` — порядок поступления: мост шлёт пачки, и поздняя пачка может нести
+   * события более раннего `t` (буферизация Frida/прокси). Показывать их в
+   * порядке `seq` — значит рисовать таймлайн, где время идёт назад; поэтому
+   * список сортируется по `(t, seq)`, а `seq` остаётся идентификатором записи.
+   * Сортировка кэшируется по ссылке массива: пересчёт — один раз на батч.
+   */
+  private orderedEvents(): Event[] {
+    const src = this.state.events;
+    if (this.orderCache && this.orderCache.src === src) return this.orderCache.out;
+    let out = src;
+    for (let i = 1; i < src.length; i++) {
+      if (src[i].t < src[i - 1].t) {
+        out = [...src].sort((a, b) => a.t - b.t || a.seq - b.seq);
+        break;
+      }
+    }
+    this.orderCache = { src, out };
+    return out;
+  }
+
   visibleEvents(): Event[] {
-    const { events, filters, query } = this.state;
+    const { filters, query } = this.state;
+    const events = this.orderedEvents();
     const q = query.trim().toLowerCase();
     if (q) {
       return events.filter(

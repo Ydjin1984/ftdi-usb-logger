@@ -602,7 +602,22 @@ impl SessionWriter {
             EventKind::Scope => {}
             // Действие пользователя — отдельный счётчик: он нужен в отчёте рядом
             // с вызовами прокси, но не должен попадать в errors/files.
-            EventKind::UiAction => self.meta.counts.ui_actions += 1,
+            // `focus` без подтверждения (Tab, возврат фокуса) остаётся в журнале,
+            // но нажатием не считается — иначе отчёт показывал бы команды,
+            // которых оператор не выполнял.
+            EventKind::UiAction => {
+                self.meta.counts.ui_actions += 1;
+                if ev
+                    .meta
+                    .get("confirmed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    self.meta.counts.ui_actions_confirmed += 1;
+                } else {
+                    self.meta.counts.ui_actions_focus += 1;
+                }
+            }
             EventKind::Error => {
                 // `chan-miss` — не ошибка сессии: канал, открытый мимо
                 // `PassThruConnect`, штатно встречается у приложений, которые
@@ -610,6 +625,10 @@ impl SessionWriter {
                 // DLL, хуки свежие, все вызовы rc=0). Держим отдельным счётчиком.
                 if ev.api == "J2534 chan-miss" {
                     self.meta.counts.untracked_channels += 1;
+                    // Диагностика — не ошибка, но и не тишина: в отчёте она
+                    // отдельной строкой, чтобы «Ошибок: 0» не скрывало запись,
+                    // которая всё-таки есть в events.jsonl.
+                    self.meta.counts.diagnostics += 1;
                 } else if inner {
                     // Внутренняя копия ошибки того же вызова: строка остаётся
                     // в логе, но второй раз ошибку не считаем (docs/13 §6.2).

@@ -238,6 +238,14 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
             meta.counts.untracked_channels
         ));
     }
+    // «Ошибок: 0» при непустом events.jsonl — вопрос без ответа. Диагностика
+    // (chan-miss и подобные) идёт отдельной строкой и в ошибки не входит.
+    if meta.counts.diagnostics > 0 {
+        out.push_str(&format!(
+            "  диагностика: {} событий (не ошибки) — подробности в events.jsonl, kind=error\n",
+            meta.counts.diagnostics
+        ));
+    }
     out.push_str(&layers_text(meta));
     // Вендорские вызовы: без них не видно, что конфигурация GPT вообще снята.
     if meta.counts.vendor_calls > 0 {
@@ -537,20 +545,42 @@ fn layers_text(meta: &SessionMeta) -> String {
     {
         return String::new();
     }
-    let mut out = format!(
-        "  слои J2534: {}; внутренних записей {}, из них TX {} / RX {} ({} B) — в счётчиках не учтены\n",
-        layers_label(meta),
-        meta.counts.inner_events,
-        meta.counts.inner_tx,
-        meta.counts.inner_rx,
-        meta.counts.inner_bytes
-    );
-    if two_layers(meta) && meta.counts.inner_events == 0 {
+    let c = &meta.counts;
+    let mut out = format!("  слои J2534: {}\n", layers_label(meta));
+    // Прямой ответ на вопрос «почему в журнале RX вдвое больше, чем в сводке»:
+    // каждый кадр виден дважды (прокси и драйвер под ним), но в сводку входит
+    // только внешний слой — иначе трафик удваивался (docs/13 §6.2).
+    out.push_str(&format!(
+        "  кадры обмена в сводке: TX {} / RX {}\n",
+        c.tx, c.rx
+    ));
+    if c.inner_events > 0 {
+        out.push_str(&format!(
+            "  записи в events.jsonl: TX {} / RX {} — из них внутренний слой TX {} / RX {} ({} B), байты в сводке считаются один раз\n",
+            c.tx + c.inner_tx,
+            c.rx + c.inner_rx,
+            c.inner_tx,
+            c.inner_rx,
+            c.inner_bytes
+        ));
+    }
+    if two_layers(meta) && c.inner_events == 0 {
         out.push_str(
             "  ВНИМАНИЕ: два слоя без связи вызовов (старый агент) — сводка может быть удвоена\n",
         );
     }
     out
+}
+
+/// Длительность сессии по стенным часам, с. `None` — метки не разобрались.
+fn session_span_s(meta: &SessionMeta) -> Option<f64> {
+    let start = chrono::DateTime::parse_from_rfc3339(&meta.started_at).ok()?;
+    let end = match meta.ended_at.as_deref() {
+        Some(text) => chrono::DateTime::parse_from_rfc3339(text).ok()?,
+        None => return None,
+    };
+    let span = (end - start).num_milliseconds() as f64 / 1000.0;
+    (span > 0.0).then_some(span)
 }
 
 /// Строки раздела «Осциллограф»: только когда запись действительно была.
@@ -564,16 +594,56 @@ fn scope_lines(meta: &SessionMeta) -> Vec<String> {
         return Vec::new();
     }
     let mb = c.scope_bytes as f64 / (1024.0 * 1024.0);
-    let mut out = vec![
+    let mut out = vec![format!(
+        "Осциллограф: кадров {}, {:.1} МБ, окно кадра ~{:.2} мс",
+        c.scope_frames, mb, c.scope_window_ms
+    )];
+    // Покрытие — главная честная цифра: кадр это окно 1.66 мс, а не интервал
+    // опроса. Без неё «20 кадров/с» читается как непрерывная запись.
+    if c.scope_signal_s > 0.0 {
+        match session_span_s(meta) {
+            Some(span) if span > 0.0 => out.push(format!(
+                "  покрытие сигнала: {:.2} с из {:.2} с сессии ({:.1} %); между кадрами сигнал не наблюдался",
+                c.scope_signal_s,
+                span,
+                c.scope_signal_s / span * 100.0
+            )),
+            _ => out.push(format!(
+                "  покрытие сигнала: {:.2} с записанных окон (длительность сессии неизвестна)",
+                c.scope_signal_s
+            )),
+        }
+    }
+    if c.scope_interval_max_ms > 0.0 {
+        out.push(format!(
+            "  публикации кадров: медиана {:.0} мс, p95 {:.0} мс, максимум {:.0} мс",
+            c.scope_interval_p50_ms, c.scope_interval_p95_ms, c.scope_interval_max_ms
+        ));
+    }
+    if c.scope_gaps > 0 {
+        out.push(format!(
+            "  разрывы нумерации публикаций: {} ({} блоков) — это недополученные публикации, а не пропуск сигнала",
+            c.scope_gaps, c.scope_gap_blocks
+        ));
+    }
+    let actions = if c.ui_actions_confirmed + c.ui_actions_focus > 0 {
         format!(
-            "Осциллограф: кадров {}, {:.1} МБ, пропусков {} ({} блоков)",
-            c.scope_frames, mb, c.scope_gaps, c.scope_gap_blocks
-        ),
-        format!("Действий пользователя (UI Automation): {}", c.ui_actions),
-        "Файлы: scope/frames.jsonl · scope/meta.json · scope/summary.json".to_string(),
-        "Время кадра — время приёма на логгере: часов источника нет, точность ±интервал опроса".to_string(),
-        "Кадр — окно блока АЦП; столбец samples = один отсчёт, envelope = min/max (пики сохранены), пустой столбец lo>hi".to_string(),
-    ];
+            "Действий пользователя: {} (подтверждено {}, только фокус {})",
+            c.ui_actions, c.ui_actions_confirmed, c.ui_actions_focus
+        )
+    } else {
+        format!("Действий пользователя: {}", c.ui_actions)
+    };
+    out.push(actions);
+    out.push("Файлы: scope/frames.jsonl · scope/meta.json · scope/summary.json".to_string());
+    out.push(
+        "Время кадра — время приёма на логгере (часов источника нет); точность привязки не измерялась, интервал опроса — не погрешность"
+            .to_string(),
+    );
+    out.push(
+        "Кадр — окно блока АЦП; столбец samples = один отсчёт, envelope = min/max (пики сохранены), пустой столбец lo>hi"
+            .to_string(),
+    );
     if c.scope_degraded {
         out.push(
             "ВНИМАНИЕ: запись шла в режиме только статистики (лимит объёма) — отсчётов в этих строках нет"
@@ -680,6 +750,10 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
             ("TX, байт".into(), meta.counts.tx_bytes.to_string()),
             ("RX, байт".into(), meta.counts.rx_bytes.to_string()),
             ("Ошибок".into(), meta.counts.errors.to_string()),
+            (
+                "Диагностика (не ошибки)".into(),
+                meta.counts.diagnostics.to_string(),
+            ),
             (
                 "Холостых опросов".into(),
                 meta.counts.empty_polls.to_string(),
@@ -1009,13 +1083,23 @@ fn csv_field(value: &str) -> String {
 }
 
 /// CSV: `seq,t,wall,kind,api,dir,len,hex,step`.
+///
+/// Строки идут по времени события, а не по `seq`: пачка моста может прийти
+/// позже, неся более ранние `t`, и в файле для разбора время не должно идти
+/// назад. `seq` остаётся столбцом — по нему виден порядок поступления.
 pub fn export_csv(events: &[Event], out: &Path) -> anyhow::Result<()> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut rows: Vec<&Event> = events.iter().collect();
+    rows.sort_by(|a, b| {
+        a.t.partial_cmp(&b.t)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.seq.cmp(&b.seq))
+    });
     let mut text = String::with_capacity(events.len() * 96 + 64);
     text.push_str("seq,t,wall,kind,api,dir,len,hex,step\n");
-    for ev in events {
+    for ev in rows {
         text.push_str(&format!(
             "{},{:.3},{},{},{},{},{},{},{}\n",
             ev.seq,

@@ -364,13 +364,17 @@ export class Stream {
     ].includes(ev.kind);
     const apiText = showApi && ev.api && ev.api !== rowKindLabel(ev.kind) ? ev.api : "";
     const api = el("span", "row__api", apiText);
-    const text = el(
-      "span",
-      "row__text",
+    let preview =
       ev.kind === "step_start" || ev.kind === "step_end"
         ? `${ev.step ? t("ШАГ {n} · ", { n: ev.step }) : ""}${eventPreview(ev)}`
-        : eventPreview(ev),
-    );
+        : eventPreview(ev);
+    // Фокус — не нажатие: Tab и возврат фокуса в окно дают такое же событие.
+    // Показываем вид канала рядом с именем, чтобы журнал не выдавал фокус за
+    // выполненную команду (docs/14 §6).
+    if (ev.kind === "ui_action") {
+      preview += ` · ${actionLabel(ev)}`;
+    }
+    const text = el("span", "row__text", preview);
     main.append(api, text);
 
     const bytes = el("span", "row__bytes", ev.len ? fmtBytes(ev.len) : "");
@@ -532,6 +536,22 @@ function rowKindClass(kind: EventKind): string {
   if (kind === "scope") return "row--scope";
   if (kind === "ui_action") return "row--ui";
   return kindClass(kind);
+}
+
+/**
+ * Подпись действия: чем подтверждено нажатие.
+ *
+ * `confirmed` ставит движок: `invoke` от провайдера или клик-канал (нажатие
+ * кнопки мыши). `focus` без подтверждения — переход по Tab, возврат фокуса
+ * после диалога и т.п.; команда при этом не считается выполненной.
+ */
+function actionLabel(ev: Event): string {
+  const meta = ev.meta as Record<string, unknown> | null | undefined;
+  const activation = typeof meta?.activation === "string" ? meta.activation : "";
+  if (meta?.confirmed === true) {
+    return activation === "click" ? t("нажатие (клик)") : t("нажатие (Invoke)");
+  }
+  return t("фокус (не подтверждено)");
 }
 
 /**

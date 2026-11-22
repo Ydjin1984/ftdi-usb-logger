@@ -1245,6 +1245,60 @@ struct SessionWriterTask {
     uia_task: Option<std::thread::JoinHandle<()>>,
     /// Клик-канал: нужен программам без Invoke-провайдера (Delphi/VCL).
     uia_click_task: Option<std::thread::JoinHandle<()>>,
+    /// Часы строк моста: `[+t.s]` в логе прокси идёт от старта агента, а не от
+    /// старта сессии. Без пересчёта в `events.jsonl` попадали два разных времени,
+    /// и `t` шла назад (в разборе 0.5.0 — 45 переходов, до 33.9 с).
+    line_clock: Option<LineClock>,
+    /// UTC-эпоха старта сессии (`meta.started_at`) — общий якорь для всех часов.
+    session_epoch: f64,
+}
+
+/// Пересчёт часов строк моста в часы сессии.
+///
+/// `offset` прибавляется к `[+t]` из строки; `last_raw` — последнее исходное
+/// значение, по нему ловится перезапуск агента (t снова начинается с нуля).
+#[derive(Debug, Clone, Copy)]
+struct LineClock {
+    offset: f64,
+    last_raw: f64,
+}
+
+/// Перевести `[+t]` строки моста в часы сессии, обновив якорь.
+///
+/// Вынесено из писателя, чтобы проверить пересчёт без запуска сессии.
+fn map_line_clock(
+    clock: &mut Option<LineClock>,
+    raw_t: f64,
+    wall_epoch: f64,
+    session_epoch: f64,
+) -> f64 {
+    let rel_wall = (wall_epoch - session_epoch).max(0.0);
+    let next = match *clock {
+        None => LineClock {
+            offset: rel_wall - raw_t,
+            last_raw: raw_t,
+        },
+        Some(mut current) if raw_t + 0.5 < current.last_raw => {
+            // Агент перезапустился: его t снова с нуля. Новый якорь — по
+            // стенным часам этой строки, а не по разнице с прошлой шкалой.
+            current.offset = rel_wall - raw_t;
+            current.last_raw = raw_t;
+            current
+        }
+        Some(mut current) => {
+            current.last_raw = current.last_raw.max(raw_t);
+            current
+        }
+    };
+    *clock = Some(next);
+    (raw_t + next.offset).max(0.0)
+}
+
+/// RFC3339 → секунды UTC-эпохи (дробные). `None` — строка не разобралась.
+fn rfc3339_epoch(text: &str) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as f64 / 1000.0)
 }
 
 impl SessionWriterTask {
@@ -1263,6 +1317,10 @@ impl SessionWriterTask {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs_f64())
             .unwrap_or(0.0);
+        // Якорь сессии — её собственные стенные часы: по ним пересчитываются
+        // строки моста (`[+t]` прокси начинается с нуля при загрузке DLL и не
+        // совпадает с `t0` логгера).
+        let session_epoch = rfc3339_epoch(&meta.started_at).unwrap_or(raw_t0_epoch);
         Self {
             cfg,
             bus,
@@ -1307,6 +1365,8 @@ impl SessionWriterTask {
             uia_stop: None,
             uia_task: None,
             uia_click_task: None,
+            line_clock: None,
+            session_epoch,
         }
     }
 
@@ -1404,9 +1464,11 @@ impl SessionWriterTask {
                 tracing::warn!("событие проверки UIA не записано: {err}");
             }
             // Семантические события (Invoke/focus) — если окно нашлось. Клик-канал
-            // включаем, когда Invoke-провайдера нет или проверка не удалась:
-            // Delphi/VCL (PCMflash) отдаёт кнопки как Pane без InvokePattern, и
-            // без него автоматическая регистрация невозможна (docs/14 §6).
+            // работает всегда, когда есть UIA: `InvokePattern` у кнопки ещё не
+            // значит, что провайдер поднимет `Invoke` (PCMflash/VCL: 24 кнопки с
+            // InvokePattern, а в журнал пришёл только `focus`). Клик-канал даёт
+            // подтверждение настоящего нажатия мышью, поэтому не выключаем его,
+            // когда Invoke «есть»: иначе фокус остаётся недоказанным.
             let (tx, rx) = mpsc::channel(64);
             let stop = Arc::new(AtomicBool::new(false));
             let mut spawned = false;
@@ -1416,11 +1478,9 @@ impl SessionWriterTask {
                     spawned = true;
                 }
             }
-            if !avail.ok || avail.invokable == 0 {
-                if let Some(handle) = uiactions::spawn_click_watch(self.pid, tx, stop.clone()) {
-                    self.uia_click_task = Some(handle);
-                    spawned = true;
-                }
+            if let Some(handle) = uiactions::spawn_click_watch(self.pid, tx, stop.clone()) {
+                self.uia_click_task = Some(handle);
+                spawned = true;
             }
             if spawned {
                 self.uia_stop = Some(stop);
@@ -1547,6 +1607,18 @@ impl SessionWriterTask {
                     counts.scope_gaps = counters.gaps;
                     counts.scope_gap_blocks = counters.gap_blocks;
                     counts.scope_degraded = counters.degraded;
+                    // Реальное покрытие: сумма окон кадров, а не интервал опроса.
+                    // Раньше отчёт показывал только «кадров N, пропусков M», и
+                    // 20 кадров/с по 1.66 мс выглядели как непрерывная запись.
+                    counts.scope_signal_s = counters.window_s_sum;
+                    counts.scope_window_ms = if counters.window_count > 0 {
+                        counters.window_s_sum / counters.window_count as f64 * 1000.0
+                    } else {
+                        0.0
+                    };
+                    counts.scope_interval_p50_ms = counters.interval_p50_ms;
+                    counts.scope_interval_p95_ms = counters.interval_p95_ms;
+                    counts.scope_interval_max_ms = counters.interval_max_ms;
                     self.writer.meta.counts = counts.clone();
                     *self.shared.counts.lock() = counts;
                 }
@@ -1677,6 +1749,8 @@ impl SessionWriterTask {
             "pid": action.pid,
             "source": action.source,
             "event": action.event,
+            "activation": action.activation,
+            "confirmed": action.confirmed,
             "rect": [action.x, action.y, action.w, action.h],
         });
         if let Err(err) = self.append_event(ev).await {
@@ -1713,6 +1787,17 @@ impl SessionWriterTask {
             counts.scope_gaps = counters.gaps;
             counts.scope_gap_blocks = counters.gap_blocks;
             counts.scope_degraded = counters.degraded;
+            // Покрытие и интервалы — из финальных счётчиков: медиана/p95
+            // считаются в `finish()`, иначе отчёт печатал «медиана 0 мс».
+            counts.scope_signal_s = counters.window_s_sum;
+            counts.scope_window_ms = if counters.window_count > 0 {
+                counters.window_s_sum / counters.window_count as f64 * 1000.0
+            } else {
+                0.0
+            };
+            counts.scope_interval_p50_ms = counters.interval_p50_ms;
+            counts.scope_interval_p95_ms = counters.interval_p95_ms;
+            counts.scope_interval_max_ms = counters.interval_max_ms;
             self.writer.meta.counts = counts.clone();
             *self.shared.counts.lock() = counts;
         }
@@ -1805,9 +1890,41 @@ impl SessionWriterTask {
         }
     }
 
+    /// Перевести время строки моста (`[+t.s]`) в часы сессии.
+    ///
+    /// Прокси и Frida-агент считают `t` от собственного запуска: DLL грузится
+    /// позже старта сессии, а после перезапуска программы счёт начинается заново.
+    /// Поэтому «сырое» значение нельзя писать в `t` как есть — иначе в одном
+    /// `events.jsonl` живут две шкалы и время идёт назад. Якорь берём по стенным
+    /// часам первой строки: `offset = (wall - старт сессии) - t_строки`; при
+    /// сбросе (t уменьшилось) якорь пересчитывается.
+    fn map_line_time(&mut self, ev: &mut Event) {
+        if ev.t <= 0.0 || !ev.raw.starts_with("[+") {
+            return;
+        }
+        let Some(wall_epoch) = rfc3339_epoch(&ev.wall) else {
+            return;
+        };
+        let raw_t = ev.t;
+        let mapped = map_line_clock(
+            &mut self.line_clock,
+            raw_t,
+            wall_epoch,
+            self.session_epoch,
+        );
+        // Исходное значение сохраняем рядом: по нему видно, что время пришло
+        // из лога прокси, и можно пересчитать заново при разборе.
+        if ev.meta.is_object() {
+            ev.meta["t_line"] = serde_json::json!(raw_t);
+            ev.meta["t_clock"] = serde_json::json!("bridge");
+        } else {
+            ev.meta = serde_json::json!({"t_line": raw_t, "t_clock": "bridge"});
+        }
+        ev.t = if mapped > 0.0 { mapped } else { 0.000_001 };
+    }
+
     /// Обработать команду; `true` — писатель останавливается.
-    async fn handle(&mut self, cmd: Cmd) -> bool {
-        match cmd {
+    async fn handle(&mut self, cmd: Cmd) -> bool {        match cmd {
             Cmd::Line { line, wall } => {
                 let Some(mut ev) = crate::decode::parse_capture_line(&line) else {
                     return false; // пустая строка — не событие
@@ -1822,6 +1939,7 @@ impl SessionWriterTask {
                 if ev.raw.is_empty() {
                     ev.raw = line;
                 }
+                self.map_line_time(&mut ev);
                 if let Err(err) = self.append_event(ev).await {
                     tracing::warn!("событие моста не записано: {err}");
                 }
@@ -3355,6 +3473,34 @@ async fn capture_shot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_line_time_is_rebased_on_session_clock() {
+        // Строки прокси считают `[+t]` от загрузки DLL, а сессия — от своего
+        // старта. Без пересчёта в журнале две шкалы и время идёт назад.
+        let session = 1_000.0;
+        let mut clock = None;
+        // Первая строка: агент стартовал на 1.045 с позже сессии.
+        let t1 = map_line_clock(&mut clock, 0.000_3, 1_001.045_3, session);
+        assert!((t1 - 1.045_3).abs() < 1e-6, "t1={t1}");
+        // Через 24.87 с собственного времени агента — 25.92 с сессии.
+        let t2 = map_line_clock(&mut clock, 24.870_9, 1_025.916, session);
+        assert!((t2 - 25.916).abs() < 1e-3, "t2={t2}");
+        assert!(t2 > t1);
+        // Перезапуск агента: t снова с нуля — якорь пересчитывается, а не
+        // тянет время на 60 с назад.
+        let t3 = map_line_clock(&mut clock, 0.5, 1_060.0, session);
+        assert!((t3 - 60.0).abs() < 1e-3, "t3={t3}");
+        assert!(t3 > t2);
+    }
+
+    #[test]
+    fn bridge_line_at_session_start_maps_to_zero() {
+        // Строка, пришедшая ровно на старте сессии, остаётся в нуле: пересчёт
+        // не должен сдвигать её вперёд из-за задержки чтения.
+        let mut clock = None;
+        assert_eq!(map_line_clock(&mut clock, 0.0, 1_000.0, 1_000.0), 0.0);
+    }
 
     #[test]
     fn adapter_is_taken_from_j2534_open_and_version() {

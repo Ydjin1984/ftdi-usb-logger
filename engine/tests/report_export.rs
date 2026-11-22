@@ -319,3 +319,59 @@ fn net_traffic_is_reported_separately_from_bus() {
     let txt = report::render_text(&meta, &[]);
     assert!(txt.contains("сеть (не шина): 922 B, TX 0 / RX 44"), "{txt}");
 }
+
+#[test]
+fn scope_report_states_coverage_and_confirmed_actions() {
+    // 0.5.0 показывала только «кадров N, пропусков M» — 20 кадров/с по 1.66 мс
+    // читались как непрерывная запись. Теперь в отчёте покрытие, интервалы и
+    // разделение «нажатие / только фокус».
+    let mut meta = SessionMeta::new("scope-1", "pcmflash");
+    meta.status = "finished".into();
+    meta.started_at = "2026-11-22T08:14:52.000Z".into();
+    meta.ended_at = Some("2026-11-22T08:15:52.000Z".into());
+    meta.counts = SessionCounts {
+        events: 420,
+        tx: 11_048,
+        rx: 11_048,
+        tx_bytes: 4040,
+        rx_bytes: 365,
+        inner_events: 22_096,
+        inner_tx: 11_048,
+        inner_rx: 11_048,
+        inner_bytes: 4405,
+        j2534_layers: vec!["driver".into(), "proxy".into()],
+        diagnostics: 2,
+        scope_frames: 1000,
+        scope_bytes: 1_000_000,
+        scope_window_ms: 1.666,
+        scope_signal_s: 1.666,
+        scope_interval_p50_ms: 52.0,
+        scope_interval_p95_ms: 55.0,
+        scope_interval_max_ms: 597.0,
+        scope_gaps: 2,
+        scope_gap_blocks: 2,
+        ui_actions: 10,
+        ui_actions_confirmed: 6,
+        ui_actions_focus: 4,
+        ..Default::default()
+    };
+
+    let txt = report::render_text(&meta, &[]);
+    assert!(
+        txt.contains("покрытие сигнала: 1.67 с из 60.00 с сессии (2.8 %)"),
+        "{txt}"
+    );
+    assert!(txt.contains("медиана 52 мс, p95 55 мс, максимум 597 мс"), "{txt}");
+    assert!(txt.contains("только фокус 4"), "фокус отделён от нажатий:\n{txt}");
+    assert!(txt.contains("диагностика: 2 событий"), "{txt}");
+    assert!(
+        txt.contains("записи в events.jsonl: TX 22096 / RX 22096"),
+        "удвоение журнала объяснено:\n{txt}"
+    );
+    assert!(txt.contains("внутренний слой TX 11048 / RX 11048"), "{txt}");
+    // Старая формулировка «точность ±интервал» больше не выдаётся за факт.
+    assert!(!txt.contains("точность ±интервал опроса"), "{txt}");
+
+    let md = report::render_markdown(&meta, &[]);
+    assert!(md.contains("| Диагностика (не ошибки) | 2 |"), "{md}");
+}
