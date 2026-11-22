@@ -38,3 +38,7 @@ Thumbs.db
 /proxy/tests/*.exp
 /proxy/tests/*.lib
 /proxy/tests/*.pdb
+
+# Дампы ЭБУ с тестовых прогонов — не для репозитория
+/*.bin
+

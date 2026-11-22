@@ -56,6 +56,14 @@ enum Cmd {
         #[arg(long)]
         app: PathBuf,
     },
+    /// Восстановить рабочую DLL из эталонной копии и перерегистрировать устройство
+    Repair {
+        #[arg(long)]
+        app: PathBuf,
+        /// Явный файл прокси-DLL вместо `<app>\proxy\j2534proxy.dll`
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Выключить прокси (Enabled=0) и вернуть адаптер PCMflash
     Disable {
         #[arg(long)]
@@ -92,6 +100,10 @@ fn main() -> ExitCode {
         Cmd::Enable { app } => {
             let dir = install_dir(&app);
             ftdi_logger::proxy::set_enabled(&dir, true).map(|status| print_state(&status))
+        }
+        Cmd::Repair { app, from } => {
+            let dir = install_dir(&app);
+            ftdi_logger::proxy::repair(&dir, from.as_deref()).map(|status| print_state(&status))
         }
         Cmd::Disable { app } => {
             let dir = install_dir(&app);
@@ -159,6 +171,31 @@ fn print_state(status: &ftdi_logger::proxy::ProxyStatus) {
             format!(", v{}", status.dll.version)
         }
     );
+    if status.dll.present {
+        // Чей файл и для какой разрядности: подменённая DLL иначе выглядит
+        // нормальной («есть, v1.0.0.120») и причина «не подхвачен» теряется.
+        println!(
+            "          издатель: {} · {} · {}",
+            if status.dll.company.is_empty() {
+                "—".to_string()
+            } else {
+                status.dll.company.clone()
+            },
+            if status.dll.description.is_empty() {
+                "—".to_string()
+            } else {
+                status.dll.description.clone()
+            },
+            if status.dll.arch.is_empty() {
+                "?".to_string()
+            } else {
+                status.dll.arch.clone()
+            }
+        );
+        if !status.dll.ours {
+            println!("          ВНИМАНИЕ: это не наша DLL — восстановите прокси (--help repair)");
+        }
+    }
     println!(
         "ini:      {} (Enabled={})",
         yes(status.ini.present),

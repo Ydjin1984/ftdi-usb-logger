@@ -483,9 +483,12 @@ struct ProxyActionReq {
     /// `action=set-real`: имя зарегистрированного J2534-устройства.
     #[serde(default)]
     device: Option<String>,
+    /// `action=repair`: явный файл прокси-DLL вместо эталонной копии.
+    #[serde(default)]
+    from: Option<String>,
 }
 
-/// POST /api/j2534/proxy — `install|remove|enable|disable|select-adapter|restore-adapter|set-real`.
+/// POST /api/j2534/proxy — `install|remove|enable|disable|select-adapter|restore-adapter|set-real|repair|restart-pcmflash`.
 ///
 /// Отказ действия отдаётся как `{"ok": false, "notes": […]}` с кодом 200, а не
 /// 500: для UI это не поломка движка, а состояние («нужны права администратора»),
@@ -504,12 +507,14 @@ async fn j2534_proxy_post(
         "select-adapter" => crate::proxy::select_adapter(&dir, true),
         "restore-adapter" => crate::proxy::restore_adapter(&dir),
         "set-real" => crate::proxy::set_real(&dir, req.path.as_deref(), req.device.as_deref()),
+        "repair" => crate::proxy::repair(&dir, req.from.as_deref()),
+        "restart-pcmflash" => crate::proxy::restart_pcmflash(&dir),
         other => {
             return Json(json!({
                 "ok": false,
                 "notes": [format!(
                     "неизвестное действие: {other} \
-                     (install|remove|enable|disable|select-adapter|restore-adapter|set-real)"
+                     (install|remove|enable|disable|select-adapter|restore-adapter|set-real|repair|restart-pcmflash)"
                 )],
             }))
         }

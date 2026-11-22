@@ -8,6 +8,8 @@ import type { NewSessionResult, ProxyStatus } from "../types";
 import { errText, msg, t } from "../i18n";
 import {
   proxyDeviceLabel,
+  proxyDllDetail,
+  proxyDllForeign,
   proxyLiveDetail,
   proxyLiveShort,
   proxyLiveTitle,
@@ -164,6 +166,18 @@ msg({
   "журналы подхвачены: TX {tx} / RX {rx}": "logs collected: TX {tx} / RX {rx}",
   "журналов прокси не найдено": "no proxy logs were found",
   "не удалось подхватить журналы: {msg}": "failed to collect the logs: {msg}",
+
+  /* Починка поставки: чужая DLL и принудительный перезапуск программы (docs/13 §3.1). */
+  "Восстановить прокси": "Restore the proxy",
+  "Перезапустить PCMflash": "Restart PCMflash",
+  "возвращает нашу прокси-DLL из эталонной копии и перерегистрирует устройство; перезапуск закрывает PCMflash, чтобы он загрузил её заново":
+    "puts our proxy DLL back from the reference copy and re-registers the device; the restart closes PCMflash so that it loads it again",
+  "Перезапустить PCMflash?": "Restart PCMflash?",
+  "PCMflash будет закрыт и запущен снова: только так он загрузит прокси. Не делайте этого во время записи ЭБУ.":
+    "PCMflash will be closed and started again: that is the only way it loads the proxy. Do not do this while an ECU is being written.",
+  "перезапустить": "restart",
+  "прокси-DLL восстановлена": "the proxy DLL was restored",
+  "PCMflash перезапущен": "PCMflash was restarted",
 });
 
 interface ModalOpts {
@@ -624,6 +638,32 @@ export function openSettingsDialog(): void {
   notesBox.style.display = "none";
   body.append(notesBox);
 
+  // Починка поставки (docs/13 §3.1). Автоматика чинит DLL при старте движка, но
+  // файл может быть занят запущенной программой — тогда нужен явный шаг, а
+  // «подхватить» получится только перезапуском PCMflash.
+  const dllWarnBox = el("div", "field__hint");
+  dllWarnBox.style.color = "var(--err)";
+  dllWarnBox.style.display = "none";
+  body.append(dllWarnBox);
+
+  const repairBtn = el("button", "btn btn--sm", t("Восстановить прокси"));
+  repairBtn.type = "button";
+  const restartBtn = el("button", "btn btn--sm", t("Перезапустить PCMflash"));
+  restartBtn.type = "button";
+  const fixBox = el("div", "proxy-fix");
+  fixBox.append(
+    repairBtn,
+    restartBtn,
+    el(
+      "div",
+      "field__hint",
+      t(
+        "возвращает нашу прокси-DLL из эталонной копии и перерегистрирует устройство; перезапуск закрывает PCMflash, чтобы он загрузил её заново",
+      ),
+    ),
+  );
+  body.append(fixBox);
+
   const adapter = el("input") as HTMLInputElement;
   // По умолчанию включён: включение прокси сразу переключает PCMflash на нашу запись.
   adapter.checked = true;
@@ -667,6 +707,8 @@ export function openSettingsDialog(): void {
     // Пустой список (нет драйверов) остаётся выключенным и после снятия busy.
     deviceSelect.disabled = value || deviceSignature === "";
     collect.disabled = value || !store.state.active;
+    repairBtn.disabled = value;
+    restartBtn.disabled = value;
   };
 
   /** Живой индикатор: подхвачен / был / не подхвачен — с counters и причиной. */
@@ -732,11 +774,21 @@ export function openSettingsDialog(): void {
   const render = (st: ProxyStatus): void => {
     last = st;
     const dll = st.dll;
+    // Издатель и разрядность рядом с версией: подменённую DLL иначе не отличить
+    // от нашей — «есть, v1.0.0.120» выглядит совершенно нормально (docs/13 §3.1).
+    const dllDetail = proxyDllDetail(dll);
     const dllText = dll?.present
-      ? dll.version
-        ? t("есть, v{version}", { version: dll.version })
+      ? dllDetail
+        ? `${t("есть")}, ${dllDetail}`
         : t("есть")
       : t("нет");
+    const foreign = proxyDllForeign(dll);
+    if (foreign) {
+      dllWarnBox.textContent = foreign;
+      dllWarnBox.style.display = "";
+    } else {
+      dllWarnBox.style.display = "none";
+    }
     const driverText = st.real?.present
       ? `${st.real.path || "—"} (${proxySourceLabel(st.real.from)})`
       : t("не найден");
@@ -830,6 +882,42 @@ export function openSettingsDialog(): void {
     const path = deviceSelect.value;
     if (!path) return;
     apply(() => api.j2534ProxySetReal({ path }));
+  });
+
+  // Починка: файл (права пользователя) и перезапуск программы (docs/13 §3.1).
+  repairBtn.addEventListener("click", () => {
+    apply(async () => {
+      const st = await api.j2534ProxyAction("repair");
+      if (st.ok) store.toast("ok", t("прокси-DLL восстановлена"));
+      return st;
+    });
+  });
+
+  restartBtn.addEventListener("click", () => {
+    // Перезапуск закрывает чужую программу, поэтому только через подтверждение:
+    // во время записи ЭБУ это необратимо испортит операцию.
+    const m = modal({
+      title: t("Перезапустить PCMflash?"),
+      body: el(
+        "div",
+        "",
+        t(
+          "PCMflash будет закрыт и запущен снова: только так он загрузит прокси. Не делайте этого во время записи ЭБУ.",
+        ),
+      ),
+      footer: [
+        ghost(t("отмена"), () => m.close()),
+        primary(t("перезапустить"), () => {
+          m.close();
+          apply(async () => {
+            const st = await api.j2534ProxyAction("restart-pcmflash");
+            if (st.ok) store.toast("ok", t("PCMflash перезапущен"));
+            return st;
+          });
+        }),
+      ],
+      width: 480,
+    });
   });
 
   collect.addEventListener("click", () => {

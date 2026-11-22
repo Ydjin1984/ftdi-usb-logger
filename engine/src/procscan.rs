@@ -82,6 +82,33 @@ pub fn list_candidates(known: &[&str]) -> Vec<ToolProcess> {
     list_candidates_mode(known, CandidateMode::Auto)
 }
 
+/// Загружен ли в процесс модуль с таким именем файла (регистр не важен).
+///
+/// Дешевле [`process_detail`]: не считает sha256 exe и не ищет окно — только список
+/// модулей. Нужен индикатору J2534-прокси на каждом опросе статуса: «PCMflash уже
+/// загрузил `j2534proxy.dll`» и «ещё не открывал адаптер» — разные диагнозы.
+/// `None` — модули прочитать не дали (чужая сессия или права).
+pub fn has_loaded_module(pid: u32, file_name: &str) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        let (modules, denied) = process_modules_ex(pid);
+        if modules.is_empty() && denied {
+            return None;
+        }
+        Some(modules.iter().any(|name| {
+            std::path::Path::new(name)
+                .file_name()
+                .map(|file| file.to_string_lossy().eq_ignore_ascii_case(file_name))
+                .unwrap_or(false)
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, file_name);
+        None
+    }
+}
+
 /// Подробности одного процесса (для `GET /api/process/<pid>` и `attach`).
 pub fn process_detail(pid: u32) -> Option<ProcessDetail> {
     #[cfg(windows)]
@@ -358,6 +385,28 @@ pub fn is_process_running(name: &str) -> bool {
     {
         let _ = name;
         false
+    }
+}
+
+/// Процессы с таким именем (без `.exe`, регистр не важен): pid и путь к exe.
+///
+/// Путь пустой, если процесс есть, а прочитать его не дали (другая сессия или
+/// права): для «перезапустить программу» этого мало, для «запущена ли она» —
+/// достаточно. Отдельно от [`is_process_running`], которому нужен только факт.
+pub fn find_processes(name: &str) -> Vec<(u32, String)> {
+    #[cfg(windows)]
+    {
+        let wanted = normalize_exe_name(name);
+        snapshot_processes()
+            .iter()
+            .filter(|p| normalize_exe_name(&p.name) == wanted)
+            .map(|p| (p.pid, p.exe.clone()))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Vec::new()
     }
 }
 
@@ -1191,6 +1240,15 @@ mod tests {
         let mods = process_modules(me);
         // В тестовом бинаре модули видны; если политика ОС запретила — список пуст, это не паника.
         assert!(mods.iter().all(|m| !m.is_empty()) || mods.is_empty());
+    }
+
+    /// Признак «модуль загружен» отличает свежий PCMflash от загрузившего прокси.
+    #[test]
+    fn own_process_module_presence_is_answerable() {
+        let me = std::process::id();
+        // kernel32 загружен в любой процесс Windows; имя без пути — как у J2534-прокси.
+        assert_eq!(has_loaded_module(me, "kernel32.dll"), Some(true));
+        assert_eq!(has_loaded_module(me, "definitely-not-loaded.dll"), Some(false));
     }
 
     /// Ручная проверка списка кандидатов на живой системе.

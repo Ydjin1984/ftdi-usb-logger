@@ -8,7 +8,14 @@
 
 import { fmtNum } from "./format";
 import { msg, t } from "./i18n";
-import type { ProxyDevice, ProxyLane, ProxyLive, ProxyLiveItem, SessionCounts } from "./types";
+import type {
+  ProxyDevice,
+  ProxyDll,
+  ProxyLane,
+  ProxyLive,
+  ProxyLiveItem,
+  SessionCounts,
+} from "./types";
 
 msg({
   // Подпись бейджа полосы — языконезависимая, записана явно, чтобы словарь был полным.
@@ -42,6 +49,11 @@ msg({
   "вызовы J2534 не захвачены": "J2534 calls were not captured",
   "внешний вызов идёт в счётчики, внутренний (прокси → драйвер) остаётся в деталях":
     "the outer call is counted, the inner one (proxy → driver) stays in the details",
+
+  /* Целостность поставки: чей файл лежит на месте прокси (docs/13 §3.1). */
+  "на месте прокси лежит чужая библиотека ({who}) — устройство грузит её, поэтому подхвата нет; нажмите «Восстановить прокси»":
+    "a foreign library sits in the proxy's place ({who}) — the device loads it, so nothing is picked up; press “Restore the proxy”",
+  "без ресурса версии": "no version resource",
 });
 
 /**
@@ -169,6 +181,31 @@ export function proxyLiveTitle(live: ProxyLive | null | undefined): string {
   }
   for (const note of live?.notes ?? []) lines.push(note);
   return lines.join("\n");
+}
+
+/** Подробность файла прокси: «v1.0.0.123 · DaVinci Cyber Engineering, x86». */
+export function proxyDllDetail(dll: ProxyDll | null | undefined): string {
+  if (!dll?.present) return "";
+  const parts: string[] = [];
+  if (dll.version) parts.push(`v${dll.version}`);
+  const who = [dll.company, dll.arch].filter((value) => !!value).join(", ");
+  if (who) parts.push(who);
+  return parts.join(" · ");
+}
+
+/**
+ * Чужая DLL на месте прокси — готовая причина для красной строки (docs/13 §3.1).
+ *
+ * Ровно та поломка, из-за которой второй канал молчал: реестр и адаптер
+ * выглядели правильно, а грузился чужой драйвер. `null` — файл наш.
+ */
+export function proxyDllForeign(dll: ProxyDll | null | undefined): string | null {
+  if (!dll?.present || dll.ours !== false) return null;
+  const who = [dll.company, dll.description].filter((value) => !!value).join(" · ");
+  return t(
+    "на месте прокси лежит чужая библиотека ({who}) — устройство грузит её, поэтому подхвата нет; нажмите «Восстановить прокси»",
+    { who: who || t("без ресурса версии") },
+  );
 }
 
 /** Подпись варианта в выборе «какой шнурок проксировать». */

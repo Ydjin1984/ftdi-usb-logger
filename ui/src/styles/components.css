@@ -822,6 +822,20 @@
 .proxy-live--err .proxy-live__dot {
   background: var(--err);
 }
+/* Починка поставки: «Восстановить прокси» и «Перезапустить PCMflash» (docs/13 §3.1).
+   Кнопки стоят рядом, пояснение — под ними: обе меняют состояние машины, поэтому
+   подпись обязательна, а не только тултип. */
+.proxy-fix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+}
+.proxy-fix .field__hint {
+  flex-basis: 100%;
+  margin: 0;
+}
 /* Чекбокс с подписью в одну строку (настройки, второй канал захвата). */.check-row {
   display: flex;
   align-items: flex-start;

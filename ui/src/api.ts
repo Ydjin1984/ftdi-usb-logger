@@ -84,7 +84,11 @@ export type ProxyAction =
   | "enable"
   | "disable"
   | "select-adapter"
-  | "restore-adapter";
+  | "restore-adapter"
+  /** Вернуть нашу DLL из эталонной копии (docs/13 §3.1). */
+  | "repair"
+  /** Перезапустить PCMflash, чтобы он загрузил прокси (docs/13 §3.1). */
+  | "restart-pcmflash";
 
 /** Ответ `POST /sessions/:id/proxy/collect`: подхваченная полоса или причины. */
 export interface ProxyCollect {

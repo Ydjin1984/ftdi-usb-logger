@@ -93,8 +93,16 @@ export interface Note {
 export interface ProxyDll {
   path: string;
   present: boolean;
-  /** Версия из ресурсов DLL (`1.0.0.120`); пустая — прочитать не удалось. */
+  /** Версия из ресурсов DLL (`1.0.0.123`); пустая — прочитать не удалось. */
   version: string;
+  /** `CompanyName` из ресурса версии: чей это файл (docs/13 §3.1). */
+  company?: string;
+  /** `FileDescription` из ресурса версии. */
+  description?: string;
+  /** Разрядность из PE-заголовка: `x86` | `x64` | `arm64` | `?`. */
+  arch?: string;
+  /** Файл — наш прокси, а не чужая библиотека на его месте. */
+  ours?: boolean;
 }
 
 /** `j2534proxy.ini`: `Enabled` — главный признак включённости прокси. */

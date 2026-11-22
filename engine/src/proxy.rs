@@ -25,6 +25,17 @@ use std::time::SystemTime;
 /// когда приложение грузит прокси вместо настоящего драйвера (docs/13 §3).
 const DLL_NAME: &str = "j2534proxy.dll";
 const INI_NAME: &str = "j2534proxy.ini";
+/// Эталонная копия прокси рядом с поставкой: `<app>\proxy\j2534proxy.dll`.
+///
+/// Рабочая DLL лежит в пользовательском каталоге (`<app>\j2534proxy`), который
+/// может быть перезаписан сторонним установщиком или экспериментом. Тогда
+/// восстановить рабочий файл неоткуда — поэтому сборка кладёт рядом копию,
+/// которой движок и чинит поставку (docs/13 §3.1).
+const SPARE_DIR: &str = "proxy";
+/// Рядом с эталоном — его sha256: копия сверяется по байтам, а не по имени.
+const SPARE_SHA_EXT: &str = "dll.sha256";
+/// Сколько ждём, пока закрытая программа действительно исчезнет из списка.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Резервный способ задать настоящую библиотеку (docs/13 §4, третий приоритет).
 const REAL_DLL_TXT: &str = "real_dll.txt";
 /// Путь J2534-устройства — ровно та ветка, которую видят 32-битные приложения 04.04.
@@ -51,6 +62,21 @@ pub struct ProxyDll {
     pub present: bool,
     /// Версия из ресурса версии DLL (пустая, если файла нет или версия не читается).
     pub version: String,
+    /// `CompanyName` из ресурса версии: по нему видно, чей файл лежит на месте прокси.
+    #[serde(default)]
+    pub company: String,
+    /// `FileDescription` из ресурса версии.
+    #[serde(default)]
+    pub description: String,
+    /// Разрядность из PE-заголовка файла: `x86` | `x64` | `arm64` | `?`.
+    #[serde(default)]
+    pub arch: String,
+    /// Файл — наш прокси, а не чужая библиотека на его месте (docs/13 §3.1).
+    ///
+    /// `true` только при подтверждении ресурсом версии: одного имени файла мало,
+    /// иначе подменённая DLL считалась бы рабочей (так и ломался второй канал).
+    #[serde(default)]
+    pub ours: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -315,10 +341,25 @@ fn build_status(install_dir: &Path, extra_notes: Vec<String>) -> ProxyStatus {
     let device = device_name(&ini_values);
     let dll_path = install_dir.join(DLL_NAME);
     let dll_present = dll_path.is_file();
+    let dll_display = display_path(&dll_path);
+    // Ресурс версии отвечает на вопрос «чей это файл», PE-заголовок — «для какой
+    // разрядности». Без них подменённая DLL выглядела бы рабочей: имя-то на месте.
+    let dll_meta = if dll_present {
+        crate::procscan::exe_meta(&dll_display)
+    } else {
+        Default::default()
+    };
+    let dll_ours = dll_present && dll_is_ours(&dll_meta.company, &dll_meta.description);
+    let dll_arch = if dll_present {
+        pe_arch(&dll_path)
+    } else {
+        String::new()
+    };
     let registry = read_registry(&device);
     let log_dir = log_dir_for(install_dir);
     let log_files = count_logs(&log_dir);
     let adapter = reg::read_adapter().unwrap_or_default();
+    let proxy_selected = adapter.eq_ignore_ascii_case(&proxy_adapter_name(&device));
     let backup = read_adapter_backup(&log_dir).unwrap_or_default();
     let real = resolve_real_status(install_dir, &ini_values);
     let elevated = reg::is_elevated();
@@ -351,19 +392,72 @@ fn build_status(install_dir: &Path, extra_notes: Vec<String>) -> ProxyStatus {
     if ini_values.enabled && !registry.registered && dll_present {
         notes.push("включено в ini, но устройство не зарегистрировано — нужен action=install".into());
     }
+    // Чужая DLL на месте прокси — самая коварная поломка: реестр, ini и адаптер
+    // в PCMflash выглядят правильно, а грузится чужой драйвер, и файлов живого
+    // состояния не появляется никогда (docs/13 §3.1).
+    if dll_present && !dll_ours {
+        notes.push(format!(
+            "на месте прокси лежит чужая библиотека ({}) — устройство «{device}» грузит именно её, \
+             поэтому подхвата нет; нажмите «Восстановить прокси»",
+            describe_foreign(&dll_meta.company, &dll_meta.description)
+        ));
+    }
+    if dll_ours && dll_arch != "x86" {
+        notes.push(format!(
+            "прокси собрана для {dll_arch}, а PCMflash и драйверы PassThru 04.04 — 32-битные: \
+             устройство не загрузится, нужна сборка x86"
+        ));
+    }
+    if registry.registered
+        && !registry.function_library.is_empty()
+        && !same_path(&registry.function_library, &dll_display)
+    {
+        notes.push(format!(
+            "реестр указывает на другой файл ({}) — устройство загрузит его, а не {}; переустановите прокси",
+            registry.function_library, dll_display
+        ));
+    }
+    // Почему «не подхвачен» при живом PCMflash — три разных ответа, и путать их
+    // нельзя: программа ещё не открывала адаптер; в ней выбран не наш адаптер;
+    // файл под нашим именем загружен, но это не наша DLL (тогда ждать бесполезно).
+    // Если файл уже назван чужой/отсутствующим выше, эти строки были бы шумом.
+    if live.state == "idle" && dll_present && dll_ours {
+        if let Some((pid, loaded)) = pcmflash_probe() {
+            let proxy_name = proxy_adapter_name(&device);
+            if proxy_selected {
+                if loaded {
+                    notes.push(format!(
+                        "в PCMflash (pid {pid}) загружен файл {DLL_NAME}, но живого состояния нет: \
+                         по этому пути лежит не наша библиотека — нажмите «Восстановить прокси» \
+                         и перезапустите PCMflash"
+                    ));
+                } else {
+                    notes.push(format!(
+                        "PCMflash (pid {pid}) работает, но адаптер ещё не открыт: прокси \
+                         подхватится, когда программа начнёт операцию"
+                    ));
+                }
+            } else {
+                notes.push(format!(
+                    "в PCMflash (pid {pid}) выбран не наш адаптер ({adapter}) — переключите его \
+                     на «{proxy_name}», иначе прокси не загрузится"
+                ));
+            }
+        }
+    }
 
     ProxyStatus {
         ok: true,
         elevated,
         install_dir: display_path(install_dir),
         dll: ProxyDll {
-            path: display_path(&dll_path),
+            path: dll_display,
             present: dll_present,
-            version: if dll_present {
-                crate::procscan::file_version(&dll_path.to_string_lossy())
-            } else {
-                String::new()
-            },
+            version: dll_meta.version.clone(),
+            company: dll_meta.company.clone(),
+            description: dll_meta.description.clone(),
+            arch: dll_arch,
+            ours: dll_ours,
         },
         ini: ProxyIni {
             path: display_path(&install_dir.join(INI_NAME)),
@@ -375,7 +469,7 @@ fn build_status(install_dir: &Path, extra_notes: Vec<String>) -> ProxyStatus {
         log_dir: display_path(&log_dir),
         log_files,
         pcmflash: ProxyPcmflash {
-            proxy_selected: adapter.eq_ignore_ascii_case(&proxy_adapter_name(&device)),
+            proxy_selected,
             adapter,
             backup,
         },
@@ -406,6 +500,152 @@ fn display_path(path: &Path) -> String {
     }
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }
+
+// ─────────────────── целостность поставки: наша ли DLL ───────────────────
+
+/// Разрядность PE-файла по заголовку (`?` — не PE или файл не прочитать).
+///
+/// Нужна, чтобы отделить «не ту» сборку прокси от чужой библиотеки: J2534-
+/// приложения 04.04 32-битные, и x64-прокси в них просто не загрузится.
+fn pe_arch(path: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return "?".into();
+    };
+    let mut dos = [0u8; 0x40];
+    if file.read_exact(&mut dos).is_err() || dos[..2] != b"MZ"[..] {
+        return "?".into();
+    }
+    let lfanew = u32::from_le_bytes([dos[0x3c], dos[0x3d], dos[0x3e], dos[0x3f]]) as u64;
+    if file.seek(SeekFrom::Start(lfanew)).is_err() {
+        return "?".into();
+    }
+    let mut head = [0u8; 6];
+    if file.read_exact(&mut head).is_err() || head[..4] != b"PE\0\0"[..] {
+        return "?".into();
+    }
+    match u16::from_le_bytes([head[4], head[5]]) {
+        0x014c => "x86",
+        0x8664 => "x64",
+        0xaa64 => "arm64",
+        _ => "?",
+    }
+    .to_string()
+}
+
+/// Наша ли это библиотека — по ресурсу версии, а не по имени файла.
+///
+/// `CompanyName` пишет `proxy\version.rc`; описание проверяется вторым признаком,
+/// чтобы пересобранная прокси с другим издателем не считалась чужой.
+fn dll_is_ours(company: &str, description: &str) -> bool {
+    if company.trim().eq_ignore_ascii_case(VENDOR_DEFAULT) {
+        return true;
+    }
+    let text = description.to_ascii_lowercase();
+    text.contains("j2534 proxy") || text.contains("j2534proxy")
+}
+
+/// Человеческое описание чужого файла для `notes`: «Scanmatik, LLC · Scanmatik SM2…».
+fn describe_foreign(company: &str, description: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !company.trim().is_empty() {
+        parts.push(company.trim().to_string());
+    }
+    if !description.trim().is_empty() {
+        parts.push(description.trim().to_string());
+    }
+    if parts.is_empty() {
+        "без ресурса версии".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// Откуда можно взять целую прокси: эталонная копия поставки, затем дерево разработки.
+fn spare_candidates(install_dir: &Path) -> Vec<PathBuf> {
+    let app = install_dir.parent().unwrap_or_else(|| Path::new("."));
+    vec![
+        app.join(SPARE_DIR).join(DLL_NAME),
+        // Запуск из дерева репозитория: `proxy\out\x86` — та же сборка, что идёт в поставку.
+        app.join(SPARE_DIR).join("out").join("x86").join(DLL_NAME),
+    ]
+}
+
+/// Копия цела? Совпал sha256 рядом — да; нет sha — верим только ресурсу версии.
+fn spare_ok(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let sha_path = path.with_extension(SPARE_SHA_EXT);
+    if let Ok(text) = std::fs::read_to_string(&sha_path) {
+        let want = text
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if want.len() == 64 {
+            return crate::procscan::exe_meta(&path.to_string_lossy())
+                .sha256
+                .eq_ignore_ascii_case(&want);
+        }
+    }
+    let meta = crate::procscan::exe_meta(&path.to_string_lossy());
+    dll_is_ours(&meta.company, &meta.description)
+}
+
+/// Положить файл на место одним шагом: `.new` рядом и переименование поверх.
+///
+/// `rename` на Windows заменяет существующий файл атомарно, поэтому движок
+/// никогда не покажет половину DLL. Если DLL держит запущенная программа,
+/// ошибка уходит вызывающему — там она превращается в понятную подсказку.
+fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = to.with_extension("dll.new");
+    std::fs::copy(from, &tmp)?;
+    std::fs::rename(&tmp, to)
+}
+
+/// Вернуть нашу DLL на место, если её подменили или она пропала.
+///
+/// Вызывается при старте движка и перед установкой: подменённый файл — не
+/// «состояние», которое можно показать, а поломка, которую надо чинить молча.
+/// Возвращает текст для журнала, когда файл действительно восстановлен.
+pub fn ensure_dll(install_dir: &Path) -> Option<String> {
+    let dll = install_dir.join(DLL_NAME);
+    if dll.is_file() {
+        let meta = crate::procscan::exe_meta(&display_path(&dll));
+        if dll_is_ours(&meta.company, &meta.description) {
+            // Своя DLL не трогается даже если она старше эталона: пользователь
+            // мог поставить тестовую сборку, и «починка» затерла бы её.
+            return None;
+        }
+    }
+    let source = spare_candidates(install_dir)
+        .into_iter()
+        .find(|path| spare_ok(path))?;
+    copy_atomic(&source, &dll).ok()?;
+    Some(format!(
+        "прокси-DLL восстановлена из эталонной копии {}",
+        display_path(&source)
+    ))
+}
+
+/// Что известно о PCMflash: pid и загружен ли в него файл с именем прокси.
+///
+/// Имя файла не доказывает «наша» (чужая DLL может лежать под нашим именем), но
+/// вместе с отсутствием файлов состояния это единственный дешёвый признак,
+/// отличающий «адаптер ещё не открывали» от «загрузилась не наша DLL».
+fn pcmflash_probe() -> Option<(u32, bool)> {
+    let (pid, _) = crate::procscan::find_processes("pcmflash")
+        .into_iter()
+        .next()?;
+    let loaded = crate::procscan::has_loaded_module(pid, DLL_NAME).unwrap_or(false);
+    Some((pid, loaded))
+}
+
 
 /// Значение, которое должно стоять в PCMflash: `J2534: <device.Name>` (docs/13 §5).
 fn proxy_adapter_name(device: &str) -> String {
@@ -548,7 +788,7 @@ pub fn live_status(log_dir: &Path) -> ProxyLive {
     if entries.is_empty() {
         out.state = "idle".into();
         out.notes.push(
-            "ни одна программа не загрузила прокси-устройство: проверьте выбранный адаптер".into(),
+            "прокси пока не загружался: ни одна программа не открывала J2534-устройство".into(),
         );
         return out;
     }
@@ -606,7 +846,7 @@ pub fn live_status(log_dir: &Path) -> ProxyLive {
             .notes
             .push("прокси работал, но программа уже завершилась".into()),
         _ => out.notes.push(
-            "ни одна программа не загрузила прокси-устройство: проверьте выбранный адаптер".into(),
+            "прокси пока не загружался: ни одна программа не открывала J2534-устройство".into(),
         ),
     }
     out
@@ -793,6 +1033,9 @@ fn is_proxy_dll(path: &str) -> bool {
 /// права, затем реестр (самое вероятное место отказа), затем ini. Если ini не
 /// записался — ключ реестра снимается обратно.
 pub fn install(install_dir: &Path, real: Option<&str>) -> Result<ProxyStatus> {
+    // Подменённая DLL — частая причина «зарегистрировано, но не подхватывается»:
+    // чиним файл до записи реестра, чтобы устройство вело на рабочую библиотеку.
+    let restored = ensure_dll(install_dir);
     require_admin("регистрация J2534-устройства в HKLM")?;
     let ini = read_ini(install_dir);
     let dll = install_dir.join(DLL_NAME);
@@ -893,6 +1136,9 @@ pub fn install(install_dir: &Path, real: Option<&str>) -> Result<ProxyStatus> {
         "устройство зарегистрировано как «{device}», Enabled={}",
         u8::from(ini_values.enabled)
     )];
+    if let Some(note) = restored {
+        notes.push(note);
+    }
     if real_from == "первый из реестра" && drivers.len() > 1 {
         // Молча выбрать «первый попавшийся» из десятка драйверов — значит
         // увести прокси на чужое железо (на живой машине так и вышло: CHIPSOFT
@@ -906,6 +1152,192 @@ pub fn install(install_dir: &Path, real: Option<&str>) -> Result<ProxyStatus> {
         notes.push(format!("настоящий драйвер: {real_path} ({real_from})"));
     }
     Ok(build_status(install_dir, notes))
+}
+
+/// «Восстановить прокси» — действие пользователя поверх автоматики (docs/13 §3.1).
+///
+/// Автоматика чинит DLL при старте движка и при `install`, но у неё есть предел:
+/// если файл держит запущенная программа, заменить его нельзя. Тогда это действие
+/// говорит об этом прямо, а не молчит «подхвата нет».
+///
+/// Порядок: файл (права пользователя) → регистрация (нужен администратор) → статус.
+/// Ни `Enabled`, ни выбор адаптера не меняются: это отдельные осознанные действия.
+pub fn repair(install_dir: &Path, from: Option<&str>) -> Result<ProxyStatus> {
+    let dll = install_dir.join(DLL_NAME);
+    let source = match from.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => spare_candidates(install_dir)
+            .into_iter()
+            .find(|path| spare_ok(path))
+            .ok_or_else(|| {
+                anyhow!(
+                    "эталонной копии прокси нет: ожидалась {} — переустановите приложение",
+                    install_dir
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(SPARE_DIR)
+                        .join(DLL_NAME)
+                        .display()
+                )
+            })?,
+    };
+    if !source.is_file() {
+        bail!("файл не найден: {}", source.display());
+    }
+    if !spare_ok(&source) {
+        bail!(
+            "{} не похожа на нашу прокси-DLL (нет ресурса версии или не совпал sha256)",
+            source.display()
+        );
+    }
+    copy_atomic(&source, &dll).map_err(|err| {
+        anyhow!(
+            "не удалось заменить {}: {err} — закройте PCMflash (он держит DLL) и повторите",
+            dll.display()
+        )
+    })?;
+    let mut notes = vec![format!(
+        "прокси-DLL восстановлена из {}",
+        display_path(&source)
+    )];
+
+    // Регистрация могла вести на другой файл (или отсутствовать): приводим её
+    // к тому пути, где теперь лежит рабочая DLL.
+    let device = device_name(&read_ini(install_dir));
+    let display = display_path(&dll);
+    let registry = read_registry(&device);
+    let stale = !registry.registered
+        || (!registry.function_library.is_empty()
+            && !same_path(&registry.function_library, &display));
+    if stale {
+        if reg::is_elevated() {
+            reg::create_device(&device, VENDOR_DEFAULT, &display)
+                .map_err(|err| reg_error(err, "записать HKLM PassThruSupport.04.04"))?;
+            notes.push(format!("устройство «{device}» зарегистрировано на {display}"));
+        } else {
+            notes.push(
+                "регистрация устройства требует прав администратора: запустите приложение \
+                 от имени администратора"
+                    .into(),
+            );
+        }
+    }
+    Ok(build_status(install_dir, notes))
+}
+
+/// Перезапустить PCMflash, чтобы он загрузил уже исправленную DLL.
+///
+/// Единственный способ «принудительно подхватить»: библиотеку программа загружает
+/// при старте, впрыснуть её в живой процесс нельзя. Действие опасное — оно
+/// вызывается только явной кнопкой, а не автоматикой: закрывать PCMflash во время
+/// записи ЭБУ нельзя (docs/13 §3.1).
+pub fn restart_pcmflash(install_dir: &Path) -> Result<ProxyStatus> {
+    let running = crate::procscan::find_processes("pcmflash");
+    let exe = running
+        .iter()
+        .map(|(_, path)| path.clone())
+        .find(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(find_pcmflash_exe);
+    let Some(exe) = exe else {
+        return Ok(build_status(
+            install_dir,
+            vec![
+                "PCMflash не запущен и его файл не найден: запустите программу — прокси \
+                 подхватится при старте"
+                    .into(),
+            ],
+        ));
+    };
+    if running.is_empty() {
+        launch_program(&exe)?;
+        return Ok(build_status(
+            install_dir,
+            vec![format!("PCMflash запущен: {}", exe.display())],
+        ));
+    }
+
+    for (pid, _) in &running {
+        let _ = terminate_pid(*pid);
+    }
+    let deadline = std::time::Instant::now() + RESTART_WAIT;
+    while std::time::Instant::now() < deadline
+        && !crate::procscan::find_processes("pcmflash").is_empty()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+    if !crate::procscan::find_processes("pcmflash").is_empty() {
+        bail!(
+            "PCMflash не закрылся (защита процесса или другой сеанс Windows): закройте его \
+             вручную и запустите снова"
+        );
+    }
+    launch_program(&exe)?;
+    Ok(build_status(
+        install_dir,
+        vec![format!("PCMflash перезапущен: {}", exe.display())],
+    ))
+}
+
+/// Где обычно стоит PCMflash — запасной вариант, когда программа уже закрыта.
+fn find_pcmflash_exe() -> Option<PathBuf> {
+    [
+        r"C:\Program Files (x86)\PCMflash\pcmflash.exe",
+        r"C:\Program Files\PCMflash\pcmflash.exe",
+        r"C:\PCMflash\pcmflash.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    // SAFETY: открываем процесс только с правом завершения; дескриптор закрывается.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) else {
+            return false;
+        };
+        let ok = TerminateProcess(handle, 1).is_ok();
+        let _ = CloseHandle(handle);
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_pid(_pid: u32) -> bool {
+    false
+}
+
+/// Запустить программу так же, как её запустил бы пользователь.
+///
+/// Из повышенного процесса прямой `spawn` даёт повышенную программу, а PCMflash
+/// с правами администратора видит другие устройства и портит выбор адаптера.
+/// `explorer.exe` запускает её в сессии пользователя с обычными правами.
+fn launch_program(exe: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if reg::is_elevated() {
+            std::process::Command::new("explorer.exe")
+                .arg(exe)
+                .spawn()
+                .with_context(|| format!("запустить {}", exe.display()))?;
+            return Ok(());
+        }
+        std::process::Command::new(exe)
+            .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
+            .spawn()
+            .with_context(|| format!("запустить {}", exe.display()))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = exe;
+        bail!("перезапуск программы поддержан только на Windows")
+    }
 }
 
 /// Снятие: удаляется только наша запись реестра, ini остаётся (docs/13 §5).
@@ -923,11 +1355,17 @@ pub fn remove(install_dir: &Path) -> Result<ProxyStatus> {
 /// `Enabled=0/1`. Включение требует прав: по контракту (§5) включение —
 /// администраторское действие, даже если ini пишется в пользовательский каталог.
 pub fn set_enabled(install_dir: &Path, on: bool) -> Result<ProxyStatus> {
+    // Включение — последний шанс починить файл до того, как программа его
+    // загрузит: иначе «включено» с чужой DLL выглядит рабочим (docs/13 §3.1).
+    let restored = on.then(|| ensure_dll(install_dir)).flatten();
     if on {
         require_admin("включение прокси")?;
     }
     let values = write_ini(install_dir, on, None)?;
     let mut notes = vec![format!("Enabled={}", u8::from(values.enabled))];
+    if let Some(note) = restored {
+        notes.push(note);
+    }
     if on && !values.real_library.trim().is_empty() && !Path::new(&values.real_library).is_file() {
         notes.push(format!(
             "RealLibrary указывает на отсутствующий файл: {}",
@@ -1746,7 +2184,7 @@ mod tests {
         assert_eq!(idle.state, "idle");
         assert_eq!(idle.files, 0);
         assert!(
-            idle.notes.iter().any(|note| note.contains("адаптер")),
+            idle.notes.iter().any(|note| note.contains("не загружался")),
             "«idle» обязан объяснять причину: {:?}",
             idle.notes
         );
@@ -1805,6 +2243,118 @@ mod tests {
         let after = read_ini(dir.path());
         assert_eq!(after.real_library, real.to_string_lossy());
         assert!(!after.enabled, "выключенный прокси не должен включаться сам");
+    }
+
+    #[test]
+    fn dll_is_ours_uses_version_resource_not_file_name() {
+        // Наш прокси: издатель из proxy\version.rc.
+        assert!(dll_is_ours(
+            "DaVinci Cyber Engineering",
+            "FTDI/USB Logger J2534 Proxy (Pass-Thru 04.04)"
+        ));
+        // Пересборка с другим издателем, но тем же описанием — тоже наша.
+        assert!(dll_is_ours("", "j2534proxy (Pass-Thru 04.04)"));
+        // Ровно тот случай, из-за которого второй канал молчал: на месте прокси
+        // лежит драйвер Scanmatik, и «DLL: есть, v1.0.0.120» выглядело нормой.
+        assert!(!dll_is_ours(
+            "Scanmatik, LLC",
+            "Scanmatik SM2 Pass-Thru Function Library"
+        ));
+        assert!(!dll_is_ours("", ""));
+        assert_eq!(
+            describe_foreign("Scanmatik, LLC", "Scanmatik SM2 Pass-Thru Function Library"),
+            "Scanmatik, LLC · Scanmatik SM2 Pass-Thru Function Library"
+        );
+        assert_eq!(describe_foreign("", ""), "без ресурса версии");
+    }
+
+    #[test]
+    fn pe_arch_reads_the_pe_machine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("x.dll");
+        let build = |machine: u16| {
+            let mut bytes = vec![0u8; 0x100];
+            bytes[0] = b'M';
+            bytes[1] = b'Z';
+            bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+            bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+            bytes
+        };
+        std::fs::write(&path, build(0x014c)).expect("x86");
+        assert_eq!(pe_arch(&path), "x86");
+        std::fs::write(&path, build(0x8664)).expect("x64");
+        assert_eq!(pe_arch(&path), "x64");
+        std::fs::write(&path, b"not a pe").expect("мусор");
+        assert_eq!(pe_arch(&path), "?");
+        assert_eq!(pe_arch(&dir.path().join("nope.dll")), "?");
+    }
+
+    /// Главный сценарий поломки: на месте прокси чужая DLL, рядом — эталон.
+    #[test]
+    fn ensure_dll_restores_the_spare_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path();
+        let install = app.join("j2534proxy");
+        std::fs::create_dir_all(&install).expect("каталог прокси");
+        std::fs::create_dir_all(app.join(SPARE_DIR)).expect("каталог эталона");
+
+        // Чужая библиотека на рабочем месте: ресурса версии у неё нет.
+        std::fs::write(install.join(DLL_NAME), b"MZ foreign").expect("чужая dll");
+        // Эталон с контрольной суммой рядом — ровно так его кладёт сборка.
+        let spare = app.join(SPARE_DIR).join(DLL_NAME);
+        std::fs::write(&spare, b"MZ ours").expect("эталон");
+        let sha = crate::procscan::exe_meta(&spare.to_string_lossy()).sha256;
+        std::fs::write(spare.with_extension(SPARE_SHA_EXT), format!("{sha}\n")).expect("sha");
+
+        let status = status(&install);
+        assert!(status.dll.present);
+        assert!(!status.dll.ours, "чужая DLL не должна считаться нашей");
+        assert!(status.dll.arch == "?", "не PE — разрядность неизвестна");
+        assert!(
+            status
+                .notes
+                .iter()
+                .any(|note| note.contains("чужая библиотека")),
+            "причина должна быть названа: {:?}",
+            status.notes
+        );
+
+        let note = ensure_dll(&install).expect("восстановление из эталона");
+        assert!(note.contains("эталонной копии"), "{note}");
+        assert_eq!(
+            std::fs::read(install.join(DLL_NAME)).expect("рабочая dll"),
+            b"MZ ours"
+        );
+    }
+
+    /// `ensure_dll` не трогает нашу DLL, даже если она старше эталона.
+    #[test]
+    fn ensure_dll_keeps_our_own_build() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let install = tmp.path().join("j2534proxy");
+        std::fs::create_dir_all(&install).expect("каталог");
+        std::fs::write(install.join(DLL_NAME), b"MZ test build").expect("dll");
+        // Ресурса версии нет — значит, опознать «свою» нельзя; проверяем, что
+        // отсутствие эталона не превращается в панику и удаление файла.
+        assert!(ensure_dll(&install).is_none());
+        assert!(install.join(DLL_NAME).is_file());
+    }
+
+    #[test]
+    fn repair_rejects_a_foreign_candidate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let install = tmp.path().join("j2534proxy");
+        std::fs::create_dir_all(&install).expect("каталог");
+        let foreign = tmp.path().join("smj2534.dll");
+        std::fs::write(&foreign, b"MZ vendor").expect("чужая dll");
+
+        let err = repair(&install, Some(&foreign.to_string_lossy())).expect_err("отказ");
+        assert!(format!("{err:#}").contains("не похожа"), "{err:#}");
+        assert!(
+            !install.join(DLL_NAME).exists(),
+            "отказ не должен оставлять полузаписанный файл"
+        );
     }
 
     #[test]

@@ -238,6 +238,16 @@ if ($proxyBuilt) {
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $dstProxy -Force }
     }
     Write-Host '  + j2534proxy\'
+    # Эталонная копия рядом с поставкой: ею движок чинит подменённую DLL в
+    # пользовательском каталоге (docs\13-j2534-proxy.md §3.1). sha256 рядом —
+    # чтобы копия проверялась по байтам, а не по имени файла.
+    $spareDir = Join-Path $DistDir 'proxy'
+    New-Item -ItemType Directory -Path $spareDir -Force | Out-Null
+    $spareDll = Join-Path $spareDir 'j2534proxy.dll'
+    Copy-Item -LiteralPath (Join-Path $proxyDir 'out\x86\j2534proxy.dll') -Destination $spareDll -Force
+    $spareSha = (Get-FileHash -LiteralPath $spareDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath ($spareDll + '.sha256') -Value $spareSha -Encoding ASCII -NoNewline
+    Write-Host '  + proxy\j2534proxy.dll (эталон для починки)'
 }
 
 # splash-логотип, иконка приложения и сам splash-скрипт

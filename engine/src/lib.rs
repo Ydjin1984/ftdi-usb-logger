@@ -25,6 +25,17 @@ pub async fn run(cli: config::Cli) -> anyhow::Result<()> {
     let cfg = Arc::new(config::Config::from_cli(&cli)?);
     cfg.ensure_dirs().context("каталоги сессий")?;
 
+    // J2534-прокси лежит в пользовательском каталоге, и его файл может подменить
+    // сторонний установщик: тогда устройство грузит чужой драйвер, а интерфейс
+    // честно показывает «не подхвачен». Возвращаем нашу DLL до открытия окна —
+    // иначе пользователь узнаёт о поломке только по отсутствию захвата.
+    let proxy_dir = cfg.root.join("j2534proxy");
+    if proxy::read_ini(&proxy_dir).enabled {
+        if let Some(note) = proxy::ensure_dll(&proxy_dir) {
+            tracing::warn!("{note}");
+        }
+    }
+
     let store = Arc::new(store::SessionStore::open(&cfg.sessions_dir)?);
     let (bus, _) = broadcast::channel::<models::ServerMsg>(4096);
     let capture = Arc::new(capture::CaptureManager::new(cfg.clone(), store.clone(), bus.clone()));

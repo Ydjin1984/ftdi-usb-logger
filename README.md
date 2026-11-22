@@ -179,6 +179,13 @@ flowchart LR
 Свежесть даёт файл `proxy-live-<pid>.state`, который DLL пишет рядом с журналом;
 «подхвачен» движок подтверждает по живому процессу с тем же exe, а не по наличию файла.
 
+**Если «не подхвачен», а адаптер выбран** — проверьте, чей файл лежит на месте прокси.
+В настройках рядом с версией показаны издатель и разрядность DLL; на чужой файл горит
+красная строка, а кнопка «Восстановить прокси» возвращает нашу DLL из эталонной копии.
+Запущенный PCMflash новую DLL не увидит — его нужно перезапустить (кнопка
+«Перезапустить PCMflash»). Движок делает то же автоматически при старте, если прокси
+включён; подробности и границы автоматики — [docs/13-j2534-proxy.md](docs/13-j2534-proxy.md) §3.1.
+
 Установщик ставит прокси сразу (галка «Установить J2534-прокси», запрос UAC) — но
 **не** переключает адаптер в чужой программе: это всегда осознанное действие.
 Подробности, формат журнала и откат — [docs/13-j2534-proxy.md](docs/13-j2534-proxy.md).
@@ -447,7 +454,7 @@ sequenceDiagram
 | `POST /api/session/new` | завершить текущую и пересканировать окружение |
 | `GET /api/tools?mode=auto\|usb\|window\|all` | процессы-кандидаты |
 | `GET /api/devices` · `GET /api/usb/devices` · `GET /api/j2534/drivers` | FTDI / USB / J2534 |
-| `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter/set-real`); ответ содержит живое состояние (`live`) и список драйверов (`devices`) |
+| `GET /api/j2534/proxy` · `POST /api/j2534/proxy` | состояние и действия J2534-прокси (`install/remove/enable/disable/select-adapter/restore-adapter/set-real/repair/restart-pcmflash`); ответ содержит живое состояние (`live`), список драйверов (`devices`) и признаки DLL (`dll.ours/company/arch`) |
 | `POST /api/sessions/{id}/proxy/collect` | подхватить журналы прокси в открытую сессию сейчас |
 | `POST /api/usbpcap/start` | сырой захват шины (нужен USBPcap) |
 | `POST /api/sessions/{id}/step/start` · `step/end` · `mark` · `note` · `shot` | разметка сессии |
