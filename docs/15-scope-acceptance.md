@@ -291,7 +291,7 @@ B8 фиксирует локальный артефакт, B9 — скачанн
   и паспорт всех восьми), контрактный мок отдаёт 8 каналов;
 * **точность синхронизации** — не заявляется: в отчёте наблюдаемые интервалы,
   в `accuracy_ms` — интервал опроса; в `docs/14` это записано явно;
-* **тесты**: 221 passed, 0 failed, 12 ignored; UI `pnpm build` — ok.
+* **тесты**: 221 passed, 0 failed, 13 ignored; UI `pnpm build` — ok.
 
 Сессии проверки:
 
@@ -299,3 +299,18 @@ B8 фиксирует локальный артефакт, B9 — скачанн
 |---|---|---|
 | `20261122-150330-review-051-timeline` | PCMflash + Scanmatik SM2, ЭБУ TC1797; клики мышью «Идентификация» → «Да» | 52 TX / 104 RX, 4040 B, 0 ошибок; 2 подтверждённых действия, 3 фокуса; 2516 кадров, покрытие 3.0 % |
 | `20261122-151026-review-051-report` | короткая сессия без действий, проверка отчёта | 345 кадров, медиана 52 мс, p95 54 мс; покрытие 0.57 с из 18.85 с |
+
+### Публикация 0.5.1
+
+| Что | Значение |
+|---|---|
+| Коммит | `c056021` («таймлайн: поздняя пачка не пересчитывает якорь часов моста») |
+| Тег | `v0.5.1` (annotated, объект `0d51428`) → `c056021` |
+| Actions | run 45012513064, event `push` (tag), job `windows` — success, включая «Publish GitHub Release» |
+| Release | https://github.com/Ydjin1984/ftdi-usb-logger/releases/tag/v0.5.1 |
+| Установщик | `FTDI_USB_Logger_Setup.exe`, 56 424 322 B, FileVersion 0.5.1.0 |
+| SHA-256 установщика | `237696e96666e1683bd0b0798abc1f2c228af24454a40fcc1839e37aaf003e1b` |
+| Portable | `FTDI_USB_Logger_portable.zip`, 77 210 818 B, SHA-256 `cac5dade696670c7cbe1a2f274a6cc0dab736221d38e918fc6829bb51b57391e` |
+| Скачивание | установщик скачан из Release в `build\downloads\v0.5.1`, SHA-256 совпал с опубликованным |
+| Установка | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="desktopicon,startmenuicon,j2534proxy"` — exit 0, лог `build\install-release-0.5.1.log`: «Installation process succeeded», «j2534proxy: зарегистрирован» |
+| После установки | `ftdi-logger --version` → 0.5.1, `/api/health.version` → 0.5.1, прокси 1.0.0.123, `prefs.json` сохранён; e2e `node ui\tools\scope-check.mjs` → **18/18** на релизном движке |
