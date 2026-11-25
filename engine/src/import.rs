@@ -451,6 +451,126 @@ fn group_steps(events: &[Event]) -> Vec<(u32, Vec<Event>)> {
     out
 }
 
+/// Импорт ZIP-экспорта сессии (`report::export_zip`).
+///
+/// Это не импорт лога: в архиве лежит готовая сессия (`session.json`,
+/// `events.jsonl`, `scope/frames.jsonl`, журналы прокси), поэтому после
+/// распаковки доступны все слои — UIA, осциллограф, вызовы J2534.
+///
+/// Повторный импорт того же архива создаёт `-2`, `-3`: данные не перезаписываются.
+/// Внутри ZIP пути нормализуются (`enclosed_name`), `export/` не распаковывается.
+pub fn import_session_zip(store: &SessionStore, zip_path: &Path) -> anyhow::Result<SessionMeta> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(zip_path)
+        .with_context(|| format!("не открыть архив {}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("не разобрать ZIP {}", zip_path.display()))?;
+
+    // 1. `session.json` ищем на минимальной глубине: экспорт кладёт его в корень,
+    // но ручная упаковка иногда оборачивает всё в папку.
+    let mut meta_name: Option<String> = None;
+    let mut has_events = false;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        let Some(path) = entry.enclosed_name() else {
+            continue;
+        };
+        let name = path.to_string_lossy().replace('\\', "/");
+        if name == "events.jsonl" || name.ends_with("/events.jsonl") {
+            has_events = true;
+        }
+        if name == "session.json" || name.ends_with("/session.json") {
+            let depth = name.matches('/').count();
+            let better = meta_name
+                .as_ref()
+                .map(|m| depth < m.matches('/').count())
+                .unwrap_or(true);
+            if better {
+                meta_name = Some(name);
+            }
+        }
+    }
+    let meta_name = meta_name.ok_or_else(|| {
+        anyhow::anyhow!("это не экспорт сессии: в архиве нет session.json")
+    })?;
+    if !has_events {
+        anyhow::bail!("это не экспорт сессии: в архиве нет events.jsonl");
+    }
+    let prefix = meta_name
+        .strip_suffix("session.json")
+        .unwrap_or("")
+        .to_string();
+
+    // 2. Метаданные и уникальный id.
+    let mut meta: SessionMeta = {
+        let mut entry = archive.by_name(&meta_name)?;
+        let mut text = String::new();
+        entry.read_to_string(&mut text)?;
+        serde_json::from_str(&text).context("session.json в архиве не разобран")?
+    };
+    let base = if meta.id.trim().is_empty() {
+        "imported-session".to_string()
+    } else {
+        store::sanitize_id(&meta.id).context("id сессии в архиве")?
+    };
+    let mut id = base.clone();
+    let mut n = 2u32;
+    while store.dir_for(&id).exists() {
+        id = format!("{base}-{n}");
+        n += 1;
+        if n > 10_000 {
+            anyhow::bail!("не подобрать id для импорта сессии {base}");
+        }
+    }
+    meta.id = id.clone();
+    let dir = store.dir_for(&id);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("не создать {}", dir.display()))?;
+
+    // 3. Распаковка. `session.json` пишем из обновлённой меты, старый не тащим.
+    // Предел распакованного — защита от zip-бомбы: сессия с кадрами и так
+    // бывает в сотни МБ, 4 ГиБ заведомо выше любой реальной.
+    let mut total_bytes: u64 = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(path) = entry.enclosed_name() else {
+            continue;
+        };
+        let name = path.to_string_lossy().replace('\\', "/");
+        let Some(rel) = name.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if rel.is_empty() || rel.ends_with('/') || rel == "session.json" {
+            continue;
+        }
+        // Старые экспорты не нужны: они и в оригинале не пакуются.
+        if rel.starts_with("export/") {
+            continue;
+        }
+        let out = dir.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        const MAX_UNPACKED: u64 = 4 * 1024 * 1024 * 1024;
+        if entry.size() > MAX_UNPACKED {
+            anyhow::bail!("файл в архиве больше 4 ГиБ — импорт остановлен");
+        }
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        total_bytes = total_bytes.saturating_add(data.len() as u64);
+        if total_bytes > MAX_UNPACKED {
+            anyhow::bail!("архив больше 4 ГиБ в распакованном виде — импорт остановлен");
+        }
+        std::fs::write(&out, &data)
+            .with_context(|| format!("не записать {}", out.display()))?;
+    }
+    meta.dir = dir.to_string_lossy().to_string();
+    // Регистрирует сессию в индексе и пишет session.json/state.json.
+    store.update_meta(&meta)?;
+    Ok(meta)
+}
+
 /// Пересобрать сводки шагов и отчёты существующей сессии (повторный reparse идемпотентен).
 pub fn reparse_session(store: &SessionStore, id: &str) -> anyhow::Result<SessionMeta> {
     let reader = store.reader(id)?;
@@ -559,6 +679,9 @@ pub fn reparse_session(store: &SessionStore, id: &str) -> anyhow::Result<Session
         .map(|e| payload_len(e))
         .sum();
     store.update_meta(&meta)?;
+    // Операции и сигналы — до отчёта: `write_session_reports` печатает их,
+    // если файлы уже лежат рядом (docs/16).
+    crate::operations::rebuild(&dir, &meta, &events)?;
     report::write_session_reports(&dir, &meta, &new_steps)?;
     Ok(meta)
 }

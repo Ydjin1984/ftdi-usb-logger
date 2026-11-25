@@ -172,7 +172,7 @@ fn save_index(root: &Path, sessions: &[SessionMeta]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sanitize_id(id: &str) -> anyhow::Result<String> {
+pub fn sanitize_id(id: &str) -> anyhow::Result<String> {
     let id = id.trim();
     if id.is_empty() {
         anyhow::bail!("пустой id сессии");

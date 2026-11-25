@@ -610,6 +610,18 @@ pub struct ProxyLiveItem {
     pub rx: u64,
     #[serde(default)]
     pub errors: u64,
+    /// Security access (docs/16 §5): подтверждённые пары seed→key.
+    #[serde(default)]
+    pub pairs: u64,
+    /// Получено seed (67 7F / 67 01).
+    #[serde(default)]
+    pub seed: u64,
+    /// Отправлено ключей (27 80 / 27 02).
+    #[serde(default)]
+    pub key: u64,
+    /// Отказов `7F 27`.
+    #[serde(default)]
+    pub denied: u64,
     #[serde(default)]
     pub gen: u64,
     #[serde(default)]

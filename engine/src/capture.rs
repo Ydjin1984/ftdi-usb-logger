@@ -2704,6 +2704,7 @@ impl SessionWriterTask {
         // приложения, отчёт не переписывала: в логе 20261119-181253 захват J2534
         // (smj2534.dll, 110 обменов), а в отчёте `Транспорт: vcp` — стартовая
         // догадка «ftd2xx не загружен → vcp».
+        let mut events_for_ops: Option<Vec<Event>> = None;
         if let Ok(reader) = self.store.reader(&self.meta.id) {
             let events = reader.all_events();
             let transport = crate::decode::transport_summary(&events);
@@ -2721,6 +2722,25 @@ impl SessionWriterTask {
                         self.meta.facts.push(fact);
                     }
                 }
+            }
+            events_for_ops = Some(events);
+        }
+        // Операции и сигналы — до отчёта: он печатает их, если файлы уже есть.
+        // Чтение кадров осциллографа идёт блокирующим проходом, поэтому в
+        // отдельной задаче, чтобы не задерживать остановку захвата.
+        if let Some(events) = events_for_ops {
+            let dir = self.writer.dir().to_path_buf();
+            let meta = self.meta.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::operations::rebuild(&dir, &meta, &events)
+            })
+            .await
+            {
+                Ok(Ok(doc)) => {
+                    tracing::info!("операции: {} шт., сигналов {}", doc.operations.len(), doc.seed_pairs)
+                }
+                Ok(Err(err)) => tracing::warn!("операции сессии {}: {err}", self.meta.id),
+                Err(err) => tracing::warn!("операции сессии {}: {err}", self.meta.id),
             }
         }
         if let Err(err) =

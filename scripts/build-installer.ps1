@@ -1,4 +1,4 @@
-# Сборка установщика FTDI/USB Logger (per-user, без администратора).
+﻿# Сборка установщика FTDI/USB Logger (per-user, без администратора).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1 -ForceSfx
@@ -46,9 +46,17 @@ if (-not (Test-Path (Join-Path $PortableApp "FTDI_USB_Logger.exe"))) {
 }
 
 Write-Host "==> готовлю payload" -ForegroundColor Cyan
-if (Test-Path $InstallerDir) { Remove-Item $InstallerDir -Recurse -Force }
+# Удаляем содержимое, а не сам каталог: папка payload может быть текущим
+# каталогом другого процесса (проверка собранного dist, открытый Explorer),
+# и `Remove-Item` самого каталога падает с «used by another process».
+if (Test-Path $InstallerDir) {
+    Get-ChildItem -LiteralPath $InstallerDir -Force -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
 New-Item -ItemType Directory -Force -Path $Payload | Out-Null
-& robocopy $PortableApp $PayloadApp /E /NFL /NDL /NJH /NJS /NP | Out-Null
+New-Item -ItemType Directory -Force -Path $PayloadApp | Out-Null
+# /MIR, а не /E: старые файлы прошлого payload не должны пережить сборку.
+& robocopy $PortableApp $PayloadApp /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy payload: $LASTEXITCODE" }
 
 $readme = @"

@@ -2,6 +2,7 @@
 
 import type {
   CaptureStatus,
+  Event,
   EventsPage,
   FtdiDevice,
   Health,
@@ -16,6 +17,7 @@ import type {
   SessionCounts,
   SessionDetail,
   SessionMeta,
+  OperationsResponse,
   StepEvent,
   StepSummary,
   ToolProcess,
@@ -106,6 +108,9 @@ export const api = {
 
   sessions: () => req<SessionMeta[]>("/api/sessions"),
   session: (id: string) => req<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
+  /** Операции и сигналы стенда; для старых сессий движок считает их на первом запросе. */
+  operations: (id: string) =>
+    req<OperationsResponse>(`/api/sessions/${encodeURIComponent(id)}/operations`),
   events: (
     id: string,
     opts: { from?: number; to?: number; limit?: number; kinds?: string[]; q?: string } = {},
@@ -130,6 +135,11 @@ export const api = {
   },
   decode: (id: string, seq: number) =>
     req<PayloadDecode>(`/api/sessions/${encodeURIComponent(id)}/events/${seq}/decode`),
+  /** Окно событий вокруг `seq` — для перехода из карточки операции. */
+  context: (id: string, seq: number, n = 40) =>
+    req<{ events: Event[]; seq: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/events/${seq}/context?n=${n}`,
+    ),
 
   devices: () => req<FtdiDevice[]>("/api/devices"),
   tools: (mode: "auto" | "usb" | "window" | "all" = "auto") =>

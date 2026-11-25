@@ -68,6 +68,10 @@ pub struct ScopeConfig {
     pub interval_ms: u64,
     pub width: usize,
     pub max_mb: u64,
+    /// Профиль ролей каналов стенда. `bench-gpt` — CH1 GPT1, CH2 GPT2,
+    /// CH3 питание (docs/16 §3); пустая строка — ролей нет, сводка сигналов
+    /// строится только по номерам каналов.
+    pub profile: String,
 }
 
 impl Default for ScopeConfig {
@@ -80,6 +84,7 @@ impl Default for ScopeConfig {
             interval_ms: 50,
             width: 500,
             max_mb: 512,
+            profile: "bench-gpt".to_string(),
         }
     }
 }
@@ -106,7 +111,40 @@ impl ScopeConfig {
         self.interval_ms = self.interval_ms.clamp(20, 1000);
         self.width = self.width.clamp(200, 2000);
         self.max_mb = self.max_mb.min(65_536);
+        self.profile = match self.profile.trim().to_ascii_lowercase().as_str() {
+            "bench-gpt" => "bench-gpt".to_string(),
+            _ => String::new(),
+        };
         self
+    }
+}
+
+/// Роли каналов профиля стенда: (канал, роль, имя).
+///
+/// `bench-gpt` — стенд «Хелтег да Винчи»: CH1 GPT1, CH2 GPT2, CH3 питание.
+/// Список короткий и явный: анализ сигналов не угадывает роли по форме сигнала.
+pub fn profile_roles(profile: &str) -> &'static [(usize, &'static str, &'static str)] {
+    match profile {
+        "bench-gpt" => &[
+            (1, "gpt1", "GPT1"),
+            (2, "gpt2", "GPT2"),
+            (3, "power", "Питание"),
+        ],
+        _ => &[],
+    }
+}
+
+/// Проставить роли каналов по профилю; прежние роли очищаются.
+pub fn apply_profile(channels: &mut [ChannelInfo], profile: &str) {
+    for ch in channels.iter_mut() {
+        ch.role.clear();
+        ch.name.clear();
+    }
+    for (n, role, name) in profile_roles(profile) {
+        if let Some(ch) = channels.iter_mut().find(|c| c.ch == *n) {
+            ch.role = (*role).to_string();
+            ch.name = (*name).to_string();
+        }
     }
 }
 
@@ -181,6 +219,13 @@ pub struct ChannelInfo {
     /// Кумулятивные экстремумы за сеанс на момент кадра.
     pub peak_min: Option<f64>,
     pub peak_max: Option<f64>,
+    /// Роль канала в профиле стенда: `gpt1`, `gpt2`, `power` (docs/16 §3).
+    /// Пусто — роль не задана (старая сессия или профиль без ролей).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// Человеческое имя из профиля: `GPT1`, `Питание`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
 }
 
 /// Измерения кадра по одному каналу (`stats` в ответе API).
@@ -817,6 +862,8 @@ fn parse_channels_value(value: &Value) -> Result<Vec<ChannelInfo>, String> {
             dropouts: get_usize(item, "dropouts").unwrap_or(0),
             peak_min: get_f64(item, "peak_min"),
             peak_max: get_f64(item, "peak_max"),
+            role: String::new(),
+            name: String::new(),
         });
     }
     out.sort_by_key(|info| info.ch);
@@ -875,6 +922,8 @@ fn parse_channel_meta(
             dropouts: get_usize(item, "dropouts").unwrap_or(0),
             peak_min,
             peak_max,
+            role: String::new(),
+            name: String::new(),
         });
     }
     out.sort_by_key(|info| info.ch);
@@ -1229,6 +1278,8 @@ struct MetaLine<'a> {
     interval_ms: u64,
     width: usize,
     max_mb: u64,
+    /// Профиль ролей каналов: по нему отчёт называет GPT1/GPT2/питание.
+    profile: &'a str,
     contract: &'a str,
     engine_version: &'a str,
     started_at: &'a str,
@@ -1416,6 +1467,7 @@ impl Recorder {
             interval_ms: cfg.interval_ms,
             width: cfg.width,
             max_mb: cfg.max_mb,
+            profile: &cfg.profile,
             contract: CONTRACT,
             engine_version: env!("CARGO_PKG_VERSION"),
             started_at: &started_at,
@@ -1633,13 +1685,19 @@ impl Recorder {
         struct ChannelsFile<'a> {
             format: &'a str,
             captured_at: &'a str,
+            profile: &'a str,
             channels: &'a [ChannelInfo],
         }
         let captured_at = now_rfc3339();
+        // Роли пишем в файл сессии: иначе по ZIP нельзя понять, что CH1 — GPT1,
+        // и разбор сигналов применяет профиль по умолчанию (docs/16 §3).
+        let mut channels = channels.to_vec();
+        apply_profile(&mut channels, &self.cfg.profile);
         let body = ChannelsFile {
             format: "scope-channels/1",
             captured_at: &captured_at,
-            channels,
+            profile: &self.cfg.profile,
+            channels: &channels,
         };
         write_json_pretty(&self.dir.join("channels.json"), &body)
             .with_context(|| format!("не записать channels.json в {}", self.dir.display()))
@@ -1960,6 +2018,8 @@ mod tests {
                 dropouts: 0,
                 peak_min: Some(-1.0),
                 peak_max: Some(1.0),
+                role: String::new(),
+                name: String::new(),
             }],
             stats: vec![Stat {
                 ch: 1,
@@ -2005,6 +2065,7 @@ mod tests {
             interval_ms: 1,
             width: 10,
             max_mb: 999_999,
+            profile: "bench-gpt".to_string(),
         }
         .sanitized();
         assert_eq!(cfg.url, "http://10.0.0.5:7411");
@@ -2063,6 +2124,7 @@ mod tests {
             interval_ms: 5_000,
             width: 64,
             max_mb: 1,
+            profile: "bench-gpt".to_string(),
         };
         let saved = save_config(root, &wanted).unwrap();
         assert_eq!(saved.interval_ms, 1_000);
@@ -2430,6 +2492,7 @@ mod tests {
             interval_ms: 50,
             width: 500,
             max_mb: 512,
+            profile: "bench-gpt".to_string(),
         };
         let mut rec = Recorder::open(dir.path(), &cfg, "sess-42").unwrap();
         rec.accept(1.0, "2026-01-01T00:00:01.000Z", &frame_with(1, "AAAA"));
@@ -2519,6 +2582,8 @@ mod tests {
                 dropouts: 0,
                 peak_min: Some(-0.2),
                 peak_max: Some(0.2),
+                role: String::new(),
+                name: String::new(),
             })
             .collect();
         frame.stats = Vec::new();

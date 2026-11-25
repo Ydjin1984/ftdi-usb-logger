@@ -12,6 +12,7 @@ import { Stream } from "./components/stream";
 import { Inspector } from "./components/inspector";
 import { Timeline } from "./components/timeline";
 import { Transport } from "./components/transport";
+import { Operations } from "./components/operations";
 import { TrafficMeter } from "./components/traffic";
 import { Workspace } from "./workspace";
 import {
@@ -34,6 +35,9 @@ msg({
   "ИМПОРТ ЛОГА": "IMPORT LOG",
   "Отпустите файл ": "Drop the file ",
   " — он будет разобран и добавлен как сессия.": " — it will be parsed and added as a session.",
+  ".log / .out / .txt": ".log / .out / .txt",
+  ".log / .out / .txt / .zip": ".log / .out / .txt / .zip",
+  "ZIP — готовый экспорт сессии со всеми слоями.": "A ZIP is a session export with all layers.",
   "Движок не отвечает: логер остановлен или перезапускается. Предыдущая сессия уже не пишется.":
     "The engine is not responding: the logger is stopped or restarting. The previous session is no longer being recorded.",
   "Запустите ярлык logger.cmd заново — эта страница переподключится сама, как только движок поднимется.":
@@ -55,6 +59,14 @@ function build(): void {
   const topbar = new Topbar();
   const rail = new Rail();
   const stream = new Stream();
+  const operations = new Operations(async (seq) => {
+    await store.focusEvent(seq);
+    // Инспектор по умолчанию мог остаться на вкладке шага: отметка операции
+    // должна открыть именно событие.
+    document
+      .querySelector<HTMLElement>('.inspect .tab[data-tab="event"]')
+      ?.click();
+  });
   const inspector = new Inspector();
   const timeline = new Timeline((seq) => stream.scrollToSeq(seq));
   const transport = new Transport();
@@ -62,6 +74,8 @@ function build(): void {
   // Телеметрия обмена (пишет ded-bekend): вставляется над тулбаром потока.
   const traffic = new TrafficMeter();
   stream.mountPanel(traffic.el);
+  // Карточки операций — над лентой: клик → вызовы → сигналы → итог (docs/16).
+  stream.mountPanel(operations.el);
   // Левая панель: грип-разделитель + кнопка скрытия в шапке.
   const workspace = new Workspace(app, topbar.el, rail.el);
 
@@ -114,6 +128,7 @@ function build(): void {
       topbar.update();
       rail.update();
       stream.update();
+      operations.update();
       traffic.update();
       inspector.update();
       timeline.update();
@@ -131,7 +146,10 @@ function build(): void {
 
   installHotkeys(stream);
   // Отладочный доступ: window.__ftdi.store (используется tests/e2e и ручной диагностикой).
-  (window as unknown as { __ftdi: unknown }).__ftdi = { store, components: { stream, traffic, workspace } };
+  (window as unknown as { __ftdi: unknown }).__ftdi = {
+    store,
+    components: { stream, traffic, operations, workspace },
+  };
 }
 
 function installHotkeys(stream: Stream): void {
@@ -204,7 +222,7 @@ function installHotkeys(stream: Stream): void {
 function pickAndImport(): void {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = ".log,.txt,.out,.jsonl";
+  input.accept = ".log,.txt,.out,.jsonl,.zip";
   input.onchange = async () => {
     const file = input.files?.[0];
     if (!file) return;
@@ -223,8 +241,9 @@ function installDropzone(): void {
   const body = el("div", "sec__empty");
   body.append(
     document.createTextNode(t("Отпустите файл ")),
-    el("b", "", ".log / .out / .txt"),
+    el("b", "", ".log / .out / .txt / .zip"),
     document.createTextNode(t(" — он будет разобран и добавлен как сессия.")),
+    el("div", "sec__empty", t("ZIP — готовый экспорт сессии со всеми слоями.")),
   );
   box.append(title, body);
   overlay.append(box);

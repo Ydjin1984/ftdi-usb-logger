@@ -11,6 +11,8 @@ import type {
   FtdiDevice,
   Health,
   Note,
+  OperationsDoc,
+  ScopeAnalysis,
   SessionCounts,
   SessionMeta,
   StepEvent,
@@ -47,6 +49,10 @@ export interface StoreState {
   active: SessionMeta | null;
   steps: StepSummary[];
   notes: Note[];
+  /** Операции сессии: клик → вызовы → сигналы → итог (docs/16). */
+  operations: OperationsDoc | null;
+  /** Выжимка по сигналам стенда: события PWM/питания и покрытие. */
+  scopeAnalysis: ScopeAnalysis | null;
 
   events: Event[];
   firstSeq: number;
@@ -101,6 +107,9 @@ const ALL_KINDS: EventKind[] = [
 ];
 
 msg({
+  "импорт готов: сессия открыта": "import done: session opened",
+  "событие seq {seq} не найдено": "event seq {seq} not found",
+  "не открыть событие: {msg}": "cannot open event: {msg}",
   "Идентификация": "Identification",
   "Чтение калибровок": "Read calibrations",
   "Чтение фулл флеш": "Read full flash",
@@ -201,6 +210,8 @@ class Store {
       active: null,
       steps: [],
       notes: [],
+      operations: null,
+      scopeAnalysis: null,
       events: [],
       firstSeq: 0,
       lastSeq: 0,
@@ -638,6 +649,8 @@ class Store {
       this.state.active = detail.meta;
       this.state.steps = detail.steps ?? [];
       this.state.notes = detail.meta.notes ?? [];
+      this.state.operations = null;
+      this.state.scopeAnalysis = null;
       this.state.events = events;
       this.state.firstSeq = events.length ? events[0].seq : 0;
       this.state.lastSeq = events.length ? events[events.length - 1].seq : 0;
@@ -650,6 +663,19 @@ class Store {
       this.state.stepStartEpoch = 0;
       this.ws?.subscribe(id, this.state.lastSeq + 1);
       this.emit();
+      // Операции для старой сессии считаются на первом запросе (до ~15 с на
+      // 129 МБ кадров): не блокируем открытие, панель появится, когда готово.
+      void api
+        .operations(id)
+        .then((ops) => {
+          if (this.state.active?.id !== id) return;
+          this.state.operations = ops.operations;
+          this.state.scopeAnalysis = ops.scope;
+          this.emit();
+        })
+        .catch(() => {
+          /* панель просто не появится; отчёт и лента уже открыты */
+        });
     } catch (e) {
       this.toast("error", t("сессия не открылась: {msg}", { msg: errText(e) }));
     }
@@ -843,6 +869,8 @@ class Store {
       this.state.sessions = [meta, ...this.state.sessions.filter((s) => s.id !== meta.id)];
       this.state.events = [];
       this.state.steps = [];
+      this.state.operations = null;
+      this.state.scopeAnalysis = null;
       this.state.firstSeq = 0;
       this.state.lastSeq = 0;
       this.state.total = 0;
@@ -877,6 +905,8 @@ class Store {
       this.state.events = [];
       this.state.steps = [];
       this.state.notes = [];
+      this.state.operations = null;
+      this.state.scopeAnalysis = null;
       this.state.selection = null;
       this.state.currentStep = null;
       this.state.stepStartEpoch = 0;
@@ -905,6 +935,8 @@ class Store {
       this.state.sessions = [meta, ...this.state.sessions.filter((s) => s.id !== meta.id)];
       this.state.events = [];
       this.state.steps = [];
+      this.state.operations = null;
+      this.state.scopeAnalysis = null;
       this.state.firstSeq = 0;
       this.state.lastSeq = 0;
       this.state.total = 0;
@@ -1072,6 +1104,25 @@ class Store {
     }
   }
 
+  /// Открыть событие по seq из карточки операции: грузим окно вокруг него,
+  /// потому что в потоке лежит только хвост длинной сессии.
+  async focusEvent(seq: number): Promise<void> {
+    const id = this.state.active?.id;
+    if (!id || this.state.mode === "demo") return;
+    try {
+      const page = await api.context(id, seq, 40);
+      const ev = page.events.find((e) => e.seq === seq) ?? null;
+      if (!ev) {
+        this.toast("warn", t("событие seq {seq} не найдено", { seq }));
+        return;
+      }
+      this.state.selection = ev;
+      this.emit();
+    } catch (e) {
+      this.toast("warn", t("не открыть событие: {msg}", { msg: errText(e) }));
+    }
+  }
+
   async mark(title: string): Promise<void> {
     const s = this.state;
     if (!s.active) return;
@@ -1219,7 +1270,7 @@ class Store {
   pickFile(): void {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".log,.txt,.out,.jsonl";
+    input.accept = ".log,.txt,.out,.jsonl,.zip";
     input.onchange = async () => {
       const file = input.files?.[0];
       if (file) await this.importUpload(file);
@@ -1237,7 +1288,7 @@ class Store {
       this.toast("info", t("импортирую {name}…", { name: file.name }));
       const bytes = await file.arrayBuffer();
       const r = await api.importUpload(file.name, bytes);
-      this.toast("ok", t("лог импортирован, переразбор готов"));
+      this.toast("ok", t("импорт готов: сессия открыта"));
       await this.refreshSessions();
       await this.selectSession(r.session_id);
     } catch (e) {

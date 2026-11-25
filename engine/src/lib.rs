@@ -17,6 +17,9 @@ pub mod proxy;
 pub mod usbpcap;
 pub mod scope;
 pub mod uiactions;
+pub mod textfix;
+pub mod signals;
+pub mod operations;
 
 use std::sync::Arc;
 use anyhow::Context;

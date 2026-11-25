@@ -195,6 +195,16 @@ fn proxy_md_block(lane: &ProxyLane) -> String {
 
 /// Текстовый отчёт в формате старого логера.
 pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
+    render_text_ext(meta, steps, None, None)
+}
+
+/// Тот же отчёт с разделами «Операции» и «Сигналы стенда» (docs/16).
+pub fn render_text_ext(
+    meta: &SessionMeta,
+    steps: &[StepSummary],
+    ops: Option<&crate::operations::OperationsDoc>,
+    scope: Option<&crate::signals::ScopeAnalysis>,
+) -> String {
     let mut out = String::new();
     out.push_str(BAR);
     out.push('\n');
@@ -452,6 +462,16 @@ pub fn render_text(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     for line in scope_lines(meta) {
         out.push_str(&format!("  {line}\n"));
     }
+    if let Some(scope) = scope {
+        for line in scope_analysis_lines(scope) {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    if let Some(doc) = ops {
+        for line in operations_text_lines(doc, meta) {
+            out.push_str(&format!("{line}\n"));
+        }
+    }
     if !meta.notes.is_empty() {
         out.push_str(DASH);
         out.push('\n');
@@ -656,6 +676,476 @@ fn md_cell(text: &str) -> String {
     text.replace('|', "/").replace('\n', " ")
 }
 
+fn fmt_t(t: f64) -> String {
+    format!("{t:.2}")
+}
+
+fn fmt_dur_s(sec: f64) -> String {
+    if sec >= 60.0 {
+        format!("{sec:.1} с ({:.1} мин)", sec / 60.0)
+    } else {
+        format!("{sec:.2} с")
+    }
+}
+
+fn signal_bracket(ev: &crate::signals::SignalEvent) -> String {
+    match ev.t_before {
+        Some(before) => format!("{:.2}–{:.2} с", before, ev.t_after),
+        None => format!("{:.2} с (первый кадр)", ev.t_after),
+    }
+}
+
+/// Строки раздела «Сигналы стенда» (docs/16 §3).
+pub fn scope_analysis_lines(a: &crate::signals::ScopeAnalysis) -> Vec<String> {
+    let mut out = Vec::new();
+    if a.channels.is_empty() && a.events.is_empty() && a.coverage.frames == 0 {
+        return out;
+    }
+    if !a.channels.is_empty() {
+        let roles: Vec<String> = a
+            .channels
+            .iter()
+            .map(|c| format!("CH{} {}", c.ch, c.name))
+            .collect();
+        out.push(format!(
+            "профиль каналов: {} ({})",
+            roles.join(", "),
+            if a.profile_assumed {
+                "роли в сессии не сохранены, применён профиль стенда по умолчанию — предположение"
+            } else {
+                "сохранён в сессии"
+            }
+        ));
+    }
+    if a.coverage.frames > 0 {
+        out.push(format!(
+            "сигналы: кадров {}, окон {:.2} с из {:.2} с сессии ({:.1} %), интервал публикаций медиана {:.0} мс / p95 {:.0} мс",
+            a.coverage.frames,
+            a.coverage.signal_s,
+            a.coverage.session_s,
+            a.coverage.pct,
+            a.coverage.interval_p50_ms,
+            a.coverage.interval_p95_ms
+        ));
+    }
+    if !a.events.is_empty() {
+        out.push(format!("события сигналов: {}", a.events.len()));
+        for ev in a.events.iter().take(24) {
+            out.push(format!(
+                "  {} · {} · {}",
+                signal_bracket(ev),
+                ev.name,
+                ev.text
+            ));
+        }
+        if a.events.len() > 24 {
+            out.push(format!(
+                "  … ещё {} событий: scope/analysis.json",
+                a.events.len() - 24
+            ));
+        }
+    }
+    if !a.gaps.is_empty() {
+        let longest = &a.gaps[0];
+        out.push(format!(
+            "без наблюдения: {} интервалов, самый длинный {:.0} мс ({}–{} с, пропущено публикаций {}); между кадрами сигнал не писался",
+            a.gap_count,
+            longest.interval_ms,
+            fmt_t(longest.t0),
+            fmt_t(longest.t1),
+            longest.blocks
+        ));
+    }
+    for note in &a.notes {
+        out.push(format!("ограничение: {note}"));
+    }
+    out
+}
+
+fn auth_line(op: &crate::operations::Operation) -> String {
+    if op.auth.is_empty() && op.seeds.is_empty() {
+        return "нет обмена 0x27".into();
+    }
+    let seed_requests: u64 = op.auth.iter().filter(|s| s.kind == "seed_request").count() as u64;
+    let seeds: u64 = op.auth.iter().filter(|s| s.kind == "seed").count() as u64;
+    let keys: u64 = op.auth.iter().filter(|s| s.kind == "key").count() as u64;
+    let mut parts = vec![format!(
+        "seed: запросов {seed_requests}, получено {seeds}, ключ {keys}"
+    )];
+    if let Some(last) = op.seeds.iter().rev().find(|p| p.key_seq.is_some()) {
+        parts.push(format!(
+            "ключ {} Б (seed {} Б)",
+            last.key_len, last.seed_len
+        ));
+        match last.accepted {
+            Some(true) => parts.push("67 80 — принят".into()),
+            Some(false) => parts.push("7F 27 — отклонён".into()),
+            None => parts.push("ответ не получен".into()),
+        }
+    }
+    let unmatched = op.seeds.iter().filter(|p| p.key_seq.is_none()).count();
+    if unmatched > 0 {
+        parts.push(format!("seed без ключа: {unmatched}"));
+    }
+    if let Some(denied) = op.auth.iter().find(|s| s.kind == "denied") {
+        if let Some(nrc) = denied.nrc {
+            parts.push(format!("NRC 0x{nrc:02X} (событие seq {})", denied.seq));
+        }
+    }
+    if let Some(timeout) = op.auth.iter().find(|s| s.kind == "timeout") {
+        parts.push(format!("тайм-аут (seq {})", timeout.seq));
+    }
+    parts.join(" · ")
+}
+
+fn operations_text_lines(
+    doc: &crate::operations::OperationsDoc,
+    meta: &SessionMeta,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if doc.operations.is_empty() {
+        return out;
+    }
+    out.push(DASH.to_string());
+    out.push(format!(
+        "ОПЕРАЦИИ: {} (подтверждённых кликом {}, выведенных из обмена {})",
+        doc.operations.len(),
+        doc.operations.iter().filter(|o| o.origin == "confirmed").count(),
+        doc.operations.iter().filter(|o| o.origin != "confirmed").count()
+    ));
+    for op in &doc.operations {
+        out.push(format!(
+            "  [{}] {} · {} · {:.2}–{:.2} с ({}) · участков {} · TX {} / RX {}{}",
+            op.idx,
+            op.name,
+            if op.origin == "confirmed" {
+                "подтверждено кликом"
+            } else {
+                "границы из обмена — предположительно"
+            },
+            op.t0,
+            op.t1,
+            fmt_dur_s(op.t1 - op.t0),
+            op.segments.len(),
+            op.calls.tx_msgs,
+            op.calls.rx_msgs,
+            if op.calls.rx_empty > 0 {
+                format!(" (+{} пустых чтений)", op.calls.rx_empty)
+            } else {
+                String::new()
+            }
+        ));
+        if let Some(t) = op.click_t {
+            out.push(format!(
+                "      старт: клик «{}» {:.2} с ({}{})",
+                op.name,
+                t,
+                op.activation.clone().unwrap_or_default(),
+                op.window
+                    .as_ref()
+                    .map(|w| format!(", окно {w}"))
+                    .unwrap_or_default()
+            ));
+        } else {
+            out.push("      старт: границы выведены из обмена — предположительно".into());
+        }
+        for sig in &op.signals {
+            out.push(format!(
+                "      сигнал: {} · {} [{}]{}",
+                sig.name,
+                sig.text,
+                signal_bracket_raw(sig.t_before, sig.t_after),
+                if sig.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", sig.note)
+                }
+            ));
+        }
+        for seg in &op.segments {
+            out.push(format!(
+                "      обмен {}: {:.2}–{:.2} с ({:.2} с) · {} посылок · TX {} B / RX {} B · {}",
+                seg.idx,
+                seg.t0,
+                seg.t1,
+                (seg.t1 - seg.t0).max(0.0),
+                seg.tx + seg.rx,
+                seg.tx_bytes,
+                seg.rx_bytes,
+                seg.services
+            ));
+        }
+        out.push(format!(
+            "      J2534: write-вызовов {}, read-вызовов {}, холостых опросов {}, ошибок драйвера {}; rc: {}; каналы: {}",
+            op.calls.write_calls,
+            op.calls.read_calls,
+            op.calls.empty_polls,
+            op.calls.driver_errors,
+            op.calls
+                .rc_values
+                .iter()
+                .map(|(k, v)| format!("{k}×{v}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if op.calls.channels.is_empty() {
+                "—".into()
+            } else {
+                op.calls.channels.join(", ")
+            }
+        ));
+        for rec in op.notable_calls.iter().take(6) {
+            out.push(format!(
+                "      вызов {} {}: {:.3}–{:.3} с, {:.1} мс, rc=0x{:02X} ({}), канал {}, сообщений {}→{}",
+                rec.call,
+                rec.op,
+                rec.t0,
+                rec.t1,
+                rec.dur_ms,
+                rec.rc,
+                rec.outcome,
+                rec.channel,
+                rec.n_in,
+                rec.n_out
+            ));
+        }
+        if op.notable_calls.len() > 6 {
+            out.push(format!(
+                "      … ещё {} вызовов с отклонениями — operations.json",
+                op.notable_calls.len() - 6
+            ));
+        }
+        out.push(format!("      авторизация: {}", auth_line(op)));
+        if !op.files.is_empty() {
+            out.push(format!("      файлы: {}", op.files.join(" · ")));
+        }
+        out.push(format!("      результат: {}", op.result.text));
+        for d in &op.dialogs {
+            out.push(format!(
+                "      диалог: «{}» {:.2} с ({}; привязка — эвристика)",
+                d.label, d.t, d.confidence
+            ));
+        }
+        for n in &op.notes {
+            out.push(format!("      примечание: {n}"));
+        }
+    }
+    for note in &doc.notes {
+        out.push(format!("  {note}"));
+    }
+    if let Some(line) = counters_check(doc, meta) {
+        out.push(format!("  {line}"));
+    }
+    out.push(
+        "  часы: t — общая шкала сессии; TX/RX и файлы — meta.t_line (t_clock=bridge, часы источника); \
+         кадры осциллографа — приём логгером (time_source=delivery, часов источника нет); \
+         клик — момент регистрации UIA, точность не измерялась"
+            .to_string(),
+    );
+    out
+}
+
+fn signal_bracket_raw(before: Option<f64>, after: f64) -> String {
+    match before {
+        Some(b) => format!("{b:.2}–{after:.2} с"),
+        None => format!("{after:.2} с, первый кадр"),
+    }
+}
+
+fn operations_markdown(
+    doc: &crate::operations::OperationsDoc,
+    meta: &SessionMeta,
+) -> String {
+    let mut out = String::new();
+    out.push_str("## Операции\n\n");
+    if doc.operations.is_empty() {
+        out.push_str("Операций нет: подтверждённых действий и обмена не нашлось.\n");
+        return out;
+    }
+    out.push_str("| # | Операция | Начало | Конец | Длит., с | Участков | TX / RX (данные) | Авторизация | Результат |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    for op in &doc.operations {
+        out.push_str(&format!(
+            "| {} | {} | {:.2} | {:.2} | {:.2} | {} | {} / {} | {} | {} |\n",
+            op.idx,
+            md_cell(&op.name),
+            op.t0,
+            op.t1,
+            (op.t1 - op.t0).max(0.0),
+            op.segments.len(),
+            op.calls.tx_msgs,
+            op.calls.rx_msgs,
+            md_cell(&auth_line(op)),
+            md_cell(&op.result.text)
+        ));
+    }
+    out.push('\n');
+    let empty: u64 = doc.operations.iter().map(|o| o.calls.rx_empty).sum();
+    if empty > 0 {
+        out.push_str(&format!(
+            "RX — только ответы с данными; пустых чтений (`ReadMsgs` без сообщения): {empty}. \
+             В `events.jsonl` RX вдвое больше, чем ответов, ровно из-за них.\n\n"
+        ));
+    }
+    if let Some(line) = counters_check(doc, meta) {
+        out.push_str(&format!("> {line}\n\n"));
+    }
+    out.push_str(
+        "> Часы: `t` — общая шкала сессии. Строки моста несут `meta.t_line` (часы источника) \
+         и `t_clock=bridge`; кадры осциллографа — время приёма логгером (`time_source=delivery`, \
+         часов источника нет); клик — момент регистрации UI Automation, задержка не измерялась.\n\n",
+    );
+    for op in &doc.operations {
+        out.push_str(&format!("### Операция {} — {}\n\n", op.idx, op.name));
+        out.push_str(&format!(
+            "- **Границы:** {:.2}–{:.2} с ({}); старт — {}, конец — {} · {}\n",
+            op.t0,
+            op.t1,
+            fmt_dur_s(op.t1 - op.t0),
+            boundary_ru(&op.start_confidence),
+            boundary_ru(&op.end_confidence),
+            if op.origin == "confirmed" {
+                "подтверждено кликом"
+            } else {
+                "выведено из обмена — предположительно"
+            }
+        ));
+        if let Some(t) = op.click_t {
+            out.push_str(&format!(
+                "- **Клик:** «{}» в {:.2} с ({}{})\n",
+                op.name,
+                t,
+                op.activation.clone().unwrap_or_default(),
+                op.window
+                    .as_ref()
+                    .map(|w| format!(", окно {w}"))
+                    .unwrap_or_default()
+            ));
+        }
+        for sig in &op.signals {
+            out.push_str(&format!(
+                "- **Сигнал:** {} — {} ({}).{}\n",
+                sig.name,
+                sig.text,
+                signal_bracket_raw(sig.t_before, sig.t_after),
+                if sig.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", sig.note)
+                }
+            ));
+        }
+        for seg in &op.segments {
+            out.push_str(&format!(
+                "- **Обмен {}:** {:.2}–{:.2} с, {} посылок, TX {} B / RX {} B · {}\n",
+                seg.idx,
+                seg.t0,
+                seg.t1,
+                seg.tx + seg.rx,
+                seg.tx_bytes,
+                seg.rx_bytes,
+                seg.services
+            ));
+        }
+        out.push_str(&format!(
+            "- **J2534:** write {}, read {}, холостых опросов {}, ошибок драйвера {}; rc: {}; каналы: {}\n",
+            op.calls.write_calls,
+            op.calls.read_calls,
+            op.calls.empty_polls,
+            op.calls.driver_errors,
+            op.calls
+                .rc_values
+                .iter()
+                .map(|(k, v)| format!("{k}×{v}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if op.calls.channels.is_empty() {
+                "—".into()
+            } else {
+                op.calls.channels.join(", ")
+            }
+        ));
+        if !op.notable_calls.is_empty() {
+            out.push_str("\n| Вызов | Окно, с | rc | Канал | Сообщений | Итог |\n|---|---|---|---|---|---|\n");
+            for rec in op.notable_calls.iter().take(8) {
+                out.push_str(&format!(
+                    "| {} {} | {:.3}–{:.3} ({:.1} мс) | 0x{:02X} | {} | {}→{} | {} |\n",
+                    rec.call,
+                    rec.op,
+                    rec.t0,
+                    rec.t1,
+                    rec.dur_ms,
+                    rec.rc,
+                    rec.channel,
+                    rec.n_in,
+                    rec.n_out,
+                    rec.outcome
+                ));
+            }
+            if op.notable_calls.len() > 8 {
+                out.push_str(&format!(
+                    "\n… ещё {} вызовов с отклонениями — `operations.json`.\n",
+                    op.notable_calls.len() - 8
+                ));
+            }
+            out.push('\n');
+        }
+        out.push_str(&format!("- **Авторизация:** {}\n", auth_line(op)));
+        if !op.files.is_empty() {
+            out.push_str(&format!("- **Файлы:** {}\n", op.files.join(" · ")));
+        }
+        out.push_str(&format!("- **Результат:** {}\n", op.result.text));
+        if !op.dialogs.is_empty() {
+            let list: Vec<String> = op
+                .dialogs
+                .iter()
+                .map(|d| format!("«{}» {:.2} с", d.label, d.t))
+                .collect();
+            out.push_str(&format!(
+                "- **Диалоги:** {} (привязка — эвристика по типу и времени)\n",
+                list.join(", ")
+            ));
+        }
+        for n in &op.notes {
+            out.push_str(&format!("- _{n}_\n"));
+        }
+        out.push('\n');
+    }
+    for note in &doc.notes {
+        out.push_str(&format!("> {note}\n\n"));
+    }
+    out
+}
+
+/// Сверка счётчиков операций с полосой прокси (docs/13 §6.2).
+fn counters_check(
+    doc: &crate::operations::OperationsDoc,
+    meta: &SessionMeta,
+) -> Option<String> {
+    let proxy = meta.proxy.as_ref()?;
+    let tx: u64 = doc.operations.iter().map(|o| o.calls.tx_msgs).sum();
+    let rx: u64 = doc.operations.iter().map(|o| o.calls.rx_msgs).sum();
+    let verdict = |ok: bool| if ok { "совпало" } else { "РАСХОЖДЕНИЕ" };
+    Some(format!(
+        "сверка с прокси: TX по операциям {} / прокси {} — {}; RX с данными {} / прокси {} — {}",
+        tx,
+        proxy.tx,
+        verdict(tx == proxy.tx),
+        rx,
+        proxy.rx,
+        verdict(rx == proxy.rx)
+    ))
+}
+
+fn boundary_ru(confidence: &str) -> &'static str {
+    match confidence {
+        "confirmed_click" => "подтверждённый клик",
+        "exchange_stop" => "остановка обмена",
+        "disconnect" => "disconnect/close",
+        "dialog" => "диалог программы",
+        _ => "выведено из обмена — предположительно",
+    }
+}
+
 fn mermaid_label(text: &str) -> String {
     text.replace('"', "'")
         .replace('[', "(")
@@ -727,6 +1217,16 @@ pub fn render_step_phase(step: &StepSummary) -> Vec<String> {
 }
 
 pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
+    render_markdown_ext(meta, steps, None, None)
+}
+
+/// Markdown-отчёт с разделами «Операции» и «Сигналы стенда» (docs/16).
+pub fn render_markdown_ext(
+    meta: &SessionMeta,
+    steps: &[StepSummary],
+    ops: Option<&crate::operations::OperationsDoc>,
+    scope: Option<&crate::signals::ScopeAnalysis>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Отчёт сессии «{}»\n\n", meta.label));
     out.push_str("| Поле | Значение |\n|---|---|\n");
@@ -937,12 +1437,23 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
     }
     out.push('\n');
 
-    let scope = scope_lines(meta);
-    if !scope.is_empty() {
+    let scope_head = scope_lines(meta);
+    if !scope_head.is_empty() {
         out.push_str("## Осциллограф\n\n");
-        for line in &scope {
+        for line in &scope_head {
             out.push_str(&format!("- {}\n", md_cell(line)));
         }
+        out.push('\n');
+    }
+    if let Some(analysis) = scope {
+        out.push_str("### Сигналы стенда\n\n");
+        for line in scope_analysis_lines(analysis) {
+            out.push_str(&format!("- {}\n", md_cell(&line)));
+        }
+        out.push('\n');
+    }
+    if let Some(doc) = ops {
+        out.push_str(&operations_markdown(doc, meta));
         out.push('\n');
     }
     // Пустой раздел «## Шаги / Шагов нет» дублировал «## Обмен» выше: если
@@ -1023,13 +1534,18 @@ pub fn render_markdown(meta: &SessionMeta, steps: &[StepSummary]) -> String {
 }
 
 /// Записать `report.txt` и `report.md` в каталог сессии.
+///
+/// Если рядом уже лежат `operations.json` и `scope/analysis.json` (переразбор,
+/// финализация захвата), отчёт получает разделы «Операции» и «Сигналы стенда».
 pub fn write_session_reports(
     dir: &Path,
     meta: &SessionMeta,
     steps: &[StepSummary],
 ) -> anyhow::Result<()> {
-    let txt = render_text(meta, steps);
-    let md = render_markdown(meta, steps);
+    let ops = crate::operations::load(dir, &meta.id);
+    let scope = crate::signals::load(dir, &meta.id);
+    let txt = render_text_ext(meta, steps, ops.as_ref(), scope.as_ref());
+    let md = render_markdown_ext(meta, steps, ops.as_ref(), scope.as_ref());
     write_text_atomic(&dir.join("report.txt"), &txt)?;
     write_text_atomic(&dir.join("report.md"), &md)?;
     Ok(())
@@ -1132,7 +1648,17 @@ pub fn export_jsonl(dir: &Path, out: &Path) -> anyhow::Result<()> {
 }
 
 /// Markdown-экспорт отчёта в произвольный файл.
-pub fn export_markdown(meta: &SessionMeta, steps: &[StepSummary], out: &Path) -> anyhow::Result<()> {
-    write_text_atomic(out, &render_markdown(meta, steps))
+pub fn export_markdown(
+    dir: &Path,
+    meta: &SessionMeta,
+    steps: &[StepSummary],
+    out: &Path,
+) -> anyhow::Result<()> {
+    let ops = crate::operations::load(dir, &meta.id);
+    let scope = crate::signals::load(dir, &meta.id);
+    write_text_atomic(
+        out,
+        &render_markdown_ext(meta, steps, ops.as_ref(), scope.as_ref()),
+    )
 }
 

@@ -172,6 +172,14 @@ export interface ProxyLiveItem {
   tx: number;
   rx: number;
   errors: number;
+  /** Пары seed→key, подтверждённые `67 xx` (docs/16 §5). */
+  pairs?: number;
+  /** Получено seed. */
+  seed?: number;
+  /** Отправлено ключей. */
+  key?: number;
+  /** Отказов `7F 27`. */
+  denied?: number;
   gen: number;
   bits: number;
   /** Настоящий драйвер не открылся: вызовы вернут 0x08. */
@@ -498,6 +506,8 @@ export interface ScopeConfig {
   interval_ms: number;
   width: number;
   max_mb: number;
+  /** Профиль ролей каналов: `bench-gpt` — CH1 GPT1, CH2 GPT2, CH3 питание. */
+  profile?: string;
 }
 
 /** Один канал в ответе `GET /api/scope/status`. */
@@ -583,3 +593,187 @@ export interface ScopeConfigResult {
   ok: boolean;
   config: ScopeConfig;
 }
+
+// ─────────────────────── операции и сигналы стенда (docs/16) ─────────────────
+
+export interface OperationSegment {
+  idx: number;
+  t0: number;
+  t1: number;
+  gap_before: number;
+  tx: number;
+  rx: number;
+  tx_bytes: number;
+  rx_bytes: number;
+  services: string;
+}
+
+export interface OperationCallSummary {
+  write_calls: number;
+  read_calls: number;
+  ok: number;
+  empty_polls: number;
+  driver_errors: number;
+  rc_values: Record<string, number>;
+  channels: string[];
+  first_call_t?: number | null;
+  last_call_t?: number | null;
+  requested: number;
+  returned: number;
+  tx_msgs: number;
+  rx_msgs: number;
+  /** RX без данных: подтверждение ReadMsgs, не ответ ЭБУ. */
+  rx_empty: number;
+}
+
+export interface OperationCallRecord {
+  op: string;
+  call: number;
+  t0: number;
+  t1: number;
+  dur_ms: number;
+  rc: number;
+  channel: string;
+  n_in: number;
+  n_out: number;
+  outcome: string;
+  seq: number;
+}
+
+export interface OperationAuthStage {
+  kind: string;
+  t: number;
+  seq: number;
+  service: string;
+  sub?: string;
+  len: number;
+  nrc?: number | null;
+  value_hash?: string;
+  text: string;
+}
+
+export interface OperationSeedPair {
+  seed_t: number;
+  seed_seq: number;
+  seed_len: number;
+  key_t?: number | null;
+  key_seq?: number | null;
+  key_len: number;
+  accepted?: boolean | null;
+  accepted_seq?: number | null;
+}
+
+export interface OperationMilestone {
+  t: number;
+  kind: string;
+  label: string;
+  seq?: number | null;
+  confidence: string;
+  t_source?: string;
+  detail?: string;
+}
+
+export interface OperationSignalNote {
+  kind: string;
+  name: string;
+  t_before?: number | null;
+  t_after: number;
+  width_ms?: number | null;
+  text: string;
+  /** `before` | `after` | `ambiguous` | `unknown` — относительно клика. */
+  order: string;
+  delta_ms?: number | null;
+  anchor?: string;
+  note?: string;
+}
+
+export interface OperationResult {
+  status: string;
+  text: string;
+  requests: number;
+  answers: number;
+  last_request_seq?: number | null;
+  last_answer_seq?: number | null;
+  nrc?: number | null;
+}
+
+export interface Operation {
+  id: string;
+  idx: number;
+  action: string;
+  name: string;
+  origin: string;
+  start_confidence: string;
+  end_confidence: string;
+  t0: number;
+  t1: number;
+  click_t?: number | null;
+  click_seq?: number | null;
+  activation?: string | null;
+  window?: string | null;
+  segments: OperationSegment[];
+  calls: OperationCallSummary;
+  notable_calls: OperationCallRecord[];
+  auth: OperationAuthStage[];
+  auth_status: string;
+  seeds: OperationSeedPair[];
+  dialogs: OperationMilestone[];
+  milestones: OperationMilestone[];
+  signals: OperationSignalNote[];
+  files: string[];
+  result: OperationResult;
+  notes: string[];
+}
+
+export interface OperationsDoc {
+  format: string;
+  session_id: string;
+  generated_at: string;
+  operations: Operation[];
+  seed_pairs: number;
+  notes: string[];
+}
+
+export interface SignalEvent {
+  kind: string;
+  ch: number;
+  role: string;
+  name: string;
+  t_before?: number | null;
+  t_after: number;
+  frame_before?: number | null;
+  frame_after: number;
+  width_ms?: number | null;
+  level_before?: string;
+  level_after?: string;
+  text: string;
+}
+
+export interface ScopeAnalysis {
+  format: string;
+  session_id: string;
+  profile: string;
+  profile_assumed: boolean;
+  channels: Array<{ ch: number; role: string; name: string }>;
+  coverage: {
+    session_s: number;
+    frames: number;
+    signal_s: number;
+    pct: number;
+    interval_p50_ms: number;
+    interval_p95_ms: number;
+    interval_max_ms: number;
+  };
+  events: SignalEvent[];
+  gaps: Array<{ t0: number; t1: number; interval_ms: number; blocks: number }>;
+  gap_count: number;
+  gap_blocks: number;
+  notes: string[];
+}
+
+export interface OperationsResponse {
+  operations: OperationsDoc | null;
+  scope: ScopeAnalysis | null;
+  pending: boolean;
+}
+

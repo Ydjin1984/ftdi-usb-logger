@@ -2404,6 +2404,12 @@ impl BusSegment {
 /// Разбить обмен шины на отрезки по паузам. Сеть (Winsock) не в счёт: это не
 /// обмен с ЭБУ, и её события шли бы «между» кадрами адаптера.
 pub fn bus_segments(events: &[Event], gap: f64) -> Vec<BusSegment> {
+    let refs: Vec<&Event> = events.iter().collect();
+    bus_segments_refs(&refs, gap)
+}
+
+/// То же по ссылкам: операции сортируют события по времени, а не по `seq`.
+pub fn bus_segments_refs(events: &[&Event], gap: f64) -> Vec<BusSegment> {
     let mut out: Vec<BusSegment> = Vec::new();
     for ev in events {
         if matches!(ev.transport, Transport::Lan) {
@@ -3301,9 +3307,9 @@ mod tests {
         // плюс пустой RX_STATUS (rxs=0x2, len=0) перед каждым ответом.
         let lines = [
             "# MARK wall=2026-11-18 16:00:07 START 1: Идентификация",
-            "[+10.000s] J2534 TX ch=1 proto=0x8003 flags=0x0 len=4 : 00 02 27 7f",
+            "[+10.000s] J2534 TX ch=1 proto=0x8003 flags=0x0 svc=0x27 mark=SEED? len=4 : 00 02 27 7f",
             "[+10.010s] J2534 RX ch=1 proto=0x8003 rxs=0x2 len=0 : ",
-            "[+10.011s] J2534 RX ch=1 proto=0x8003 rxs=0x0 len=5 : 00 03 67 7f 34",
+            "[+10.011s] J2534 RX ch=1 proto=0x8003 rxs=0x0 svc=0x67 mark=SEED seed=34 len=5 : 00 03 67 7f 34",
         ];
         let events: Vec<Event> = lines
             .iter()

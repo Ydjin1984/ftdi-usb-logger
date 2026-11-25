@@ -217,7 +217,7 @@ fn csv_jsonl_zip_markdown_exports() {
 
     // Markdown
     let md_path = dir.join("export/report.md");
-    report::export_markdown(&meta, &steps, &md_path).unwrap();
+    report::export_markdown(&dir, &meta, &steps, &md_path).unwrap();
     assert!(std::fs::read_to_string(&md_path).unwrap().contains("mermaid"));
 
     // ZIP

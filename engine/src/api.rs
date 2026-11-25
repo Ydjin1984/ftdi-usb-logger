@@ -158,6 +158,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions", get(sessions))
         .route("/sessions/:id", get(session_detail).delete(session_delete))
         .route("/sessions/:id/events", get(session_events))
+        .route("/sessions/:id/operations", get(session_operations))
         .route("/sessions/:id/events/:seq/context", get(event_context))
         .route("/sessions/:id/events/:seq/decode", get(event_decode))
         .route("/sessions/:id/steps/:n", get(step_detail))
@@ -1101,10 +1102,59 @@ async fn session_events(
             break;
         }
     }
+    // Имена кнопок и подписи внешних источников приходят в OEM-кодировке:
+    // чиним на выдаче, файлы сессии остаются как сняты (docs/16 §2).
+    for ev in out.iter_mut() {
+        crate::textfix::clean_event(ev);
+    }
     Ok(Json(json!({
         "events": out,
         "counts": counts,
         "total": total,
+    })))
+}
+
+/// `GET /api/sessions/{id}/operations` — операции и выжимка по сигналам.
+/// Для старых сессий (и импортированного ZIP) файлов ещё нет: считаем на
+/// первом запросе и кладём рядом, чтобы повторный открытый отчёт был быстрым.
+async fn session_operations(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let reader = reader_or_404(&st, &id)?;
+    let dir = reader.dir().to_path_buf();
+    let meta = reader.meta().clone();
+    let mut doc = crate::operations::load(&dir, &id);
+    if doc.is_none() && meta.status == "recording" {
+        // Живую сессию не переразбираем на лету: файлы ещё пишутся.
+        return Ok(Json(json!({
+            "operations": Value::Null,
+            "scope": Value::Null,
+            "pending": true,
+        })));
+    }
+    if doc.is_none() {
+        let events = reader.all_events();
+        let steps = reader.steps();
+        drop(reader);
+        let dir2 = dir.clone();
+        let meta2 = meta.clone();
+        let made = tokio::task::spawn_blocking(move || {
+            let doc = crate::operations::rebuild(&dir2, &meta2, &events)?;
+            // Отчёт пересобираем сразу: иначе report.md остаётся без раздела
+            // «Операции» до ручного переразбора.
+            crate::report::write_session_reports(&dir2, &meta2, &steps)?;
+            Ok::<_, anyhow::Error>(doc)
+        })
+        .await
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("разбор операций: {e}")))?;
+        doc = Some(made?);
+    }
+    let scope = crate::signals::load(&dir, &id);
+    Ok(Json(json!({
+        "operations": doc,
+        "scope": scope,
+        "pending": false,
     })))
 }
 
@@ -1123,9 +1173,12 @@ async fn event_context(
     let n = q.n.unwrap_or(20).min(500) as u64;
     let from = seq.saturating_sub(n);
     let to = seq.saturating_add(n).saturating_add(1);
-    let events = reader.events(Some(from), Some(to), 0);
+    let mut events = reader.events(Some(from), Some(to), 0);
     if events.is_empty() {
         return Err(AppError::not_found(format!("событие seq={seq} не найдено")));
+    }
+    for ev in events.iter_mut() {
+        crate::textfix::clean_event(ev);
     }
     Ok(Json(json!({ "events": events, "seq": seq })))
 }
@@ -1266,7 +1319,7 @@ async fn session_export(
         "jsonl" => report::export_jsonl(&dir, &out)?,
         "csv" => report::export_csv(&reader.all_events(), &out)?,
         "md" | "markdown" => {
-            report::export_markdown(reader.meta(), &reader.steps(), &out)?;
+            report::export_markdown(reader.dir(), reader.meta(), &reader.steps(), &out)?;
         }
         other => {
             return Err(AppError::bad(format!(
@@ -1444,10 +1497,24 @@ async fn import_path(
             path.display()
         )));
     }
-    let meta = import::import_legacy_log(&st.store, &path, None)?;
+    // ZIP-экспорт сессии — это не старый лог: внутри events.jsonl, scope и
+    // журналы прокси. Распаковываем как готовую сессию, а не гоняем по строкам.
+    let is_zip = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    let meta = if is_zip {
+        import::import_session_zip(&st.store, &path)?
+    } else {
+        import::import_legacy_log(&st.store, &path, None)?
+    };
     let _ = st.bus.send(ServerMsg::Toast {
         level: "info".into(),
-        text: format!("импортирована сессия {}", meta.id),
+        text: if is_zip {
+            format!("импортирован экспорт сессии: {}", meta.id)
+        } else {
+            format!("импортирована сессия {}", meta.id)
+        },
     });
     Ok(Json(json!({ "session_id": meta.id })))
 }
@@ -1501,12 +1568,21 @@ async fn import_upload(
         name
     ));
     std::fs::write(&tmp, &body)?;
-    let result = import::import_legacy_log(&st.store, &tmp, None);
+    let is_zip = name.to_ascii_lowercase().ends_with(".zip");
+    let result = if is_zip {
+        import::import_session_zip(&st.store, &tmp)
+    } else {
+        import::import_legacy_log(&st.store, &tmp, None)
+    };
     let _ = std::fs::remove_file(&tmp);
     let meta = result?;
     let _ = st.bus.send(ServerMsg::Toast {
         level: "info".into(),
-        text: format!("загружен и импортирован лог: сессия {}", meta.id),
+        text: if is_zip {
+            format!("загружен экспорт сессии: {}", meta.id)
+        } else {
+            format!("загружен и импортирован лог: сессия {}", meta.id)
+        },
     });
     Ok(Json(json!({ "session_id": meta.id })))
 }

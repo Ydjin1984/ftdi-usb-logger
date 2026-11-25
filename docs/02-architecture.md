@@ -152,6 +152,10 @@ pub struct ToolProcess { pub pid: u32, pub name: String, pub exe: String,
     reads/<AAAAAA>-<RRRRRR>.bin — собранные чтения памяти (из READ-потоков)
     files/<sha256>-<name>     — зафиксированные файлы
     report.txt / report.md    — финальный разбор
+    operations.json           — операции: клик → вызовы → сигналы → итог (docs/16)
+    seedkeys.jsonl            — полные пары seed→key (чувствительно, docs/16 §5)
+    scope/                    — кадры осциллографа и анализ сигналов (docs/14, docs/16)
+      analysis.json           — события PWM/питания, покрытие, пропуски
     export/                   — то, что собрал пользователь
 ```
 
@@ -229,11 +233,12 @@ stdin/stdout, по одному JSON-объекту на строку, UTF-8, б
 | GET | `/api/sessions/{id}/events/{seq}/context` | окно ±N вокруг события |
 | GET | `/api/sessions/{id}/steps/{n}` | сводка шага |
 | GET | `/api/sessions/{id}/report?format=txt\|md` | отчёт как `text/plain` / `text/markdown` |
-| POST | `/api/sessions/{id}/reparse` | переразбор (пересобрать сводки/отчёт) |
+| GET | `/api/sessions/{id}/operations` | операции и сигналы стенда; старые сессии считаются на первом запросе (docs/16) |
+| POST | `/api/sessions/{id}/reparse` | переразбор: сводки, `operations.json`, `scope/analysis.json`, отчёт |
 | POST | `/api/sessions/{id}/export` | `{format:"zip"\|"jsonl"\|"csv"\|"md"}` → путь |
 | POST | `/api/sessions/{id}/share` | `{url}` → `curl -F file=@zip` |
-| POST | `/api/import` | `{path}` → импорт старого лога, возвращает `{session_id}` |
-| POST | `/api/import/upload?name=<имя>` | тело = сырые байты лога (браузер не отдаёт путь); → `{session_id}` |
+| POST | `/api/import` | `{path}` → импорт старого лога или ZIP-экспорта сессии, возвращает `{session_id}` |
+| POST | `/api/import/upload?name=<имя>` | тело = сырые байты (браузер не отдаёт путь); `.zip` — экспорт сессии; → `{session_id}` |
 | DELETE | `/api/sessions/{id}` | удалить сессию (с подтверждением на клиенте) |
 | GET | `/ws` | WebSocket: подписка на живой поток |
 

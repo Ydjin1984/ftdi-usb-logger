@@ -1559,3 +1559,54 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
   color: #ffb86b;
   opacity: 0.8;
 }
+
+/* ── операции: клик → вызовы → сигналы → итог (docs/16) ───────────────────
+   Панель живёт над лентой и не заменяет её. Цвет — не единственный носитель
+   смысла: статус всегда подписан словом («ответ получен», «тайм-аут»). */
+.ops-panel{margin:4px 12px 0;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.ops-panel>summary{display:flex;align-items:center;gap:8px;padding:6px 9px;cursor:pointer;font-weight:650}
+.ops-panel__title{font:700 11px var(--font-ui);letter-spacing:.07em}
+.ops-panel__count{padding:0 6px;border-radius:999px;background:var(--bg-3);color:var(--text-dim);font:11px var(--font-mono)}
+.ops-panel__body{display:flex;gap:8px;overflow-x:auto;padding:0 9px 9px}
+.op-card{flex:0 0 min(430px,86vw);display:flex;flex-direction:column;gap:5px;padding:8px;border:1px solid var(--line-2);border-radius:8px;background:var(--bg-1)}
+.op-card--denied{border-color:var(--err)}
+.op-card--timeout,.op-card--unknown,.op-card--driver_error{border-color:var(--warn)}
+.op-card__head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.op-card__idx{min-width:18px;height:18px;border-radius:50%;background:var(--bg-3);color:var(--text-dim);font:700 10px/18px var(--font-mono);text-align:center}
+.op-card__name{font-weight:700;font-size:13px}
+.op-card__origin{font-size:10px;letter-spacing:.02em}
+.op-card__origin.is-confirmed{color:var(--ok)}
+.op-card__origin.is-derived{color:var(--warn)}
+.op-card__time{margin-left:auto;font:11px var(--font-mono);color:var(--text-mute);white-space:nowrap}
+.op-card__meta{display:flex;flex-wrap:wrap;gap:4px}
+.op-chip{padding:2px 6px;border-radius:999px;background:var(--bg-3);color:var(--text-dim);font-size:10px}
+.op-chip--answer,.op-chip--auth-granted{background:#173a2c;color:var(--rx)}
+.op-chip--denied,.op-chip--auth-denied,.op-chip--err{background:var(--err-bg);color:var(--err)}
+.op-chip--timeout,.op-chip--unknown,.op-chip--warn,.op-chip--auth-timeout{background:#3a3219;color:var(--warn)}
+.op-chip--mute{color:var(--text-mute)}
+.op-card__signals{display:flex;flex-direction:column;gap:2px}
+.op-sig{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 6px;font-size:10px}
+.op-sig__name{grid-column:1;font-weight:650;color:var(--text-dim)}
+.op-sig__order{grid-column:2;color:var(--text-mute);white-space:nowrap;text-align:right}
+.op-sig__text{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.op-sig__time{grid-column:2;font-family:var(--font-mono);color:var(--text-mute);white-space:nowrap;text-align:right}
+.op-sig--ambiguous .op-sig__order{color:var(--warn)}
+.op-sig--unknown .op-sig__order{color:var(--text-mute)}
+.op-card__timeline>summary{cursor:pointer;font-size:11px;color:var(--text-dim)}
+.op-milestones{display:flex;flex-direction:column;gap:1px;max-height:220px;overflow:auto;margin:4px 0 0;padding:0;list-style:none}
+.op-ms{display:grid;grid-template-columns:52px 8px minmax(0,1fr) auto auto;gap:5px;align-items:baseline;padding:1px 2px;border-radius:4px;font-size:10px}
+.op-ms.is-clickable{cursor:pointer}
+.op-ms.is-clickable:hover{background:var(--bg-3)}
+.op-ms__t{font-family:var(--font-mono);color:var(--text-mute);text-align:right}
+.op-ms__dot{width:6px;height:6px;border-radius:50%;background:var(--text-mute)}
+.op-ms--click .op-ms__dot,.op-ms--dialog .op-ms__dot{background:var(--acc)}
+.op-ms--signal .op-ms__dot{background:var(--mark)}
+.op-ms--tx .op-ms__dot{background:var(--tx)}
+.op-ms--rx .op-ms__dot{background:var(--rx)}
+.op-ms--auth .op-ms__dot{background:#c39bff}
+.op-ms--call .op-ms__dot{background:var(--warn)}
+.op-ms__label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.op-ms__src{padding:0 3px;border:1px solid var(--line-2);border-radius:4px;color:var(--text-mute);font-size:9px}
+.op-ms__conf{color:var(--warn);font-size:9px}
+.op-card__result{padding-top:4px;border-top:1px solid var(--line);color:var(--text-dim);font-size:11px}
+.op-card__files,.op-card__note,.op-card__more{color:var(--text-mute);font-size:10px;overflow-wrap:anywhere}

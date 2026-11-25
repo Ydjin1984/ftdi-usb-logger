@@ -127,6 +127,15 @@ static volatile LONG    g_calls  = 0;            /* every API call, from 1 */
 static volatile LONG    g_tx     = 0;            /* TX frames journalled */
 static volatile LONG    g_rx     = 0;            /* RX frames journalled */
 static volatile LONG    g_errors = 0;            /* calls that returned rc != 0 */
+/* Security access (docs/16 §5): counts are written to the live state file so the
+ * engine can tell from `proxy-live-<pid>.state` whether the session reached a
+ * key, without parsing the journal.  g_key_pending is the key sent since the
+ * last seed; ACCESS OK turns it into a confirmed pair. */
+static volatile LONG    g_pairs  = 0;            /* seed→key pairs confirmed by 67 xx */
+static volatile LONG    g_seed   = 0;            /* seeds received (67 7F / 67 01) */
+static volatile LONG    g_key    = 0;            /* keys sent (27 80 / 27 02) */
+static volatile LONG    g_denied = 0;            /* 7F 27 responses */
+static volatile LONG    g_key_pending = 0;
 static volatile LONG    g_gen    = 0;            /* successful Connect counter */
 
 static int              g_enabled = 1;           /* [proxy] Enabled / FTDI_J2534_PROXY_OFF */
@@ -766,6 +775,10 @@ static void WriteLiveFile(const char *state)
         "tx=%ld\n"
         "rx=%ld\n"
         "errors=%ld\n"
+        "pairs=%ld\n"
+        "seed=%ld\n"
+        "key=%ld\n"
+        "denied=%ld\n"
         "gen=%ld\n"
         "bits=%d\n"
         "fatal=%d\n"
@@ -778,6 +791,10 @@ static void WriteLiveFile(const char *state)
         (long)InterlockedCompareExchange(&g_tx, 0, 0),
         (long)InterlockedCompareExchange(&g_rx, 0, 0),
         (long)InterlockedCompareExchange(&g_errors, 0, 0),
+        (long)InterlockedCompareExchange(&g_pairs, 0, 0),
+        (long)InterlockedCompareExchange(&g_seed, 0, 0),
+        (long)InterlockedCompareExchange(&g_key, 0, 0),
+        (long)InterlockedCompareExchange(&g_denied, 0, 0),
         (long)InterlockedCompareExchange(&g_gen, 0, 0),
         g_bits, g_fatal, PROXY_VERSION);
     if (len < 0) return;
@@ -1079,6 +1096,100 @@ static void LogCall(LONG seq, const char *op, int hasCh, ulong ch,
     }
 }
 
+/* Service/sub-function offsets of a security-access frame.
+ *
+ * Vendor protocols (>= 0x8000, e.g. 0x8003) keep Data[0]=kind, Data[1]=length,
+ * so the service is Data[2]; ISO 15765 single frames keep the PCI nibble in
+ * Data[0], so the service is Data[1].  Other framing is not guessed. */
+static int AuthSvcOff(const PASSTHRU_MSG *m, ulong *off)
+{
+    if (!m) return 0;
+    if (m->ProtocolID >= 0x8000UL) {
+        if (m->DataSize < 3) return 0;
+        *off = 2;
+        return 1;
+    }
+    if (m->ProtocolID == 0x06UL) {
+        if (m->DataSize < 2 || (m->Data[0] & 0xF0) != 0x00) return 0;
+        *off = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Append `mark=` tags to the exchange line.  They go into the key/value part
+ * (before " : "), so the grammar in docs/11 and every existing parser keep
+ * working; a human sees SEED?/SEED/KEY/ACCESS OK/ACCESS DENIED, and the engine
+ * can read `mark=` without re-deriving the service.
+ *
+ * `27 01/02` (UDS) and `27 7F/80` (KWP2000) are both handled: an odd
+ * sub-function requests a seed, an even one sends a key. */
+static void AuthMark(int isTx, const PASSTHRU_MSG *m, char *mark, size_t cap)
+{
+    ulong  off, svc, sub, n, i;
+    size_t pos = 0;
+    int    w;
+
+    if (!mark || cap < 8) return;
+    mark[0] = 0;
+    if (!AuthSvcOff(m, &off)) return;
+    n = m->DataSize;
+    if (n <= off + 1) return;
+    svc = (ulong)m->Data[off];
+    sub = (ulong)m->Data[off + 1];
+
+    if (isTx) {
+        if (svc != 0x27UL) return;
+        if (sub & 1UL) {
+            _snprintf(mark, cap, " mark=SEED?");
+            return;
+        }
+        if (sub > 0 && n > off + 2) {
+            InterlockedIncrement(&g_key);
+            InterlockedExchange(&g_key_pending, 1);
+            w = _snprintf(mark, cap, " mark=KEY key8=");
+            if (w > 0) pos = (size_t)w;
+            for (i = 0; i < 8 && off + 2 + i < n && pos + 3 < cap; i++) {
+                w = _snprintf(mark + pos, cap - pos, "%02x",
+                              (unsigned)m->Data[off + 2 + i]);
+                if (w > 0) pos += (size_t)w;
+            }
+            if (off + 10 < n && pos + 3 < cap) {
+                _snprintf(mark + pos, cap - pos, "..");
+            }
+        }
+        return;
+    }
+
+    if (svc == 0x67UL && (sub & 1UL)) {
+        InterlockedIncrement(&g_seed);
+        w = _snprintf(mark, cap, " mark=SEED seed=");
+        if (w > 0) pos = (size_t)w;
+        for (i = 0; i < 16 && off + 2 + i < n && pos + 3 < cap; i++) {
+            w = _snprintf(mark + pos, cap - pos, "%02x",
+                          (unsigned)m->Data[off + 2 + i]);
+            if (w > 0) pos += (size_t)w;
+        }
+        if (off + 18 < n && pos + 3 < cap) {
+            _snprintf(mark + pos, cap - pos, "..");
+        }
+    } else if (svc == 0x67UL && sub > 0) {
+        long pair;
+        if (InterlockedExchange(&g_key_pending, 0)) {
+            pair = InterlockedIncrement(&g_pairs);
+            _snprintf(mark, cap, " mark=ACCESS_OK mark=PAIR#%ld", pair);
+        } else {
+            _snprintf(mark, cap, " mark=ACCESS_OK");
+        }
+    } else if (svc == 0x7FUL && sub == 0x27UL) {
+        unsigned nrc = (n > off + 2) ? (unsigned)m->Data[off + 2] : 0U;
+        InterlockedIncrement(&g_denied);
+        InterlockedExchange(&g_key_pending, 0);
+        _snprintf(mark, cap, " mark=ACCESS_DENIED nrc=0x%02x", nrc);
+    }
+    mark[cap - 1] = 0;
+}
+
 /* One TX/RX frame.  `total` is the denominator of i=k/n: the number of input
  * messages for TX, the number of returned messages for RX. */
 static void LogMsg(int isTx, ulong ch, LONG seq, ulong idx, ulong total,
@@ -1087,6 +1198,7 @@ static void LogMsg(int isTx, ulong ch, LONG seq, ulong idx, ulong total,
 {
     char  svc[32];
     char  trunc[32];
+    char  mark[160];
     ulong size;
     ulong shown;
 
@@ -1112,20 +1224,21 @@ static void LogMsg(int isTx, ulong ch, LONG seq, ulong idx, ulong total,
         if (size > 0) _snprintf(svc, sizeof(svc), " svc=0x%02lx", (ulong)m->Data[0]);
     }
     svc[sizeof(svc) - 1] = 0;
+    AuthMark(isTx, m, mark, sizeof(mark));
 
     if (isTx) {
         InterlockedIncrement(&g_tx);
         LogLine("J2534 TX ch=%lu call=%ld i=%lu/%lu n_in=%lu n_out=%lu th=%lu ts=%lu "
-                "flags=0x%lx proto=0x%02lx%s len=%lu%s dur=%llu rc=%s : %s",
+                "flags=0x%lx proto=0x%02lx%s%s len=%lu%s dur=%llu rc=%s : %s",
                 ch, seq, idx, total, n_in, n_out, (ulong)th, (ulong)m->Timestamp,
-                (ulong)m->TxFlags, (ulong)m->ProtocolID, svc, size, trunc,
+                (ulong)m->TxFlags, (ulong)m->ProtocolID, svc, mark, size, trunc,
                 dur, RcStr(rc), g_hex);
     } else {
         InterlockedIncrement(&g_rx);
         LogLine("J2534 RX ch=%lu call=%ld i=%lu/%lu n_in=%lu n_out=%lu th=%lu ts=%lu "
-                "rxs=0x%lx proto=0x%02lx%s len=%lu%s dur=%llu rc=%s : %s",
+                "rxs=0x%lx proto=0x%02lx%s%s len=%lu%s dur=%llu rc=%s : %s",
                 ch, seq, idx, total, n_in, n_out, (ulong)th, (ulong)m->Timestamp,
-                (ulong)m->RxStatus, (ulong)m->ProtocolID, svc, size, trunc,
+                (ulong)m->RxStatus, (ulong)m->ProtocolID, svc, mark, size, trunc,
                 dur, RcStr(rc), g_hex);
     }
 }

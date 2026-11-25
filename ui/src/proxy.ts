@@ -18,6 +18,8 @@ import type {
 } from "./types";
 
 msg({
+  "пар seed→key: {n}": "seed→key pairs: {n}",
+  "отказов доступа: {n}": "access denials: {n}",
   // Подпись бейджа полосы — языконезависимая, записана явно, чтобы словарь был полным.
   "proxy": "proxy",
   "Прокси: TX {tx} / RX {rx}, сверка: совпало {matched}, потеряно {missing}":
@@ -159,6 +161,8 @@ export function proxyLiveDetail(live: ProxyLive | null | undefined): string {
     t("обмен {sec} с назад", { sec: fmtNum(item.age_s) }),
   ];
   if (item.errors) parts.push(t("ошибок {n}", { n: fmtNum(item.errors) }));
+  if (item.pairs) parts.push(t("пар seed→key: {n}", { n: fmtNum(item.pairs) }));
+  else if (item.denied) parts.push(t("отказов доступа: {n}", { n: fmtNum(item.denied) }));
   return parts.join(" · ");
 }
 
