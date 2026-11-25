@@ -20,6 +20,7 @@ pub mod uiactions;
 pub mod textfix;
 pub mod signals;
 pub mod operations;
+pub mod export_jobs;
 
 use std::sync::Arc;
 use anyhow::Context;
@@ -52,6 +53,7 @@ pub async fn run(cli: config::Cli) -> anyhow::Result<()> {
         store,
         capture,
         bus,
+        exports: Arc::new(export_jobs::ExportJobs::default()),
         started: std::time::Instant::now(),
     };
 

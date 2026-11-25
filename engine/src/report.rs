@@ -7,8 +7,8 @@ use crate::models::{Event, EventKind, ProxyLane, SessionMeta, StepSummary};
 use crate::store::write_text_atomic;
 use anyhow::Context;
 use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 const BAR: &str = "================================================================================";
 const DASH: &str = "--------------------------------------------------------------------------------";
@@ -1565,17 +1565,38 @@ pub fn write_session_reports(
 
 // ─────────────────────────────── экспорт ─────────────────────────────────
 
+/// Сколько уже упаковано: байты и файлы.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ZipProgress {
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
 /// ZIP-архив каталога сессии (пути внутри — относительно каталога).
 pub fn export_zip(session_dir: &Path, out_zip: &Path) -> anyhow::Result<()> {
+    export_zip_with_progress(session_dir, out_zip, |_| {})
+}
+
+/// То же, с прогрессом по упакованным байтам.
+///
+/// Сначала быстрый metadata-проход: список файлов и общий объём — иначе проценты
+/// прыгали бы «файл на файл» и на одном `frames.jsonl` в сотни мегабайт стояли бы
+/// на месте. Упаковка идёт блоками 1 МиБ, поэтому проценты двигаются внутри файла.
+pub fn export_zip_with_progress<F>(
+    session_dir: &Path,
+    out_zip: &Path,
+    mut on_progress: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(ZipProgress),
+{
     if let Some(parent) = out_zip.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = File::create(out_zip)
-        .with_context(|| format!("не создать архив {}", out_zip.display()))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
+    let mut entries: Vec<(PathBuf, String, u64)> = Vec::new();
+    let mut bytes_total: u64 = 0;
     for entry in walkdir::WalkDir::new(session_dir)
         .sort_by_file_name()
         .into_iter()
@@ -1593,12 +1614,45 @@ pub fn export_zip(session_dir: &Path, out_zip: &Path) -> anyhow::Result<()> {
         if rel.starts_with("export/") {
             continue; // не пакуем прошлые экспорты
         }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        bytes_total += size;
+        entries.push((path.to_path_buf(), rel, size));
+    }
+    let mut progress = ZipProgress {
+        files_done: 0,
+        files_total: entries.len() as u64,
+        bytes_done: 0,
+        bytes_total,
+    };
+    on_progress(progress);
+
+    let file = File::create(out_zip)
+        .with_context(|| format!("не создать архив {}", out_zip.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut buf = vec![0u8; 1024 * 1024];
+    for (path, rel, _declared) in entries {
         zip.start_file(rel, options)
             .with_context(|| format!("zip: не добавить {}", path.display()))?;
-        let mut src = File::open(path)?;
-        std::io::copy(&mut src, &mut zip)?;
+        let mut src = File::open(&path)?;
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            zip.write_all(&buf[..n])?;
+            progress.bytes_done += n as u64;
+            on_progress(progress);
+        }
+        progress.files_done += 1;
+        on_progress(progress);
     }
     zip.finish().context("zip: финализация")?;
+    // Файлы могли измениться между metadata-проходом и упаковкой: финальный
+    // прогресс не должен зависеть от этой разницы.
+    progress.bytes_done = progress.bytes_done.max(progress.bytes_total);
+    on_progress(progress);
     Ok(())
 }
 
@@ -1616,6 +1670,18 @@ fn csv_field(value: &str) -> String {
 /// позже, неся более ранние `t`, и в файле для разбора время не должно идти
 /// назад. `seq` остаётся столбцом — по нему виден порядок поступления.
 pub fn export_csv(events: &[Event], out: &Path) -> anyhow::Result<()> {
+    export_csv_with_progress(events, out, |_, _| {})
+}
+
+/// CSV с прогрессом по обработанным событиям (всего = числу строк).
+pub fn export_csv_with_progress<F>(
+    events: &[Event],
+    out: &Path,
+    mut on_progress: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(u64, u64),
+{
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1625,9 +1691,10 @@ pub fn export_csv(events: &[Event], out: &Path) -> anyhow::Result<()> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.seq.cmp(&b.seq))
     });
+    let total = rows.len() as u64;
     let mut text = String::with_capacity(events.len() * 96 + 64);
     text.push_str("seq,t,wall,kind,api,dir,len,hex,step\n");
-    for ev in rows {
+    for (i, ev) in rows.iter().enumerate() {
         text.push_str(&format!(
             "{},{:.3},{},{},{},{},{},{},{}\n",
             ev.seq,
@@ -1640,22 +1707,53 @@ pub fn export_csv(events: &[Event], out: &Path) -> anyhow::Result<()> {
             csv_field(&ev.hex),
             ev.step.map(|s| s.to_string()).unwrap_or_default(),
         ));
+        if i % 2000 == 0 {
+            on_progress(i as u64, total);
+        }
     }
+    on_progress(total, total);
     write_text_atomic(out, &text)
 }
 
 /// JSONL-экспорт: копия `events.jsonl` сессии.
 pub fn export_jsonl(dir: &Path, out: &Path) -> anyhow::Result<()> {
+    export_jsonl_with_progress(dir, out, |_, _| {})
+}
+
+/// JSONL с прогрессом по скопированным байтам (блоки 1 МиБ).
+pub fn export_jsonl_with_progress<F>(
+    dir: &Path,
+    out: &Path,
+    mut on_progress: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(u64, u64),
+{
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let src = dir.join("events.jsonl");
-    let data = std::fs::read(&src).unwrap_or_default();
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
+    if !src.is_file() {
+        File::create(out)?;
+        on_progress(0, 0);
+        return Ok(());
     }
-    let mut f = File::create(out)?;
-    f.write_all(&data)?;
+    let total = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+    let mut input = File::open(&src)?;
+    let mut output = File::create(out)?;
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut done: u64 = 0;
+    on_progress(0, total);
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buf[..n])?;
+        done += n as u64;
+        on_progress(done, total);
+    }
+    on_progress(done.max(total), total);
     Ok(())
 }
 

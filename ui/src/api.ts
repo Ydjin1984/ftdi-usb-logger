@@ -196,6 +196,16 @@ export const api = {
   reparse: (id: string) => req<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/reparse`, json({})),
   exportSession: (id: string, format: "zip" | "jsonl" | "csv" | "md") =>
     req<{ path: string }>(`/api/sessions/${encodeURIComponent(id)}/export`, json({ format })),
+  /** Фоновый экспорт: id задания + опрос статуса (проценты для прогресс-бара). */
+  exportStart: (id: string, format: "zip" | "jsonl" | "csv" | "md") =>
+    req<{ id: string; state: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/export/jobs`,
+      json({ format }),
+    ),
+  exportStatus: (id: string, job: string) =>
+    req<import("./types").ExportJobStatus>(
+      `/api/sessions/${encodeURIComponent(id)}/export/jobs/${encodeURIComponent(job)}`,
+    ),
   share: (id: string, url: string) =>
     req<{ ok: boolean; status?: string }>(`/api/sessions/${encodeURIComponent(id)}/share`, json({ url })),
   importLog: (path: string) => req<{ session_id: string }>("/api/import", json({ path })),

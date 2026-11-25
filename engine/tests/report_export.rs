@@ -236,6 +236,40 @@ fn csv_jsonl_zip_markdown_exports() {
 }
 
 #[test]
+fn zip_progress_is_monotonic_and_finishes() {
+    let dir = std::env::temp_dir().join(format!("ftdi-zip-progress-{}", std::process::id()));
+    let session = dir.join("session");
+    std::fs::create_dir_all(session.join("steps")).unwrap();
+    // 3 МиБ: прогресс обязан двигаться внутри файла, а не только между файлами.
+    std::fs::write(session.join("events.jsonl"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+    std::fs::write(session.join("steps/01.json"), "{}").unwrap();
+    let out = dir.join("export/session.zip");
+
+    let mut samples = Vec::new();
+    report::export_zip_with_progress(&session, &out, |p| samples.push(p)).unwrap();
+    assert!(out.is_file());
+    assert!(samples.len() > 2, "ожидали промежуточные шаги, получили {}", samples.len());
+    assert_eq!(samples[0].bytes_done, 0);
+    assert_eq!(samples[0].files_done, 0);
+    for w in samples.windows(2) {
+        assert!(
+            w[1].files_done >= w[0].files_done,
+            "счётчик файлов пошёл назад: {:?}",
+            (w[0], w[1])
+        );
+        assert!(
+            w[1].bytes_done >= w[0].bytes_done,
+            "счётчик байт пошёл назад: {:?}",
+            (w[0], w[1])
+        );
+    }
+    let last = samples.last().unwrap();
+    assert_eq!(last.files_done, last.files_total);
+    assert!(last.bytes_done >= last.bytes_total);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn empty_session_report_has_no_phase_but_valid_header() {
     let meta = SessionMeta::new("empty", "пустая");
     let txt = report::render_text(&meta, &[]);

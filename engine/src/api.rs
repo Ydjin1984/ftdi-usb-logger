@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -125,6 +125,8 @@ pub struct AppState {
     pub store: Arc<SessionStore>,
     pub capture: Arc<CaptureManager>,
     pub bus: broadcast::Sender<ServerMsg>,
+    /// Фоновые задания экспорта: прогресс для интерфейса.
+    pub exports: Arc<crate::export_jobs::ExportJobs>,
     pub started: std::time::Instant,
 }
 
@@ -166,6 +168,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/:id/reparse", post(session_reparse))
         .route("/sessions/:id/proxy/collect", post(session_proxy_collect))
         .route("/sessions/:id/export", post(session_export))
+        .route("/sessions/:id/export/jobs", post(session_export_job_start))
+        .route("/sessions/:id/export/jobs/:job", get(session_export_job_status))
         .route("/sessions/:id/share", post(session_share))
         .route("/sessions/:id/files", post(session_files))
         .route("/sessions/:id/file/*path", get(session_file))
@@ -1328,6 +1332,176 @@ async fn session_export(
         }
     }
     Ok(Json(json!({ "path": abs_display(&out) })))
+}
+
+/// Запуск фонового экспорта: сразу отвечаем id задания, прогресс — отдельным GET.
+///
+/// Синхронный `POST /export` остаётся: им пользуются скрипты и e2e, и его ответ
+/// (`path`) менять нельзя. UI выбирает этот путь, чтобы показать проценты.
+async fn session_export_job_start(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ExportReq>,
+) -> ApiResult<Json<Value>> {
+    let _ = reader_or_404(&st, &id)?;
+    let format = req.format.trim().to_ascii_lowercase();
+    if !matches!(format.as_str(), "zip" | "jsonl" | "csv" | "md" | "markdown") {
+        return Err(AppError::bad(format!(
+            "неизвестный формат экспорта: {format} (zip|jsonl|csv|md)"
+        )));
+    }
+    let job = st.exports.create(&id, &format);
+    let st2 = st.clone();
+    let sid = id.clone();
+    let jid = job.id.clone();
+    tokio::spawn(async move {
+        run_export_job(st2, sid, jid, format).await;
+    });
+    Ok(Json(json!({ "id": job.id, "state": job.state })))
+}
+
+/// Состояние задания: `state`, `stage`, `percent`, счётчики файлов/байт.
+async fn session_export_job_status(
+    State(st): State<AppState>,
+    Path((id, job)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    match st.exports.get(&id, &job) {
+        Some(found) => Ok(Json(serde_json::to_value(found).unwrap_or_else(|_| json!({})))),
+        None => Err(AppError::not_found(format!(
+            "задание экспорта {job} не найдено"
+        ))),
+    }
+}
+
+/// Выполнить экспорт в фоне, обновляя проценты.
+///
+/// Шкала: снимок живой сессии — 0..20, подготовка списка — 20..25, остальное —
+/// 25..100. Внутри формата масштаб честный: ZIP — по упакованным байтам,
+/// CSV — по событиям, JSONL — по скопированным байтам.
+async fn run_export_job(st: AppState, id: String, job: String, format: String) {
+    // Живая сессия: тот же согласованный снимок, что и в синхронном экспорте.
+    if st.capture.status().session.as_deref() == Some(id.as_str()) {
+        st.exports.update(&id, &job, |j| {
+            j.state = "running".into();
+            j.stage = "снимок сессии".into();
+            j.percent = 1.0;
+        });
+        if let Err(err) = st.capture.snapshot().await {
+            tracing::warn!(session = %id, "снимок перед экспортом: {err:#}");
+        }
+    }
+
+    st.exports.update(&id, &job, |j| {
+        j.state = "running".into();
+        j.stage = "подготовка файлов".into();
+        j.percent = 20.0;
+    });
+
+    let dir = match reader_or_404(&st, &id) {
+        Ok(reader) => reader.dir().to_path_buf(),
+        Err(err) => {
+            st.exports.fail(&id, &job, err.message);
+            return;
+        }
+    };
+    let out_dir = export_dir(&st, &id);
+    if let Err(err) = std::fs::create_dir_all(&out_dir) {
+        st.exports
+            .fail(&id, &job, format!("каталог экспорта: {err}"));
+        return;
+    }
+    let out = out_dir.join(export_name(&format));
+
+    let store = st.store.clone();
+    let jobs = st.exports.clone();
+    let sid = id.clone();
+    let jid = job.clone();
+    let fmt = format.clone();
+    let dir2 = dir.clone();
+    let out2 = out.clone();
+    let task = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut last = Instant::now();
+        let mut report = |stage: &str,
+                          percent: f64,
+                          files_done: u64,
+                          files_total: u64,
+                          bytes_done: u64,
+                          bytes_total: u64| {
+            // Не дёргаем мьютекс чаще 10 раз/с: UI опрашивает статус и так.
+            let last_step = bytes_total > 0 && bytes_done >= bytes_total;
+            if !last_step && last.elapsed() < Duration::from_millis(100) {
+                return;
+            }
+            last = Instant::now();
+            jobs.update(&sid, &jid, |j| {
+                j.state = "running".into();
+                j.stage = stage.to_string();
+                j.percent = percent.min(99.0);
+                j.files_done = files_done;
+                j.files_total = files_total;
+                j.bytes_done = bytes_done;
+                j.bytes_total = bytes_total;
+            });
+        };
+
+        match fmt.as_str() {
+            "zip" => report::export_zip_with_progress(&dir2, &out2, |p| {
+                let pct = if p.bytes_total > 0 {
+                    25.0 + 74.0 * (p.bytes_done as f64 / p.bytes_total as f64)
+                } else {
+                    25.0 + 74.0 * (p.files_done as f64 / p.files_total.max(1) as f64)
+                };
+                report(
+                    "упаковка файлов",
+                    pct,
+                    p.files_done,
+                    p.files_total,
+                    p.bytes_done,
+                    p.bytes_total,
+                );
+            }),
+            "jsonl" => report::export_jsonl_with_progress(&dir2, &out2, |done, total| {
+                let pct = if total > 0 {
+                    20.0 + 79.0 * (done as f64 / total as f64)
+                } else {
+                    99.0
+                };
+                let finished = if total > 0 && done >= total { 1 } else { 0 };
+                let files_total = if total > 0 { 1 } else { 0 };
+                report("копирование событий", pct, finished, files_total, done, total);
+            }),
+            "csv" => {
+                let reader = store.reader(&sid)?;
+                let events = reader.all_events();
+                let total = events.len() as u64;
+                report("запись CSV", 20.0, 0, total, 0, total);
+                report::export_csv_with_progress(&events, &out2, |done, total| {
+                    let pct = if total > 0 {
+                        20.0 + 79.0 * (done as f64 / total as f64)
+                    } else {
+                        99.0
+                    };
+                    report("запись CSV", pct, done, total, done, total);
+                })
+            }
+            _ => {
+                let reader = store.reader(&sid)?;
+                let meta = reader.meta();
+                let steps = reader.steps();
+                report("отчёт Markdown", 90.0, 1, 1, 1, 1);
+                report::export_markdown(&dir2, meta, &steps, &out2)
+            }
+        }
+    })
+    .await;
+
+    match task {
+        Ok(Ok(())) => st.exports.finish(&id, &job, abs_display(&out)),
+        Ok(Err(err)) => st.exports.fail(&id, &job, format!("{err:#}")),
+        Err(err) => st
+            .exports
+            .fail(&id, &job, format!("задача экспорта прервана: {err}")),
+    }
 }
 
 #[derive(Debug, Deserialize)]

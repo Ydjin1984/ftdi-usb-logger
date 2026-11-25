@@ -777,3 +777,18 @@ export interface OperationsResponse {
   pending: boolean;
 }
 
+
+/** Статус фонового экспорта: проценты и стадия для прогресс-бара. */
+export interface ExportJobStatus {
+  id: string;
+  format: string;
+  state: "queued" | "running" | "done" | "error";
+  stage: string;
+  percent: number;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  path?: string;
+  error?: string;
+}

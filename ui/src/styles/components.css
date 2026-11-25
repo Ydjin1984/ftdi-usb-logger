@@ -1610,3 +1610,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .op-ms__conf{color:var(--warn);font-size:9px}
 .op-card__result{padding-top:4px;border-top:1px solid var(--line);color:var(--text-dim);font-size:11px}
 .op-card__files,.op-card__note,.op-card__more{color:var(--text-mute);font-size:10px;overflow-wrap:anywhere}
+
+/* Прогресс сборки экспорта: полоса + проценты и стадия от фонового задания. */
+.export-progress{display:flex;align-items:center;gap:10px;margin-top:8px}
+.export-progress[hidden]{display:none}
+.export-progress__bar{flex:1;height:8px;border-radius:4px;background:var(--bg-3);border:1px solid var(--line);overflow:hidden}
+.export-progress__fill{height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--ok));transition:width .2s linear}
+.export-progress__label{min-width:190px;text-align:right;font:11px var(--font-mono);color:var(--text-mute);overflow-wrap:anywhere}

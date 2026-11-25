@@ -23,6 +23,7 @@ import type {
   ProxyStatus,
   ScopeConfig,
   ScopeStatus,
+  ExportJobStatus,
 } from "./types";
 
 const RING = 60_000;
@@ -1235,7 +1236,15 @@ class Store {
 
   /* ───────────────────────────── экспорт ─────────────────────────────── */
 
-  async exportSession(format: "zip" | "jsonl" | "csv" | "md"): Promise<string | null> {
+  /**
+   * Экспорт через фоновое задание: движок отвечает id сразу, а сборка ZIP идёт
+   * в отдельном потоке. `onProgress` получает проценты и стадию — из них UI
+   * рисует прогресс-бар, вместо неподвижного «собираю…».
+   */
+  async exportSession(
+    format: "zip" | "jsonl" | "csv" | "md",
+    onProgress?: (status: ExportJobStatus) => void,
+  ): Promise<string | null> {
     const s = this.state;
     if (!s.active) return null;
     if (s.mode === "demo") {
@@ -1243,9 +1252,25 @@ class Store {
       return null;
     }
     try {
-      const r = await api.exportSession(s.active.id, format);
-      this.toast("ok", t("готово: {path}", { path: r.path }));
-      return r.path;
+      const { id } = await api.exportStart(s.active.id, format);
+      const started = Date.now();
+      for (;;) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+        const status = await api.exportStatus(s.active.id, id);
+        onProgress?.(status);
+        if (status.state === "done") {
+          const path = status.path ?? "";
+          this.toast("ok", t("готово: {path}", { path }));
+          return path;
+        }
+        if (status.state === "error") {
+          throw new Error(status.error || t("экспорт не удался"));
+        }
+        // Защита от «вечного» опроса: задание в движке всё равно продолжится.
+        if (Date.now() - started > 30 * 60 * 1000) {
+          throw new Error(t("таймаут экспорта: 30 минут"));
+        }
+      }
     } catch (e) {
       this.toast("error", t("экспорт не удался: {msg}", { msg: errText(e) }));
       return null;

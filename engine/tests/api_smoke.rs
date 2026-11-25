@@ -125,6 +125,7 @@ async fn api_smoke() {
         store: store.clone(),
         capture: capture.clone(),
         bus: bus.clone(),
+        exports: Arc::new(ftdi_logger::export_jobs::ExportJobs::default()),
         started: Instant::now(),
     };
     let app = ftdi_logger::api::router(state);
@@ -253,6 +254,51 @@ async fn api_smoke() {
     let path = value["path"].as_str().unwrap();
     assert!(PathBuf::from(path).is_file(), "экспорт не создан: {path}");
 
+    // фоновый экспорт: id задания → опрос до done (прогресс-бар UI)
+    let (code, value) = post_json(
+        addr,
+        "/api/sessions/api-session/export/jobs",
+        r#"{"format":"csv"}"#,
+    )
+    .await;
+    assert_eq!(code, 200, "{value}");
+    let job_id = value["id"].as_str().unwrap().to_string();
+    let mut job_done = false;
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let (code, _headers, body) = http(
+            addr,
+            "GET",
+            &format!("/api/sessions/api-session/export/jobs/{job_id}"),
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        let status: Value = serde_json::from_str(&body).unwrap();
+        match status["state"].as_str().unwrap_or("") {
+            "done" => {
+                let path = status["path"].as_str().unwrap();
+                assert!(PathBuf::from(path).is_file(), "файл задания не создан: {path}");
+                assert_eq!(status["percent"], 100.0);
+                job_done = true;
+                break;
+            }
+            "error" => panic!("задание экспорта упало: {}", status["error"]),
+            _ => {}
+        }
+    }
+    assert!(job_done, "задание экспорта не завершилось за 5 с");
+    let (code, _headers, _body) = http(
+        addr,
+        "GET",
+        "/api/sessions/api-session/export/jobs/nope",
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(code, 404, "неизвестное задание должно давать 404");
+
     // reparse
     let (code, value) = post_json(addr, "/api/sessions/api-session/reparse", "{}").await;
     assert_eq!(code, 200, "{value}");
@@ -347,6 +393,7 @@ async fn api_error_contract() {
         store: store.clone(),
         capture: capture.clone(),
         bus: bus.clone(),
+        exports: Arc::new(ftdi_logger::export_jobs::ExportJobs::default()),
         started: Instant::now(),
     };
     let app = ftdi_logger::api::router(state);
@@ -537,6 +584,7 @@ async fn api_universal() {
         store: store.clone(),
         capture: capture.clone(),
         bus: bus.clone(),
+        exports: Arc::new(ftdi_logger::export_jobs::ExportJobs::default()),
         started: Instant::now(),
     };
     let app = ftdi_logger::api::router(state);
@@ -675,6 +723,7 @@ async fn proxy_status_and_collect() {
         store: store.clone(),
         capture,
         bus,
+        exports: Arc::new(ftdi_logger::export_jobs::ExportJobs::default()),
         started: Instant::now(),
     };
     let app = ftdi_logger::api::router(state);

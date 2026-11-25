@@ -235,7 +235,9 @@ stdin/stdout, по одному JSON-объекту на строку, UTF-8, б
 | GET | `/api/sessions/{id}/report?format=txt\|md` | отчёт как `text/plain` / `text/markdown` |
 | GET | `/api/sessions/{id}/operations` | операции и сигналы стенда; старые сессии считаются на первом запросе (docs/16) |
 | POST | `/api/sessions/{id}/reparse` | переразбор: сводки, `operations.json`, `scope/analysis.json`, отчёт |
-| POST | `/api/sessions/{id}/export` | `{format:"zip"\|"jsonl"\|"csv"\|"md"}` → путь |
+| POST | `/api/sessions/{id}/export` | `{format:"zip"\|"jsonl"\|"csv"\|"md"}` → путь (синхронно; скрипты и e2e) |
+| POST | `/api/sessions/{id}/export/jobs` | `{format}` → `{id}`: фоновый экспорт с прогрессом |
+| GET | `/api/sessions/{id}/export/jobs/{job}` | `{state,stage,percent,files_done,files_total,bytes_done,bytes_total,path?,error?}` |
 | POST | `/api/sessions/{id}/share` | `{url}` → `curl -F file=@zip` |
 | POST | `/api/import` | `{path}` → импорт старого лога или ZIP-экспорта сессии, возвращает `{session_id}` |
 | POST | `/api/import/upload?name=<имя>` | тело = сырые байты (браузер не отдаёт путь); `.zip` — экспорт сессии; → `{session_id}` |

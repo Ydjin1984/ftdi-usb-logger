@@ -4,6 +4,7 @@ import { el } from "../dom";
 import { fmtDurationSeconds, fmtTime } from "../format";
 import { store } from "../store";
 import { msg, t } from "../i18n";
+import type { Event } from "../types";
 
 msg({
   "ТАЙМЛАЙН": "TIMELINE",
@@ -19,9 +20,8 @@ export class Timeline {
   private wrap: HTMLElement;
   private hint: HTMLElement;
   private hoverX: number | null = null;
-  private lastEvents = -1;
-  private lastSteps = -1;
-  private lastWidth = 0;
+  private lastEvents: Event[] | null = null;
+  private lastStepsKey = "";
   private raf = 0;
   private onSeek: (seq: number) => void;
 
@@ -59,9 +59,14 @@ export class Timeline {
 
   update(): void {
     const s = store.state;
-    if (s.events.length !== this.lastEvents || s.steps.length !== this.lastSteps) {
-      this.lastEvents = s.events.length;
-      this.lastSteps = s.steps.length;
+    // Длину сравнивать нельзя: ring-буфер держит ровно 60 000, и после
+    // переполнения она не меняется — таймлайн молча замирал навсегда.
+    // Ссылка на массив меняется на каждом батче, как у потока и телеметрии.
+    const stepsKey = `${s.steps.length}:${s.steps.length ? s.steps[s.steps.length - 1].idx : 0}`;
+    const live = s.mode === "live" && !!s.status?.recording;
+    if (s.events !== this.lastEvents || stepsKey !== this.lastStepsKey || live) {
+      this.lastEvents = s.events;
+      this.lastStepsKey = stepsKey;
       this.scheduleDraw();
     }
   }
@@ -95,9 +100,13 @@ export class Timeline {
     const s = store.state;
     let max = 1;
     for (const e of s.events) if (e.t > max) max = e.t;
-    for (const st of s.steps) {
-      const end = Date.parse(st.ended_at || "");
-      if (!isNaN(end)) continue;
+    // Живая запись: правый край — стенные часы. Иначе при паузе в обмене
+    // playhead стоит на последнем событии, и кажется, что таймлайн завис.
+    if (s.mode === "live" && s.status?.recording) {
+      const started = Date.parse(s.active?.started_at || "");
+      if (Number.isFinite(started)) {
+        max = Math.max(max, (Date.now() - started) / 1000);
+      }
     }
     return max * 1.02;
   }
@@ -220,10 +229,12 @@ export class Timeline {
 
   private epochToT(epoch: number): number {
     const s = store.state;
-    const events = s.events;
-    if (!events.length) return 0;
-    const base = Date.parse(events[0].wall);
-    if (isNaN(base)) return 0;
+    // База — старт сессии, а не первое событие буфера: после усечения ring
+    // первое событие уже не начало лога, и полосы шагов уезжали в сторону.
+    const started = Date.parse(s.active?.started_at || "");
+    const firstWall = s.events.length ? Date.parse(s.events[0].wall) : NaN;
+    const base = Number.isFinite(started) ? started : firstWall;
+    if (!Number.isFinite(base)) return 0;
     return Math.max(0, (epoch - base) / 1000);
   }
 

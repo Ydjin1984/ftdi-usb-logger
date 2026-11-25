@@ -5,6 +5,7 @@ import { api, sessionFileUrl } from "../api";
 import { store } from "../store";
 import { fmtNum } from "../format";
 import type {
+  ExportJobStatus,
   NewSessionResult,
   ProxyStatus,
   ScopeStatus,
@@ -65,6 +66,15 @@ msg({
   "не удалось собрать экспорт": "failed to build the export",
   "файл": "file",
   "экспортировать": "export",
+  "в очереди": "queued",
+  "снимок сессии": "session snapshot",
+  "подготовка файлов": "preparing files",
+  "упаковка файлов": "packing files",
+  "копирование событий": "copying events",
+  "запись CSV": "writing CSV",
+  "отчёт Markdown": "Markdown report",
+  "готово": "done",
+  "ошибка": "error",
   "Экспорт и отправка": "Export and upload",
   "USBPcap не найден. Установите USBPcap (desowin.org/usbpcap), перезагрузите ПК и запустите логер от администратора.":
     "USBPcap was not found. Install USBPcap (desowin.org/usbpcap), reboot the PC and start the logger as administrator.",
@@ -457,6 +467,19 @@ export function openExportDialog(): void {
   const shareInput = textInput(t("https://ваш-сервер/upload"));
   const status = el("div", "field__hint", "");
 
+  // Прогресс сборки: проценты приходят от фонового задания движка.
+  const progress = el("div", "export-progress");
+  progress.hidden = true;
+  progress.setAttribute("role", "progressbar");
+  progress.setAttribute("aria-valuemin", "0");
+  progress.setAttribute("aria-valuemax", "100");
+  progress.setAttribute("aria-valuenow", "0");
+  const progressBar = el("div", "export-progress__bar");
+  const progressFill = el("div", "export-progress__fill");
+  progressBar.append(progressFill);
+  const progressLabel = el("div", "export-progress__label", "");
+  progress.append(progressBar, progressLabel);
+
   const body = el("div");
   body.append(
     field(
@@ -470,13 +493,32 @@ export function openExportDialog(): void {
       t("движок выполнит: curl -F file=@<zip> <url> — подходит любой приёмник, понимающий multipart"),
     ),
     result,
+    progress,
     status,
   );
 
+  let busy = false;
+  let exportBtn: HTMLButtonElement;
+  const setProgress = (p: ExportJobStatus): void => {
+    const pct = Math.max(0, Math.min(100, Number.isFinite(p.percent) ? p.percent : 0));
+    progressFill.style.width = `${pct.toFixed(1)}%`;
+    progressLabel.textContent = `${pct.toFixed(0)} % · ${t(p.stage || "…")}`;
+    progress.setAttribute("aria-valuenow", pct.toFixed(0));
+  };
   const doExport = async (): Promise<void> => {
+    if (busy) return;
+    busy = true;
+    exportBtn.disabled = true;
     status.textContent = t("собираю…");
     status.style.color = "var(--text-mute)";
-    const path = await store.exportSession(format);
+    progress.hidden = false;
+    progressFill.style.width = "0%";
+    progressLabel.textContent = `0 % · ${t("подготовка файлов")}`;
+    progress.setAttribute("aria-valuenow", "0");
+    const path = await store.exportSession(format, setProgress);
+    busy = false;
+    exportBtn.disabled = false;
+    progress.hidden = true;
     status.textContent = path ? t("готово: {path}", { path }) : t("не удалось собрать экспорт");
     status.style.color = path ? "var(--ok)" : "var(--err)";
     if (path) {
@@ -494,11 +536,9 @@ export function openExportDialog(): void {
       if (shareInput.value.trim()) await store.share(shareInput.value.trim());
     }
   };
+  exportBtn = primary(t("экспортировать"), () => void doExport());
 
-  const footer = [
-    ghost(t("закрыть"), () => m.close()),
-    primary(t("экспортировать"), () => void doExport()),
-  ];
+  const footer = [ghost(t("закрыть"), () => m.close()), exportBtn];
   const m = modal({ title: t("Экспорт и отправка"), body, footer, width: 620 });
   void m;
 }
