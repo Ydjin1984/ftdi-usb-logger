@@ -918,6 +918,12 @@ fn operations_text_lines(
         if !op.files.is_empty() {
             out.push(format!("      файлы: {}", op.files.join(" · ")));
         }
+        if let Some(v) = &op.verify {
+            out.push(format!(
+                "      сверка: {} · сравнено {} Б · отличий {} · не проверено {} Б",
+                v.verdict, v.compared_bytes, v.different_bytes, v.unverified_bytes
+            ));
+        }
         out.push(format!("      результат: {}", op.result.text));
         for d in &op.dialogs {
             out.push(format!(
@@ -1092,6 +1098,12 @@ fn operations_markdown(
         out.push_str(&format!("- **Авторизация:** {}\n", auth_line(op)));
         if !op.files.is_empty() {
             out.push_str(&format!("- **Файлы:** {}\n", op.files.join(" · ")));
+        }
+        if let Some(v) = &op.verify {
+            out.push_str(&format!(
+                "- **Сверка:** {} · сравнено {} Б · отличий {} · не проверено {} Б\n",
+                v.verdict, v.compared_bytes, v.different_bytes, v.unverified_bytes
+            ));
         }
         out.push_str(&format!("- **Результат:** {}\n", op.result.text));
         if !op.dialogs.is_empty() {

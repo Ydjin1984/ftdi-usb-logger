@@ -249,6 +249,23 @@ pub struct OperationResult {
     pub nrc: Option<u8>,
 }
 
+/// Сверка «входной образ записи ↔ контрольное чтение после записи».
+///
+/// Появляется только у операции `write`, если после неё в сессии есть `read`
+/// и оба файла доступны. `unverified_bytes` — разница длин: она не проверена,
+/// а не «совпала». `verdict`: `match` | `mismatch` | `partial`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyReport {
+    pub expected_path: String,
+    pub actual_path: String,
+    pub expected_sha256: String,
+    pub actual_sha256: String,
+    pub compared_bytes: u64,
+    pub different_bytes: u64,
+    pub unverified_bytes: u64,
+    pub verdict: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
@@ -281,6 +298,9 @@ pub struct Operation {
     pub milestones: Vec<Milestone>,
     pub signals: Vec<SignalNote>,
     pub files: Vec<String>,
+    /// Сверка с контрольным чтением (только для `write`, если чтение было).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyReport>,
     pub result: OperationResult,
     pub notes: Vec<String>,
 }
@@ -470,6 +490,67 @@ fn attach_forward(dialog: &Click, next: Option<f64>) -> bool {
 
 // ─────────────────────────────── построение ───────────────────────────────
 
+/// Побайтная сверка входного образа записи с результатом контрольного чтения.
+///
+/// Сравниваются только доступные файлы не больше 64 МиБ. Разница длин попадает
+/// в `unverified_bytes`, а не маскируется под совпадение.
+fn compare_pair(expected: &str, actual: &str) -> Option<VerifyReport> {
+    let ea = std::fs::read(expected).ok()?;
+    let ab = std::fs::read(actual).ok()?;
+    let compared = ea.len().min(ab.len());
+    let different = ea
+        .iter()
+        .zip(ab.iter())
+        .filter(|(a, b)| a != b)
+        .count() as u64;
+    let unverified = ea.len().abs_diff(ab.len()) as u64;
+    let verdict = if different == 0 && unverified == 0 {
+        "match"
+    } else if different > 0 {
+        "mismatch"
+    } else {
+        "partial"
+    };
+    Some(VerifyReport {
+        expected_path: expected.to_string(),
+        actual_path: actual.to_string(),
+        expected_sha256: crate::models::util::sha256_hex(&ea),
+        actual_sha256: crate::models::util::sha256_hex(&ab),
+        compared_bytes: compared as u64,
+        different_bytes: different,
+        unverified_bytes: unverified,
+        verdict: verdict.to_string(),
+    })
+}
+
+/// Для каждой записи найти контрольное чтение после неё и сверить файлы.
+///
+/// Связка — по времени: чтение должно начаться после конца записи (допуск 1 с).
+/// Если чтения в сессии нет, `verify` остаётся `None` — это честное «не проверено».
+fn attach_verify(doc: &mut OperationsDoc) {
+    let n = doc.operations.len();
+    let mut plans: Vec<(usize, String, String)> = Vec::new();
+    for i in 0..n {
+        if doc.operations[i].action != ACTION_WRITE || doc.operations[i].files.is_empty() {
+            continue;
+        }
+        let t1 = doc.operations[i].t1;
+        let expected = doc.operations[i].files[0].clone();
+        let actual = doc
+            .operations
+            .iter()
+            .skip(i + 1)
+            .find(|o| o.action == ACTION_READ && o.t0 >= t1 - 1.0 && !o.files.is_empty())
+            .map(|o| o.files[0].clone());
+        if let Some(actual) = actual {
+            plans.push((i, expected, actual));
+        }
+    }
+    for (i, expected, actual) in plans {
+        doc.operations[i].verify = compare_pair(&expected, &actual);
+    }
+}
+
 /// Собрать операции из событий, участков обмена и анализа сигналов.
 pub fn build(events: &[Event], meta: &SessionMeta, analysis: &ScopeAnalysis) -> OperationsDoc {
     // Порядок — по времени, а не по seq: поздняя пачка моста несёт ранние `t`.
@@ -509,6 +590,7 @@ pub fn build(events: &[Event], meta: &SessionMeta, analysis: &ScopeAnalysis) -> 
                     .into(),
             );
         }
+        attach_verify(&mut doc);
         doc.seed_pairs = count_seed_pairs(&doc.operations);
         return doc;
     }
@@ -604,6 +686,7 @@ pub fn build(events: &[Event], meta: &SessionMeta, analysis: &ScopeAnalysis) -> 
         global_pairs.extend(seed_pairs_full(&op, &bucket[i]));
         doc.operations.push(op);
     }
+    attach_verify(&mut doc);
     doc.seed_pairs = global_pairs.len() as u64;
     doc.notes.sort();
     doc.notes.dedup();
@@ -662,6 +745,7 @@ fn derived_operation(
         milestones: Vec::new(),
         signals: signals_for(None, &[], seg.t0, seg.t1, analysis),
         files: Vec::new(),
+        verify: None,
         result: OperationResult::default(),
         notes: vec![
             "границы операции выведены из обмена, а не из действия программы — предположительно"
@@ -770,6 +854,7 @@ fn build_operation(
             analysis,
         ),
         files: Vec::new(),
+        verify: None,
         result: OperationResult::default(),
         notes,
     };
@@ -1804,5 +1889,31 @@ mod tests {
         assert_eq!(doc.operations.len(), 1);
         assert_eq!(doc.operations[0].origin, "derived");
         assert!(doc.operations[0].notes[0].contains("предположительно"));
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+
+    #[test]
+    fn compare_pair_matches_and_reports_differences() {
+        let dir = std::env::temp_dir().join(format!("ftdi-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("expected.bin");
+        let b = dir.join("actual.bin");
+        std::fs::write(&a, [1u8, 2, 3, 4]).unwrap();
+        std::fs::write(&b, [1u8, 2, 3, 4]).unwrap();
+        let m = compare_pair(a.to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert_eq!(m.verdict, "match");
+        assert_eq!(m.different_bytes, 0);
+        assert_eq!(m.unverified_bytes, 0);
+        assert_eq!(m.compared_bytes, 4);
+        std::fs::write(&b, [1u8, 9, 3]).unwrap();
+        let m2 = compare_pair(a.to_str().unwrap(), b.to_str().unwrap()).unwrap();
+        assert_eq!(m2.verdict, "mismatch");
+        assert_eq!(m2.different_bytes, 1);
+        assert_eq!(m2.unverified_bytes, 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

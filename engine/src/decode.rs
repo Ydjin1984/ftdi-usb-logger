@@ -2175,6 +2175,72 @@ fn hash_written_files(events: &[&Event]) -> Vec<FileHash> {
 
 /// Ключ гистограммы LAN: для DoIP — тип сообщения (и UDS-сервис внутри diagnostic
 /// message), иначе протокол + удалённый адрес (`TCP 192.168.1.10:7777`).
+/// Файлы, которые инструмент прочитал целиком во время шага: входной образ записи.
+///
+/// `FILE open` содержит путь и `handle`, а `FILE read` — только `h/off/len/total`
+/// (docs/11 §8), поэтому путь берётся из последнего `open` с тем же handle.
+/// Хэшируются только полные чтения (`len == total`) не меньше `MIN_IMAGE_BYTES`,
+/// чтобы не тащить в `filehash` конфиги и DLL. Причина: у этапа записи в экспорте
+/// не было хэша входного BIN, и связать файл с операцией было нельзя.
+fn hash_read_files(events: &[&Event]) -> Vec<FileHash> {
+    const HASH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+    const MIN_IMAGE_BYTES: u64 = 64 * 1024;
+    let mut paths: std::collections::HashMap<String, String> = Default::default();
+    let mut out: Vec<FileHash> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    for ev in events {
+        if ev.kind != EventKind::File {
+            continue;
+        }
+        let handle = ev
+            .meta
+            .get("handle")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if ev.api == "FILE open" {
+            if let Some(path) = ev.meta.get("path").and_then(Value::as_str) {
+                if !handle.is_empty() && !path.is_empty() {
+                    paths.insert(handle, path.to_string());
+                }
+            }
+            continue;
+        }
+        if ev.api != "FILE read" || handle.is_empty() {
+            continue;
+        }
+        let Some(path) = paths.get(&handle).cloned() else {
+            continue;
+        };
+        let len = ev.meta.get("len").and_then(Value::as_u64).unwrap_or(0);
+        let total = ev.meta.get("total").and_then(Value::as_u64).unwrap_or(0);
+        // Только полное чтение файла-образа: частичные чтения и мелкие файлы пропускаем.
+        if len == 0 || len != total || len < MIN_IMAGE_BYTES {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let meta = std::fs::metadata(&path);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(total);
+        let (sha256, mode) = match meta {
+            Ok(m) if m.is_file() && size <= HASH_MAX_BYTES => match std::fs::read(&path) {
+                Ok(data) => (sha256_hex(&data), "read".to_string()),
+                Err(_) => (String::new(), "unreadable".to_string()),
+            },
+            Ok(_) => (String::new(), "too-big".to_string()),
+            Err(_) => (String::new(), "gone".to_string()),
+        };
+        out.push(FileHash {
+            path,
+            size,
+            sha256,
+            mode,
+        });
+    }
+    out
+}
+
 fn lan_hist_key(ev: &Event) -> String {
     if let Some(f) = doip_frame(&ev.payload()) {
         if let Some(uds) = f.uds {
@@ -2779,6 +2845,12 @@ pub fn summarize_step(
     summary.filehash = read_file_hashes(&slice);
     // Файлы, записанные инструментом в этом шаге: дамп PCMflash и т.п.
     for fh in hash_written_files(&slice) {
+        if !summary.filehash.iter().any(|f| f.path == fh.path) {
+            summary.filehash.push(fh);
+        }
+    }
+    // Файлы, прочитанные инструментом целиком: входной образ записи (хэш до записи).
+    for fh in hash_read_files(&slice) {
         if !summary.filehash.iter().any(|f| f.path == fh.path) {
             summary.filehash.push(fh);
         }
